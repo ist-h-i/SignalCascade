@@ -5,75 +5,92 @@
 ## 1. あなたへの依頼
 
 あなたは時系列予測・Quant ML・threshold calibration・multi-stage policy 設計に強い reviewer です。
-この handoff では、`SignalCascade` の現行 workspace と 2026-03-25 JST に freshly rerun した replay diagnostics を前提に、次の 3 点を判断してほしいです。
+この handoff では、`/Users/inouehiroshi/Documents/GitHub/SignalCascade` の clean `HEAD` と、既存の replay diagnostics artifact を前提に、次の 4 点を判断してほしいです。
 
-- 現在の dirty diff が cheap diagnostic lever として十分か
-- `proposed_horizon` / `accepted_horizon` / `selected_horizon` / threshold provenance の設計がまだ危ういか
-- replay の次に回すべき 3 実験を cheap / information gain 順に rank すると何か
+- 現在の `proposal / acceptance` schema split が reviewer / downstream consumer に十分明確か
+- 既存 diagnostics artifact がまだ旧 schema のため、次の実験順位付けより先に freshness rerun を挟むべきか
+- `accepted_signal=0` の主因が、現時点でも strict gate ではなく upstream candidate scarcity と見てよいか
+- 追加で打つべきコマンドを cheap / information gain 順に 3 本 rank すると何か
 
-一般論ではなく、このファイルに書いた code diff・artifact・metrics・commands を根拠に答えてください。
+一般論ではなく、このファイルに書いた commit・コード・artifact 数値・実行コマンドを根拠に答えてください。
 
 ## 2. ゴール
 
-- stale artifact 上の `accepted_signal=0` が、現在はどこまで分解できたかを確認する
-- current bottleneck が `strict gate` ではなく upstream candidate scarcity なのかを sanity-check する
-- replay のあとに `edge_correctness_product` 追加 replay、`h={1,3}` + `consistency_loss=0` smoke retrain、`cost / delta / eta` sweep のどれを先に回すべきかを決める
+- `86f97b2 Clarify proposal and acceptance diagnostics semantics` の着地が妥当かを sanity-check する
+- current code と既存 diagnostics artifact のズレが、次判断の blocker かどうかを決める
+- freshness rerun 後に何を先に回すべきかを rank する
 
 ## 3. 現状の重要観測
 
 ### A. Confirmed facts
 
 - Workspace は `/Users/inouehiroshi/Documents/GitHub/SignalCascade`、branch は `main` です。
-- `git log main..HEAD` は空で、未取り込み commit はありません。
-- 現在の working tree は dirty で、未コミット変更は 10 ファイルです。
-- dirty diff は主に次を追加しています。
-  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/policy_service.py`
-    - `build_replay_selection_policy()`
-    - `proposed_horizon`, `accepted_horizon`
-    - `threshold_status`, `threshold_origin`, `threshold_score_source`
-    - stored policy 非互換時の replay-calibrated threshold 利用
+- evidence 収集開始時の `git status --short` は空で、working tree は clean でした。
+- `git log main..HEAD` は空で、`HEAD` に `main` 未取り込み commit はありません。
+- recent commits は次です。
+  - `86f97b2 Clarify proposal and acceptance diagnostics semantics`
+  - `b34cce2 Add no-candidate policy diagnostics and review handoff`
+  - `b114890 Add review diagnostics and formula regression tests`
+  - `29545c1 Refine PyTorch training metrics and threshold calibration`
+  - `8ac505d Add research report generation for training artifacts`
+- `git show --stat --summary --oneline HEAD` では、今回の主変更は次です。
   - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/diagnostics_service.py`
-    - `no_strict_candidate_count`
-    - `candidate_but_no_strict_count`
-    - `threshold_status_counts`
-    - `build_validation_snapshots()`
+    - summary を `proposed_row_count` / `accepted_row_count` 主体へ寄せる
+    - run-level `threshold_status`, `stored_threshold_compatibility`, `selection_threshold_mode_requested/resolved` を追加
+    - `threshold_scan.csv` を `accepted_count_at_tau`, `proposal_coverage`, `anchor_coverage` へ寄せる実装を追加
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/policy_service.py`
+    - `threshold_status` を `ready | missing | infeasible` ベースへ整理
+    - `stored_threshold_compatibility` を分離
+    - `selection_thresholds.origin=validation_replay` を維持
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/domain/entities.py`
+    - `PredictionResult.selected_horizon` を field ではなく read-side property alias に変更
+    - writer 側の `prediction.json` / `forecast_summary.json` から `selected_horizon` を落とせる状態
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/training_service.py`
+    - `proposal_count`, `accepted_count`, `proposal_coverage`, `acceptance_precision`, `acceptance_coverage`
+    - `value_per_anchor`, `value_per_proposed`, `value_per_accepted`
+    - `selector_head_brier_score`
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/report_service.py`
+    - report 表示を `proposal / acceptance` 命名へ寄せる
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/bootstrap.py`
+    - `export-diagnostics` summary に requested/resolved threshold mode を渡す
   - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/interfaces/cli.py`
     - `--diagnostics-output-dir`
     - `--selection-threshold-mode {auto,stored,replay,none}`
-  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/bootstrap.py`
-    - `export-diagnostics` が artifact dir と diagnostics dir を分離
-    - `auto` / `replay` 時に validation replay-calibration を使える
-  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/training_service.py`
-    - `acceptance_precision`
-    - `value_per_anchor`, `value_per_proposed`
-    - `selector_head_brier_score`
-    - `acceptance_score_source`
-  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/report_service.py`
-    - forecast に `proposed_horizon`, `accepted_horizon`, `threshold_status`, `threshold_origin` を表示
-  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/domain/entities.py`
-    - prediction schema に stage/provenance 項目を追加
   - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/tests/test_policy_training.py`
-    - `config_mismatch`
-    - `validation_replay` origin
-    - `no_candidate`
-    - `selection_score_below_threshold`
-- 検証として次を実行済みです。
-  - `python3 -m compileall PyTorch/src/signal_cascade_pytorch`
-  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m unittest discover -s PyTorch/tests -p 'test_policy_training.py'`
-- stale artifact で確認済みの旧症状は次です。
-  - artifact: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke`
-  - validation anchors: `266`
-  - old `selected_row_count=266`
-  - `accepted_signal=0`
+    - `selected_horizon` alias が write-side に出ないことを固定
+    - `ready` / `missing` + `stored_threshold_compatibility` を固定
+- current `HEAD` に対して、次の検証を実行し成功しています。
+  - `PyTorch/.venv/bin/python -m compileall PyTorch/src`
+  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m unittest PyTorch.tests.test_policy_training`
+  - 結果: `Ran 10 tests ... OK`
+
+### B. 既存 artifact から確認できる数値
+
+#### baseline artifact
+
+- artifact: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke`
+- `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke/validation_summary.json`
+  - `selected_row_count=266`
+  - `threshold_scan_source=validation_selected_rows`
+- `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke/metrics.json`
+  - `selection_precision=0.0`
   - `selection_support=0`
-  - `selection_threshold_missing=266`
-  - `selector_probability_below_threshold=0`
+  - `coverage_at_target_precision=0.0`
   - `actionable_edge_rate=0.041353383458646614`
-- 2026-03-25 JST に、以下 3 本の replay diagnostics を fresh 実行しました。
-  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m signal_cascade_pytorch.interfaces.cli export-diagnostics --output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke --diagnostics-output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_selector_probability --selection-threshold-mode auto --allow-no-candidate --selection-score-source selector_probability`
-  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m signal_cascade_pytorch.interfaces.cli export-diagnostics --output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke --diagnostics-output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_correctness_probability --selection-threshold-mode auto --allow-no-candidate --selection-score-source correctness_probability`
-  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m signal_cascade_pytorch.interfaces.cli export-diagnostics --output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke --diagnostics-output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_actionable_edge --selection-threshold-mode auto --allow-no-candidate --selection-score-source actionable_edge`
-- 3 本の replay で共通して観測された数値は次です。
+  - `best_selection_lcb=0.0`
+  - `support_at_best_lcb=8.0`
+  - `precision_at_best_lcb=0.0`
+  - `tau_at_best_lcb=0.21013891952988573`
+  - `selection_brier_score=0.2482326997130845`
+
+#### replay diagnostics artifact
+
+- 既存 replay artifact は次の 3 本です。
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_selector_probability`
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_correctness_probability`
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_actionable_edge`
+- 3 本に共通して `validation_summary.json` から読める数値は次です。
+  - `anchor_sample_count=266`
   - `proposed_row_count=30`
   - `selected_row_count=30`
   - `accepted_row_count=0`
@@ -82,10 +99,9 @@
   - `candidate_but_no_strict_count=0`
   - `any_candidate_rate=0.11278195488721804`
   - `any_strict_candidate_rate=0.11278195488721804`
-  - `threshold_scan_source=policy_calibration:validation_replay`
   - `threshold_origin=validation_replay`
+  - `threshold_scan_source=policy_calibration:validation_replay`
   - `threshold_status_counts={"infeasible": 266}`
-- つまり、fresh replay 後は `selection_threshold_missing` ではなく `validation_replay` provenance 付きの `infeasible` に置き換わり、candidate funnel は見えるようになりました。
 - source ごとの best threshold row は次です。
   - `selector_probability`
     - `tau=0.316361621015634`
@@ -111,68 +127,80 @@
     - `lcb=0.6666666666666666`
     - `feasible=False`
     - `coverage=0.06666666666666667`
-- selector baseline の horizon diagnostics では次が見えています。
+- `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_selector_probability/horizon_diag.csv`
   - `h=1 candidate_rate=0.08270676691729323`
-  - `h=3 candidate_rate=0.041353383458646614`
-  - `h=6 candidate_rate=0.0`
   - `h=1 strict_candidate_rate=0.08270676691729323`
+  - `h=1 selected_rate=0.08270676691729323`
+  - `h=3 candidate_rate=0.041353383458646614`
   - `h=3 strict_candidate_rate=0.041353383458646614`
+  - `h=3 selected_rate=0.03007518796992481`
+  - `h=6 candidate_rate=0.0`
   - `h=6 strict_candidate_rate=0.0`
   - `h=6 selected_rate=0.0`
 
-### B. Working hypotheses
+### C. freshness gap に関する confirmed fact
 
-- `accepted_signal=0` の一番大きい理由は、少なくとも現在の replay 上では threshold semantics そのものより `candidate scarcity` です。
-- `strict gate` は今の replay ではほぼ差分を作っていません。`candidate_but_no_strict_count=0` なので、`strict` を緩めても初手の情報利得は低い可能性があります。
-- `selection_score_source` を変えると rank quality は少し変わりますが、support 不足は崩れていません。`actionable_edge` は best `lcb` が一番高い一方、coverage は still thin です。
-- `h=6` は現状 dead weight である可能性が高いです。ただしこれが model/loss の問題か label/cost 設計の問題かは replay だけでは切れません。
-- stage 分離は前進しましたが、`selected_horizon` を `proposed_horizon` の backward-compatible alias として残している点は、なお reviewer に sanity-check してほしいです。
-- `realized_return=0` を abstain に入れる設計は `per-anchor` utility では自然ですが、`per-proposed` / `per-accepted` 系の読み方が十分に分離できているかは未確信です。
+- current `HEAD` code は新 schema を writer 側に実装していますが、既存 artifact はまだ旧 schema のままです。
+- 具体例:
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_selector_probability/validation_summary.json`
+    - まだ `selected_row_count` と `threshold_status_counts` を含む
+    - `threshold_status`, `stored_threshold_compatibility`, `selection_threshold_mode_requested/resolved` は未反映
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_selector_probability/threshold_scan.csv`
+    - header は `tau,selected_count,success_count,precision,lcb,feasible,coverage`
+    - current code が intended writer として持つ `accepted_count_at_tau`, `success_count_at_tau`, `precision_at_tau`, `proposal_coverage`, `anchor_coverage` は未反映
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_selector_probability/horizon_diag.csv`
+    - `selected_rate` が残っており、`proposed_rate` はない
+
+### D. Working hypotheses
+
+- 既存 artifact の数値だけを見る限り、現ボトルネックは strict gate ではなく upstream candidate scarcity です。
+- `candidate_but_no_strict_count=0`、かつ horizon 別でも candidate / strict candidate が一致しているため、strict gate 緩和の初手価値は低い可能性があります。
+- `selector_probability` / `correctness_probability` / `actionable_edge` の並べ替えだけでは support shortage は崩れていません。
+- `h=6` は current evidence では dead weight に見えますが、fresh rerun 後も同じかは未確認です。
+- current code が schema を直しても artifact が stale のままだと、reviewer が naming 問題と bottleneck 問題を混同する恐れがあります。
+- したがって、次実験の順位付け前に「freshness rerun を 3 本入れるか」を reviewer に先に判断してもらう価値があります。
 
 ## 4. レビューしてほしい論点
 
-### 論点 1: stage separation と naming / schema
+### 論点 1: freshness rerun は experiment ranking の前提条件か
 
-- `proposed_horizon` / `accepted_horizon` を入れましたが、`selected_horizon` を alias のまま残しています。
-- この構成で reviewer 視点に十分明確ですか。
-- それとも `selected_horizon` を完全に廃止し、`proposal` と `execution` の 2 段だけにしたほうが事故が減りますか。
-- もし rename するなら、どのファイルから先に直すべきかも示してください。
+- current code は `proposal / acceptance` schema に進んでいますが、既存 diagnostics artifact は旧 schema のままです。
+- reviewer として、まず replay diagnostics を現 `HEAD` で rerun してから議論すべきですか。
+- それとも、既存 artifact の数値だけでも「candidate scarcity が主因」という判断と次実験の rough ranking は可能ですか。
 
-### 論点 2: threshold provenance と `selection-threshold-mode`
+### 論点 2: schema / naming はここで止めてよいか
 
-- `predict` / live path は stored-policy fail-closed のままです。
-- `export-diagnostics` は `--selection-threshold-mode auto` で、config mismatch なら validation replay-calibration に落とします。
-- この split は妥当ですか。
-- さらに `threshold_status` を `stored_compatible | config_mismatch | missing | infeasible | disabled` のように増やすべきですか。
-- `threshold_origin` / `threshold_score_source` / compatibility hash のどこまで必要かも判断してほしいです。
+- `PredictionResult.selected_horizon` は field ではなく property alias です。
+- writer 側は `proposed_horizon` / `accepted_horizon` へ寄せています。
+- この read-side alias だけ残す形で十分ですか。
+- それとも `selected_*` をさらに purge して、CLI flag や legacy metric 名も追加で整理したほうがよいですか。
 
-### 論点 3: metric meaning の分離
+### 論点 3: threshold semantics の責務分離は十分か
 
-- いまは `selector_head_brier_score` と `acceptance_precision` を分けました。
-- ただし `selection_precision` など旧名称も残っており、report / metrics schema が二重化しています。
-- `return_per_anchor` / `return_per_proposed` / `return_per_accepted` の粒度まで強制的に寄せるべきか、現状で十分かを見てください。
-- non-probability score source に対して calibration metric をどう扱うべきかも確認したいです。
+- current code では `threshold_status` と `stored_threshold_compatibility` を分離しています。
+- reviewer として、この split で十分ですか。
+- あるいは `disabled | missing | infeasible` の扱い、`threshold_origin`, `selection_threshold_mode_requested/resolved`, compatibility fingerprint まで追加すべきですか。
 
-### 論点 4: 次の実験順序
+### 論点 4: next 3 commands をどう rank するか
 
-- fresh replay 後の現状では、`strict gate` より `candidate scarcity` が支配的に見えます。
-- この前提で、次の候補を cheap / information gain 順に rank してください。
-  - `edge_correctness_product` を 4 本目の replay に追加
-  - `h={1,3}` + `consistency_loss=0` の smoke retrain
+- 候補は次です。
+  - current `HEAD` で既存 3 replay diagnostics を fresh rerun
+  - `edge_correctness_product` の 4 本目 replay
+  - `h={1,3}` + `consistency_loss=0` smoke retrain
   - `cost_scale=0.75`
   - `delta_scale=eta_scale=0.75`
-  - `cost + delta/eta` の combined sweep
-- 可能なら「まず打つ 3 コマンド」を exact command level で返してください。
+  - `cost + delta/eta` combined sweep
+- reviewer には、cheap / high-information gain 順に top 3 を rank してほしいです。
+- 可能なら exact command も返してください。
 
-### 論点 5: h6 の扱い
+### 論点 5: h6 を次 smoke から落としてよいか
 
-- replay 上では `h=6 candidate_rate=0.0` です。
-- この時点で `h=6` を切る判断は早すぎますか。
-- それとも `h={1,3}` retrain はもはや cheap enough な第一候補ですか。
+- 既存 artifact では `h=6 candidate_rate=0.0`, `strict_candidate_rate=0.0`, `selected_rate=0.0` です。
+- `h={1,3}` retrain を第一候補に上げてよいか、fresh rerun 後まで待つべきかを判断してください。
 
 ## 5. 参照ファイル / アーティファクト
 
-コード:
+### コード
 
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/policy_service.py`
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/diagnostics_service.py`
@@ -185,14 +213,12 @@
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/domain/entities.py`
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/tests/test_policy_training.py`
 
-baseline artifact:
+### 既存 artifact
 
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke/validation_summary.json`
+- `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke/metrics.json`
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke/selection_policy.json`
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke/research_report.md`
-
-fresh replay artifacts:
-
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_selector_probability/validation_summary.json`
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_selector_probability/threshold_scan.csv`
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_selector_probability/horizon_diag.csv`
@@ -200,6 +226,26 @@ fresh replay artifacts:
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_correctness_probability/threshold_scan.csv`
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_actionable_edge/validation_summary.json`
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_actionable_edge/threshold_scan.csv`
+
+### 実行済みコマンド
+
+- current `HEAD` で実行済み
+  - `git status --short`
+  - `git diff --stat`
+  - `git log --oneline -5`
+  - `git show --stat --summary --oneline HEAD`
+  - `git log --oneline main..HEAD`
+  - `PyTorch/.venv/bin/python -m compileall PyTorch/src`
+  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m unittest PyTorch.tests.test_policy_training`
+- 既存 replay artifact に対応する過去コマンド
+  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m signal_cascade_pytorch.interfaces.cli export-diagnostics --output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke --diagnostics-output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_selector_probability --selection-threshold-mode auto --allow-no-candidate --selection-score-source selector_probability`
+  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m signal_cascade_pytorch.interfaces.cli export-diagnostics --output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke --diagnostics-output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_correctness_probability --selection-threshold-mode auto --allow-no-candidate --selection-score-source correctness_probability`
+  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m signal_cascade_pytorch.interfaces.cli export-diagnostics --output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke --diagnostics-output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_actionable_edge --selection-threshold-mode auto --allow-no-candidate --selection-score-source actionable_edge`
+- 未実行の candidate commands
+  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m signal_cascade_pytorch.interfaces.cli export-diagnostics --output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke --diagnostics-output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_selector_probability_head --selection-threshold-mode auto --allow-no-candidate --selection-score-source selector_probability`
+  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m signal_cascade_pytorch.interfaces.cli export-diagnostics --output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke --diagnostics-output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_correctness_probability_head --selection-threshold-mode auto --allow-no-candidate --selection-score-source correctness_probability`
+  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m signal_cascade_pytorch.interfaces.cli export-diagnostics --output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke --diagnostics-output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_actionable_edge_head --selection-threshold-mode auto --allow-no-candidate --selection-score-source actionable_edge`
+  - `PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m signal_cascade_pytorch.interfaces.cli export-diagnostics --output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke --diagnostics-output-dir /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/research_shrink_smoke_diag_edge_correctness_product_head --selection-threshold-mode auto --allow-no-candidate --selection-score-source edge_correctness_product`
 
 ## 6. 期待する出力形式
 
@@ -211,16 +257,17 @@ fresh replay artifacts:
 4. cheap / high-information gain な次アクション 3 件
 5. 必要なら metrics / schema / CLI の修正提案
 
-各 finding について、可能なら次も含めてください。
+各 finding では、可能なら次も含めてください。
 
 - severity
 - risky な理由
 - どのファイルをどう直すとよいか
-- replay で足りるか、retrain が必要か
+- replay で足りるか、fresh rerun / retrain が必要か
 
 ## 7. 制約
 
 - live chat transcript には依存せず、この handoff だけで判断してください
-- 一般論ではなく、上記の code diff と artifact 数値を根拠にしてください
-- 「まずどの 3 コマンドを打つべきか」を必ず rank してください
-- 数式の全面再証明は不要です。今回は semantics、metric meaning、validation freshness、next experiment ordering を重視してください
+- current `HEAD` code と既存 artifact のズレを明示的に考慮してください
+- 確認済みの事実と仮説を分けて書いてください
+- 「まず打つ 3 コマンド」を必ず rank してください
+- 数式の全面再証明は不要です。今回は schema semantics、validation freshness、threshold provenance、next experiment ordering を重視してください

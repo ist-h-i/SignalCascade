@@ -68,13 +68,6 @@ type MetricPoint = {
   validationOverlay: number
 }
 
-type ScenarioSegment = {
-  title: string
-  summary: string
-  fromStep: number
-  toStep: number
-}
-
 type DashboardData = {
   generatedAt: string
   instrument: string
@@ -135,7 +128,6 @@ type DashboardData = {
     title: string
     summary: string
     bullets: string[]
-    segments: ScenarioSegment[]
   }
 }
 
@@ -251,10 +243,6 @@ function App() {
     expectedReturnPct: row.expectedReturnPct,
     actualReturnPct: row.actualReturnPct ?? 0,
   }))
-  const relatedSegments = data.narrative.segments.filter(
-    (segment) => segment.fromStep === selectedForecast.horizon || segment.toStep === selectedForecast.horizon,
-  )
-  const selectedFlowSummary = buildHorizonFlowSummary(selectedForecast, relatedSegments)
   const reuseNarrative = buildReuseNarrative({
     trustScore,
     directionalAccuracy,
@@ -449,89 +437,47 @@ function App() {
         transition={{ duration: 0.6, delay: 0.1, ease: 'easeOut' }}
       >
         <div className="analysis-grid__stack">
-          <section className="surface surface--horizon-flow">
+          <section className="surface">
             <div className="surface__head">
               <div>
                 <p className="surface__eyebrow">Horizons</p>
-                <h2>時間軸と時間帯の見通し</h2>
+                <h2>時間軸の見通し</h2>
               </div>
-              <p className="surface__hint">比較で差をつかみ、その下で時間帯ごとの流れを続けて読めます。</p>
+              <p className="surface__hint">各時間軸の中心予測とレンジ幅を同じスケールで見比べます。</p>
             </div>
-            <div className="horizon-flow">
-              <div className="horizon-flow__compare">
-                <div className="horizon-flow__label">
-                  <span>比較</span>
-                  <p>各時間軸の中心予測とレンジ幅を同じスケールで見比べます。</p>
-                </div>
-                <div className="horizon-list">
-                  {data.horizons.map((row) => (
-                    <article className={`horizon-item${row.horizon === data.run.selectedHorizon ? ' is-selected' : ''}`} key={row.horizon}>
-                      <div className="horizon-item__meta">
-                        <strong>{row.hours}時間先</strong>
-                        <span>中心予測</span>
-                      </div>
-                      <div className="horizon-item__content">
-                        <div className="horizon-item__summary">
-                          <span className={`horizon-item__delta ${row.expectedReturnPct >= 0 ? 'is-up' : 'is-down'}`}>{formatSignedPercent(row.expectedReturnPct)}</span>
-                          <p>{describeExpectedMove(row.expectedReturnPct, row.hours)}</p>
-                        </div>
-                        <div className="horizon-item__range">
-                          <div
-                            className="horizon-item__band"
-                            style={{
-                              left: `${normalizeRange(row.lowerClose, chartYDomain)}%`,
-                              width: `${normalizeRange(row.upperClose, chartYDomain) - normalizeRange(row.lowerClose, chartYDomain)}%`,
-                            }}
-                          />
-                          <div
-                            className="horizon-item__point"
-                            style={{ left: `${normalizeRange(row.predictedClose, chartYDomain)}%` }}
-                          />
-                        </div>
-                        <div className="horizon-item__facts">
-                          <span>不確実性 {getUncertaintyScore(row.uncertainty, data.horizons)} / 100 {getUncertaintyLabel(getUncertaintyScore(row.uncertainty, data.horizons))}</span>
-                          <span>予測幅 {(((row.upperClose - row.lowerClose) / data.run.anchorClose) * 100).toFixed(2)}%</span>
-                          {getHorizonActualLabel(row) ? <span>{getHorizonActualLabel(row)}</span> : null}
-                        </div>
-                      </div>
-                    </article>
-                  ))}
-                </div>
-              </div>
-
-              <div className="horizon-flow__story">
-                <div className="horizon-flow__label">
-                  <span>Flow</span>
-                  <p>選択中の時間軸と連動する流れを、補助帯として下段にまとめています。</p>
-                </div>
-                <div className="segment-track" aria-label="時間帯ごとの流れ">
-                  {data.narrative.segments.map((segment, index) => {
-                    const isLinked =
-                      segment.fromStep === selectedForecast.horizon || segment.toStep === selectedForecast.horizon
-
-                    return (
-                      <article
-                        key={segment.title}
-                        className={`segment-block${isLinked ? ' is-linked' : ''}`}
-                        aria-current={isLinked ? 'true' : undefined}
-                      >
-                        <div className="segment-block__index">{String(index + 1).padStart(2, '0')}</div>
-                        <div className="segment-block__body">
-                          <div className="segment-block__head">
-                            <strong>{segment.title}</strong>
-                            <span className={`segment-block__badge ${getSegmentTone(segment.summary)}`}>{getSegmentLabel(segment.summary)}</span>
-                          </div>
-                          <p>{segment.summary}</p>
-                        </div>
-                      </article>
-                    )
-                  })}
-                </div>
-                <div className="horizon-flow__summary">
-                  <span>選択中の要点</span>
-                  <p>{selectedFlowSummary}</p>
-                </div>
-              </div>
+            <div className="horizon-list">
+              {data.horizons.map((row) => (
+                <article className={`horizon-item${row.horizon === data.run.selectedHorizon ? ' is-selected' : ''}`} key={row.horizon}>
+                  <div className="horizon-item__meta">
+                    <strong>{row.hours}時間先</strong>
+                    <span>中心予測</span>
+                  </div>
+                  <div className="horizon-item__content">
+                    <div className="horizon-item__summary">
+                      <span className={`horizon-item__delta ${row.expectedReturnPct >= 0 ? 'is-up' : 'is-down'}`}>{formatSignedPercent(row.expectedReturnPct)}</span>
+                      <p>{describeExpectedMove(row.expectedReturnPct, row.hours)}</p>
+                    </div>
+                    <div className="horizon-item__range">
+                      <div
+                        className="horizon-item__band"
+                        style={{
+                          left: `${normalizeRange(row.lowerClose, chartYDomain)}%`,
+                          width: `${normalizeRange(row.upperClose, chartYDomain) - normalizeRange(row.lowerClose, chartYDomain)}%`,
+                        }}
+                      />
+                      <div
+                        className="horizon-item__point"
+                        style={{ left: `${normalizeRange(row.predictedClose, chartYDomain)}%` }}
+                      />
+                    </div>
+                    <div className="horizon-item__facts">
+                      <span>不確実性 {getUncertaintyScore(row.uncertainty, data.horizons)} / 100 {getUncertaintyLabel(getUncertaintyScore(row.uncertainty, data.horizons))}</span>
+                      <span>予測幅 {(((row.upperClose - row.lowerClose) / data.run.anchorClose) * 100).toFixed(2)}%</span>
+                      {getHorizonActualLabel(row) ? <span>{getHorizonActualLabel(row)}</span> : null}
+                    </div>
+                  </div>
+                </article>
+              ))}
             </div>
           </section>
         </div>
@@ -963,38 +909,6 @@ function translateMetricName(value?: string): string {
     default:
       return value ?? ''
   }
-}
-
-function getSegmentTone(summary: string): string {
-  if (summary.includes('上向')) {
-    return 'segment-block__badge--lift'
-  }
-  if (summary.includes('横ばい')) {
-    return 'segment-block__badge--flat'
-  }
-  return 'segment-block__badge--soft'
-}
-
-function getSegmentLabel(summary: string): string {
-  if (summary.includes('上向')) {
-    return '上向き'
-  }
-  if (summary.includes('横ばい')) {
-    return '横ばい'
-  }
-  return '下向き'
-}
-
-function buildHorizonFlowSummary(selectedForecast: HorizonRow, relatedSegments: ScenarioSegment[]): string {
-  if (relatedSegments.length === 0) {
-    return `${selectedForecast.hours}時間先は${formatSignedPercent(selectedForecast.expectedReturnPct)}で、単独の時間軸として確認します。`
-  }
-
-  const flowSummary = relatedSegments
-    .map((segment) => `${segment.title}は${segment.summary.replace(/。$/, '')}`)
-    .join('、')
-
-  return `${selectedForecast.hours}時間先は${formatSignedPercent(selectedForecast.expectedReturnPct)}で、${flowSummary}流れです。`
 }
 
 function describeExpectedMove(expectedReturnPct: number, hours: number): string {
