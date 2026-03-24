@@ -53,6 +53,10 @@ def build_default_policy(config: TrainingConfig) -> dict[str, object]:
             "global": None,
             "by_horizon": {str(horizon): None for horizon in config.horizons},
             "by_regime": {},
+            "scan": {
+                "global": [],
+                "by_horizon": {},
+            },
             "meta": {
                 "global": _empty_threshold_meta(),
                 "by_horizon": {},
@@ -347,6 +351,16 @@ def _augment_snapshot(
         and selection_threshold is not None
         and float(selected_row["selector_probability"]) >= float(selection_threshold)
     )
+    reject_flags = {
+        "actionable_sign_zero": int(selected_row["actionable_sign"]) == 0,
+        "actionable_edge_non_positive": float(selected_row["actionable_edge"]) <= 0.0,
+        "direction_alignment_false": not direction_alignment,
+        "selection_threshold_missing": selection_threshold is None,
+        "selector_probability_below_threshold": (
+            selection_threshold is not None
+            and float(selected_row["selector_probability"]) < float(selection_threshold)
+        ),
+    }
     raw_position = pre_threshold_position if accepted_signal else 0.0
     overlay_probability = float(snapshot["overlay_probability"])
     overlay_action = "hold" if overlay_probability >= hold_threshold else "reduce"
@@ -370,6 +384,8 @@ def _augment_snapshot(
         "overlay_action": overlay_action,
         "expected_direction": expected_direction,
         "direction_alignment": direction_alignment,
+        "accept_reject_reason": _accept_reject_reason(accepted_signal, reject_flags),
+        "reject_flags": reject_flags,
         "meta_label": int(
             int(selected_row["predicted_sign"]) != 0
             and int(selected_row["predicted_sign"]) == int(selected_row["true_direction"])
@@ -476,6 +492,10 @@ def _build_selection_thresholds(
         "global": global_bundle["threshold"],
         "by_horizon": {str(horizon): None for horizon in config.horizons},
         "by_regime": {},
+        "scan": {
+            "global": global_bundle["scan"],
+            "by_horizon": {},
+        },
         "meta": {
             "global": global_bundle["meta"],
             "by_horizon": {},
@@ -604,7 +624,7 @@ def _calibrate_threshold(
     config: TrainingConfig,
 ) -> dict[str, object]:
     if not records:
-        return {"threshold": None, "meta": _empty_threshold_meta()}
+        return {"threshold": None, "meta": _empty_threshold_meta(), "scan": []}
 
     candidates = sorted({float(record["score"]) for record in records})
     best_candidate: dict[str, object] | None = None
@@ -616,21 +636,41 @@ def _calibrate_threshold(
         "precision_lcb": 0.0,
         "coverage": 0.0,
     }
+    scan_rows: list[dict[str, object]] = []
 
     for threshold in candidates:
         selected = [record for record in records if float(record["score"]) >= threshold]
         selected_count = len(selected)
+        success_count = sum(int(record["target"]) for record in selected)
+        precision = success_count / selected_count if selected_count > 0 else 0.0
+        precision_lcb = (
+            _precision_lower_bound(
+                success_count,
+                selected_count,
+                config.precision_confidence_z,
+            )
+            if selected_count > 0
+            else 0.0
+        )
+        coverage = selected_count / len(records) if records else 0.0
+        feasible = (
+            selected_count >= config.selection_min_support
+            and precision_lcb >= config.precision_target
+        )
+        scan_rows.append(
+            {
+                "tau": threshold,
+                "selected_count": selected_count,
+                "success_count": success_count,
+                "precision": precision,
+                "lcb": precision_lcb,
+                "feasible": feasible,
+                "coverage": coverage,
+            }
+        )
         if selected_count < config.selection_min_support:
             continue
 
-        success_count = sum(int(record["target"]) for record in selected)
-        precision = success_count / selected_count
-        precision_lcb = _precision_lower_bound(
-            success_count,
-            selected_count,
-            config.precision_confidence_z,
-        )
-        coverage = selected_count / len(records)
         if (
             precision_lcb > float(best_lcb_candidate["precision_lcb"])
             or (
@@ -685,6 +725,7 @@ def _calibrate_threshold(
                     else float(best_lcb_candidate["threshold"])
                 ),
             },
+            "scan": scan_rows,
         }
 
     return {
@@ -704,6 +745,7 @@ def _calibrate_threshold(
                 None if best_lcb_candidate["threshold"] is None else float(best_lcb_candidate["threshold"])
             ),
         },
+        "scan": scan_rows,
     }
 
 
@@ -772,6 +814,25 @@ def _precision_lower_bound(success_count: int, total_count: int, z_score: float)
         + (z2 / (4.0 * (total_count**2)))
     )
     return max(0.0, (centre - margin) / denominator)
+
+
+def _accept_reject_reason(
+    accepted_signal: bool,
+    reject_flags: dict[str, bool],
+) -> str:
+    if accepted_signal:
+        return "accepted"
+    if reject_flags["actionable_sign_zero"]:
+        return "actionable_sign_zero"
+    if reject_flags["actionable_edge_non_positive"]:
+        return "actionable_edge_non_positive"
+    if reject_flags["direction_alignment_false"]:
+        return "direction_alignment_false"
+    if reject_flags["selection_threshold_missing"]:
+        return "selection_threshold_missing"
+    if reject_flags["selector_probability_below_threshold"]:
+        return "selector_probability_below_threshold"
+    return "rejected"
 
 
 def _sign_agreement(predicted_signs: Sequence[int], current_sign: int) -> float:

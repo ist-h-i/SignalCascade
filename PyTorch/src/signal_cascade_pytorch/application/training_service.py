@@ -130,7 +130,7 @@ def train_model(
     output_dir: Path,
 ) -> tuple[SignalCascadeModel, dict[str, object]]:
     _set_seed(config.seed)
-    train_examples, valid_examples = _split_examples(examples, config)
+    train_examples, valid_examples = split_examples(examples, config)
     feature_dim = len(examples[0].main_sequences["4h"][0])
     model, fit_summary = _fit_model(train_examples, valid_examples, config, feature_dim)
     save_checkpoint(output_dir / "model.pt", model, config)
@@ -413,6 +413,13 @@ def evaluate_model(
     }
 
 
+def split_examples(
+    examples: Sequence[TrainingExample],
+    config: TrainingConfig,
+) -> tuple[list[TrainingExample], list[TrainingExample]]:
+    return _split_examples(examples, config)
+
+
 def _fit_model(
     train_examples: Sequence[TrainingExample],
     valid_examples: Sequence[TrainingExample],
@@ -460,8 +467,12 @@ def _fit_model(
                 "validation_return": valid_metrics["return_loss"],
                 "train_direction": train_metrics["direction_loss"],
                 "validation_direction": valid_metrics["direction_loss"],
+                "train_shape": train_metrics["shape_loss"],
+                "validation_shape": valid_metrics["shape_loss"],
                 "train_overlay": train_metrics["overlay_loss"],
                 "validation_overlay": valid_metrics["overlay_loss"],
+                "train_consistency": train_metrics["consistency_loss"],
+                "validation_consistency": valid_metrics["consistency_loss"],
             }
         )
         if valid_metrics["total"] < best_validation_loss:

@@ -88,7 +88,7 @@ Directional balance `chi_t` は
 
 `g_t = tanh(w_u u_{t-1} + w_b b_{t-1} + w_l l_{t-1} + bias)`
 
-を計算します。初期 shape は `(0, 0, 0)` です。
+を計算します。既定値では `bias = 0.0` なので、明示的に上書きしない限り `tanh` の入力は 3 項の線形結合です。初期 shape は `(0, 0, 0)` です。
 
 ### 3.5 Additive Close Anchor
 
@@ -230,6 +230,8 @@ main MAE threshold は
 `denom = sigma_t * sqrt(h) + 1e-6`
 
 `excess = max(abs(target_return) - c_h, 0) / denom`
+
+ここで `sqrt(h)` を掛けるのは、realized volatility を horizon 長に応じたスケールへ揃え、return head で使う `scale_h` と同じ基準にそろえるためです。
 
 `w = 1 + clean_weight_return_scale * excess`
 
@@ -586,6 +588,8 @@ threshold を適用する前の `pre_threshold_eligible` と、そのときの `
 `raw_position = tanh(position_scale * mu_selected / sigma_selected)`
 
 をベースにし、accept されなければ `0`、最終ポジションは
+
+実装では `sigma_selected` をそのまま割らず、`max(sigma_selected, 1e-6)` を分母に使って極小分散時の不安定化を防ぎます。
 
 `position = raw_position * hold_probability`
 

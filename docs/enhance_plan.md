@@ -691,9 +691,9 @@ P(o_t=1\mid X_t^{\mathrm{ov}})
 \frac{1}{N}
 \sum_{t,h}
 \left[
-\frac{\mathrm{Huber}(r_{t,h}-\mu_{t,h})}{\sigma_{t,h}+\varepsilon}
+\frac{\mathrm{Huber}(r_{t,h}-\mu_{t,h})}{\sigma_{t,h}^2+\varepsilon}
 +
-\log(\sigma_{t,h}+\varepsilon)
+\log(\sigma_{t,h})
 \right]
 ]
 
@@ -1018,4 +1018,3 @@ OOF 予測
    [
    a_t=\mathbf{1}[s_{t,h_t^\star}\ge \tau_{z_t,h_t^\star}]
    ]
-

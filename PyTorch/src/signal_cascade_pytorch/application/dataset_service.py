@@ -182,9 +182,14 @@ def _build_examples(
         regime = _build_regime(anchor_row.timestamp, realized_volatility, baseline_volatility, trend_strength)
 
         returns_target: list[float] = []
+        long_mae_values: list[float] = []
+        short_mae_values: list[float] = []
+        long_mfe_values: list[float] = []
+        short_mfe_values: list[float] = []
         direction_targets: list[int] = []
         direction_weights: list[float] = []
         direction_thresholds: list[float] = []
+        direction_mae_thresholds: list[float] = []
         horizon_costs: list[float] = []
 
         for horizon in config.horizons:
@@ -224,9 +229,14 @@ def _build_examples(
             )
 
             returns_target.append(target_return)
+            long_mae_values.append(long_mae)
+            short_mae_values.append(short_mae)
+            long_mfe_values.append(long_mfe)
+            short_mfe_values.append(short_mfe)
             direction_targets.append(direction_target)
             direction_weights.append(weight)
             direction_thresholds.append(delta)
+            direction_mae_thresholds.append(eta)
             horizon_costs.append(cost)
 
         if len(returns_target) != len(config.horizons):
@@ -248,9 +258,14 @@ def _build_examples(
                 overlay_sequences=overlay_sequences,
                 main_shape_targets=main_shape_targets,
                 returns_target=tuple(returns_target),
+                long_mae=tuple(long_mae_values),
+                short_mae=tuple(short_mae_values),
+                long_mfe=tuple(long_mfe_values),
+                short_mfe=tuple(short_mfe_values),
                 direction_targets=tuple(direction_targets),
                 direction_weights=tuple(direction_weights),
                 direction_thresholds=tuple(direction_thresholds),
+                direction_mae_thresholds=tuple(direction_mae_thresholds),
                 horizon_costs=tuple(horizon_costs),
                 overlay_target=overlay_target,
                 current_close=anchor_row.close,
@@ -319,10 +334,18 @@ def _build_latest_example(
             overlay_sequences=overlay_sequences,
             main_shape_targets=main_shape_targets,
             returns_target=tuple(0.0 for _ in config.horizons),
+            long_mae=tuple(0.0 for _ in config.horizons),
+            short_mae=tuple(0.0 for _ in config.horizons),
+            long_mfe=tuple(0.0 for _ in config.horizons),
+            short_mfe=tuple(0.0 for _ in config.horizons),
             direction_targets=tuple(0 for _ in config.horizons),
             direction_weights=tuple(1.0 for _ in config.horizons),
             direction_thresholds=tuple(
                 _main_move_threshold(config, horizon, realized_volatility, regime)
+                for horizon in config.horizons
+            ),
+            direction_mae_thresholds=tuple(
+                _main_mae_threshold(config, horizon, realized_volatility, regime)
                 for horizon in config.horizons
             ),
             horizon_costs=tuple(config.cost_for_horizon(horizon) for horizon in config.horizons),

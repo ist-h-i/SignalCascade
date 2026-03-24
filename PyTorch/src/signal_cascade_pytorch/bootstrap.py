@@ -4,6 +4,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .application.config import TrainingConfig
+from .application.diagnostics_service import export_review_diagnostics
 from .application.dataset_service import (
     build_latest_inference_example,
     build_latest_inference_example_from_bars,
@@ -53,6 +54,17 @@ def train_command(args) -> int:
     save_json(output_dir / "metrics.json", summary)
     save_json(output_dir / "selection_policy.json", selection_policy)
     save_json(output_dir / "prediction.json", asdict(prediction))
+    export_review_diagnostics(
+        output_dir=output_dir,
+        model=model,
+        examples=examples,
+        config=config,
+        selection_policy=selection_policy,
+        source_payload=source_payload,
+        source_rows_original=source_rows_original,
+        source_rows_used=source_rows_used,
+        base_bars=base_bars if source_payload["kind"] == "csv" else None,
+    )
     generate_research_report(output_dir)
 
     print(f"trained samples: {summary['train_samples']}")
@@ -100,6 +112,54 @@ def predict_command(args) -> int:
     print(f"selection probability: {prediction.selection_probability:.4f}")
     print(f"position: {prediction.position:.4f}")
     print(f"overlay action: {prediction.overlay_action}")
+    return 0
+
+
+def export_diagnostics_command(args) -> int:
+    output_dir = Path(args.output_dir)
+    config = TrainingConfig.from_dict(load_json(output_dir / "config.json"))
+    source_payload = _resolve_source_payload(args, output_dir)
+    source = _create_data_source(source_payload)
+    source_rows_original = None
+    source_rows_used = None
+    base_bars = None
+
+    if source_payload["kind"] == "csv":
+        base_bars = source.load_bars()
+        source_rows_original = len(base_bars)
+        base_bars = limit_base_bars_to_lookback_days(base_bars, source_payload.get("lookback_days"))
+        source_rows_used = len(base_bars)
+        examples = build_training_examples_from_bars(base_bars, config)
+    else:
+        examples = build_training_examples(source, config)
+
+    feature_dim = len(examples[0].main_sequences["4h"][0])
+    model = SignalCascadeModel(
+        feature_dim=feature_dim,
+        hidden_dim=config.hidden_dim,
+        num_horizons=len(config.horizons),
+        dropout=config.dropout,
+    )
+    load_checkpoint(output_dir / "model.pt", model)
+    selection_policy_path = output_dir / "selection_policy.json"
+    selection_policy = load_json(selection_policy_path) if selection_policy_path.exists() else None
+    summary = export_review_diagnostics(
+        output_dir=output_dir,
+        model=model,
+        examples=examples,
+        config=config,
+        selection_policy=selection_policy,
+        source_payload=source_payload,
+        source_rows_original=source_rows_original,
+        source_rows_used=source_rows_used,
+        base_bars=base_bars,
+    )
+
+    print(f"validation rows: {output_dir / 'validation_rows.csv'}")
+    print(f"threshold scan: {output_dir / 'threshold_scan.csv'}")
+    print(f"horizon diagnostics: {output_dir / 'horizon_diag.csv'}")
+    print(f"summary: {output_dir / 'validation_summary.json'}")
+    print(f"validation selected rows: {summary['validation']['selected_row_count']}")
     return 0
 
 

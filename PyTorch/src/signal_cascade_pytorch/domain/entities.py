@@ -33,9 +33,14 @@ class TrainingExample:
     overlay_sequences: dict[str, list[FeatureVector]]
     main_shape_targets: dict[str, ShapeVector]
     returns_target: tuple[float, ...]
+    long_mae: tuple[float, ...]
+    short_mae: tuple[float, ...]
+    long_mfe: tuple[float, ...]
+    short_mfe: tuple[float, ...]
     direction_targets: tuple[int, ...]
     direction_weights: tuple[float, ...]
     direction_thresholds: tuple[float, ...]
+    direction_mae_thresholds: tuple[float, ...]
     horizon_costs: tuple[float, ...]
     overlay_target: int
     current_close: float

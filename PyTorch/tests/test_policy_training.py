@@ -37,9 +37,14 @@ def _example(
         overlay_sequences=overlay_sequences,
         main_shape_targets=main_shape_targets,
         returns_target=returns_target,
+        long_mae=tuple(0.0 for _ in returns_target),
+        short_mae=tuple(0.0 for _ in returns_target),
+        long_mfe=tuple(0.0 for _ in returns_target),
+        short_mfe=tuple(0.0 for _ in returns_target),
         direction_targets=direction_targets,
         direction_weights=direction_weights,
         direction_thresholds=direction_thresholds,
+        direction_mae_thresholds=tuple(0.0 for _ in returns_target),
         horizon_costs=horizon_costs,
         overlay_target=0,
         current_close=100.0,
@@ -121,6 +126,7 @@ class PolicyAndTrainingTests(unittest.TestCase):
         self.assertIn("precision_at_best_lcb", meta)
         self.assertIn("tau_at_best_lcb", meta)
         self.assertGreaterEqual(float(meta["best_selection_lcb"]), 0.0)
+        self.assertTrue(bundle["scan"])
 
     def test_return_standardization_round_trips_to_raw_units(self) -> None:
         config = TrainingConfig(horizons=(1, 4), standardized_return_clip=6.0)
@@ -141,6 +147,67 @@ class PolicyAndTrainingTests(unittest.TestCase):
         self.assertAlmostEqual(float(restored_mean[0, 0]), 0.01, places=6)
         self.assertAlmostEqual(float(restored_mean[0, 1]), 0.02, places=6)
         self.assertGreater(float(restored_sigma[0, 0]), 0.0)
+
+    def test_accept_reject_reason_reports_missing_threshold(self) -> None:
+        config = TrainingConfig(horizons=(1,))
+        policy = build_default_policy(config)
+        snapshot = {
+            "anchor_time": "2026-03-24T00:00:00+00:00",
+            "regime_id": "asia|low|range",
+            "regime_features": [1.0, 0.0, 0.0, 0.0, 0.0],
+            "realized_volatility": 0.02,
+            "trend_strength": 0.1,
+            "overlay_target": 0,
+            "overlay_probability": 0.8,
+            "horizons": [
+                {
+                    "horizon": 1,
+                    "mean": 0.03,
+                    "sigma": 0.01,
+                    "cost": 0.005,
+                    "predicted_sign": 1,
+                    "true_return": 0.03,
+                    "true_direction": 1,
+                    "direction_probabilities": [0.1, 0.1, 0.8],
+                }
+            ],
+        }
+
+        decision = _augment_snapshot(snapshot, policy, config)
+
+        self.assertEqual(decision["accept_reject_reason"], "selection_threshold_missing")
+        self.assertTrue(decision["reject_flags"]["selection_threshold_missing"])
+
+    def test_accept_reject_reason_reports_selector_below_threshold(self) -> None:
+        config = TrainingConfig(horizons=(1,))
+        policy = build_default_policy(config)
+        policy["selection_thresholds"]["global"] = 0.6
+        snapshot = {
+            "anchor_time": "2026-03-24T00:00:00+00:00",
+            "regime_id": "asia|low|range",
+            "regime_features": [1.0, 0.0, 0.0, 0.0, 0.0],
+            "realized_volatility": 0.02,
+            "trend_strength": 0.1,
+            "overlay_target": 0,
+            "overlay_probability": 0.8,
+            "horizons": [
+                {
+                    "horizon": 1,
+                    "mean": 0.03,
+                    "sigma": 0.01,
+                    "cost": 0.005,
+                    "predicted_sign": 1,
+                    "true_return": 0.03,
+                    "true_direction": 1,
+                    "direction_probabilities": [0.1, 0.1, 0.8],
+                }
+            ],
+        }
+
+        decision = _augment_snapshot(snapshot, policy, config)
+
+        self.assertEqual(decision["accept_reject_reason"], "selector_probability_below_threshold")
+        self.assertTrue(decision["reject_flags"]["selector_probability_below_threshold"])
 
 
 if __name__ == "__main__":

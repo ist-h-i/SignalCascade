@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import argparse
 
-from ..bootstrap import predict_command, train_command, tune_latest_command
+from ..bootstrap import export_diagnostics_command, predict_command, train_command, tune_latest_command
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -47,6 +47,15 @@ def build_parser() -> argparse.ArgumentParser:
     predict_parser.add_argument("--csv-lookback-days", type=int, default=None)
     predict_parser.set_defaults(handler=predict_command)
 
+    export_parser = subparsers.add_parser(
+        "export-diagnostics",
+        help="Export validation rows and threshold diagnostics from an existing artifact directory.",
+    )
+    export_parser.add_argument("--output-dir", default="artifacts/demo")
+    export_parser.add_argument("--csv", default=None, help="Override the data source with a CSV file.")
+    export_parser.add_argument("--csv-lookback-days", type=int, default=None)
+    export_parser.set_defaults(handler=export_diagnostics_command)
+
     tune_parser = subparsers.add_parser(
         "tune-latest",
         help="Tune on the latest CSV, publish the best run to current, and archive the others.",
@@ -82,3 +91,7 @@ def main() -> None:
     parser = build_parser()
     args = parser.parse_args()
     raise SystemExit(args.handler(args))
+
+
+if __name__ == "__main__":
+    main()
