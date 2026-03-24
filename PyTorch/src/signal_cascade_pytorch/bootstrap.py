@@ -4,9 +4,16 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .application.config import TrainingConfig
-from .application.dataset_service import build_training_examples
-from .application.inference_service import predict_latest
+from .application.dataset_service import (
+    build_latest_inference_example,
+    build_latest_inference_example_from_bars,
+    build_training_examples,
+    build_training_examples_from_bars,
+    trim_base_bars_for_latest_inference,
+)
+from .application.inference_service import predict_from_example, predict_latest
 from .application.training_service import train_model
+from .application.tuning_service import tune_latest_dataset
 from .infrastructure.data.csv_source import CsvMarketDataSource
 from .infrastructure.data.synthetic_source import SyntheticMarketDataSource
 from .infrastructure.ml.model import SignalCascadeModel
@@ -18,12 +25,25 @@ def train_command(args) -> int:
     output_dir = ensure_directory(Path(config.output_dir))
     source_payload = _build_source_payload(args, config)
     source = _create_data_source(source_payload)
-    examples = build_training_examples(source, config)
+    source_rows_original = None
+    source_rows_used = None
+
+    if source_payload["kind"] == "csv":
+        base_bars = source.load_bars()
+        source_rows_original = len(base_bars)
+        source_rows_used = len(base_bars)
+        examples = build_training_examples_from_bars(base_bars, config)
+    else:
+        examples = build_training_examples(source, config)
+
     model, summary = train_model(examples, config, output_dir)
     prediction = predict_latest(model, examples, config)
 
     summary["sample_count"] = len(examples)
     summary["source"] = source_payload
+    if source_rows_original is not None and source_rows_used is not None:
+        summary["source_rows_original"] = source_rows_original
+        summary["source_rows_used"] = source_rows_used
     save_json(output_dir / "config.json", config.to_dict())
     save_json(output_dir / "source.json", source_payload)
     save_json(output_dir / "metrics.json", summary)
@@ -32,6 +52,8 @@ def train_command(args) -> int:
     print(f"trained samples: {summary['train_samples']}")
     print(f"validation samples: {summary['validation_samples']}")
     print(f"best validation loss: {summary['best_validation_loss']:.6f}")
+    print(f"validation utility score: {summary['validation_metrics']['utility_score']:.6f}")
+    print(f"validation directional accuracy: {summary['validation_metrics']['directional_accuracy']:.4f}")
     print(f"latest overlay action: {prediction.overlay_action}")
     return 0
 
@@ -41,8 +63,15 @@ def predict_command(args) -> int:
     config = TrainingConfig.from_dict(load_json(output_dir / "config.json"))
     source_payload = _resolve_source_payload(args, output_dir)
     source = _create_data_source(source_payload)
-    examples = build_training_examples(source, config)
-    feature_dim = len(examples[0].main_sequences["4h"][0])
+
+    if source_payload["kind"] == "csv":
+        base_bars = source.load_bars()
+        trimmed_bars = trim_base_bars_for_latest_inference(base_bars, config)
+        latest_example = build_latest_inference_example_from_bars(trimmed_bars, config)
+    else:
+        latest_example = build_latest_inference_example(source, config)
+
+    feature_dim = len(latest_example.main_sequences["4h"][0])
     model = SignalCascadeModel(
         feature_dim=feature_dim,
         hidden_dim=config.hidden_dim,
@@ -50,12 +79,30 @@ def predict_command(args) -> int:
         dropout=config.dropout,
     )
     load_checkpoint(output_dir / "model.pt", model)
-    prediction = predict_latest(model, examples, config)
+    prediction = predict_from_example(model, latest_example, config)
     save_json(output_dir / "prediction.json", asdict(prediction))
 
     print(f"selected horizon: {prediction.selected_horizon}")
     print(f"position: {prediction.position:.4f}")
     print(f"overlay action: {prediction.overlay_action}")
+    return 0
+
+
+def tune_latest_command(args) -> int:
+    artifact_root = Path(args.artifact_root).expanduser().resolve()
+    csv_path = (
+        Path(args.csv).expanduser().resolve()
+        if args.csv
+        else artifact_root / "live" / "xauusd_m30_latest.csv"
+    )
+    manifest = tune_latest_dataset(csv_path=csv_path, artifact_root=artifact_root, seed=args.seed)
+    best_candidate = manifest["best_candidate"]
+
+    print(f"current run dir: {manifest['current_dir']}")
+    print(f"archive session dir: {manifest['archive_session_dir']}")
+    print(f"best validation loss: {best_candidate['best_validation_loss']:.6f}")
+    print(f"best utility score: {best_candidate['utility_score']:.6f}")
+    print(f"selected horizon: {best_candidate['selected_horizon']}")
     return 0
 
 
@@ -66,7 +113,9 @@ def _build_config(args) -> TrainingConfig:
         epochs=args.epochs,
         batch_size=args.batch_size,
         learning_rate=args.learning_rate,
+        weight_decay=getattr(args, "weight_decay", 1e-4),
         hidden_dim=args.hidden_dim,
+        dropout=getattr(args, "dropout", 0.1),
         output_dir=args.output_dir,
     )
 

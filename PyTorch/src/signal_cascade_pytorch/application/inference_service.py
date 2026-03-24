@@ -16,8 +16,15 @@ def predict_latest(
     examples: list[TrainingExample],
     config: TrainingConfig,
 ) -> PredictionResult:
-    latest_example = examples[-1]
-    batch = examples_to_batch([latest_example])
+    return predict_from_example(model, examples[-1], config)
+
+
+def predict_from_example(
+    model: SignalCascadeModel,
+    example: TrainingExample,
+    config: TrainingConfig,
+) -> PredictionResult:
+    batch = examples_to_batch([example])
     model.eval()
     with torch.no_grad():
         outputs = model(batch["main"], batch["overlay"])
@@ -29,7 +36,7 @@ def predict_latest(
     selected_horizon = config.horizons[best_index]
     position = math.tanh(float((mean[best_index] / sigma[best_index]).item()))
     predicted_closes = {
-        str(horizon): latest_example.current_close * math.exp(float(mean[index].item()))
+        str(horizon): example.current_close * math.exp(float(mean[index].item()))
         for index, horizon in enumerate(config.horizons)
     }
     uncertainties = {
@@ -39,7 +46,7 @@ def predict_latest(
     overlay_index = int(outputs["overlay_logits"][0].argmax().item())
 
     return PredictionResult(
-        anchor_time=latest_example.anchor_time.isoformat(),
+        anchor_time=example.anchor_time.isoformat(),
         selected_horizon=selected_horizon,
         position=position,
         predicted_closes=predicted_closes,

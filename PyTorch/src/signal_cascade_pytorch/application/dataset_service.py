@@ -17,9 +17,93 @@ def build_training_examples(
     config: TrainingConfig,
 ) -> list[TrainingExample]:
     base_bars = sorted(source.load_bars(), key=lambda bar: bar.timestamp)
-    if len(base_bars) < 512:
-        raise ValueError("At least 512 base 30m bars are required to build a training set.")
+    return build_training_examples_from_bars(base_bars, config)
 
+
+def build_latest_inference_example(
+    source: MarketDataSource,
+    config: TrainingConfig,
+) -> TrainingExample:
+    base_bars = sorted(source.load_bars(), key=lambda bar: bar.timestamp)
+    return build_latest_inference_example_from_bars(base_bars, config)
+
+
+def build_training_examples_from_bars(
+    base_bars: list[OHLCVBar],
+    config: TrainingConfig,
+) -> list[TrainingExample]:
+    _validate_base_bars(base_bars, "training set")
+    features_by_timeframe = _build_features_by_timeframe(base_bars, config)
+    return _build_examples(features_by_timeframe, config)
+
+
+def build_latest_inference_example_from_bars(
+    base_bars: list[OHLCVBar],
+    config: TrainingConfig,
+) -> TrainingExample:
+    _validate_base_bars(base_bars, "inference example")
+    features_by_timeframe = _build_features_by_timeframe(base_bars, config)
+    return _build_latest_example(features_by_timeframe, config)
+
+
+def trim_base_bars_for_training(
+    base_bars: list[OHLCVBar],
+    config: TrainingConfig,
+    min_examples: int = 2,
+) -> list[OHLCVBar]:
+    _validate_base_bars(base_bars, "training set")
+
+    def is_valid(candidate: list[OHLCVBar]) -> bool:
+        return len(build_training_examples_from_bars(candidate, config)) >= min_examples
+
+    return _trim_base_bars(base_bars, is_valid)
+
+
+def trim_base_bars_for_latest_inference(
+    base_bars: list[OHLCVBar],
+    config: TrainingConfig,
+) -> list[OHLCVBar]:
+    _validate_base_bars(base_bars, "inference example")
+
+    def is_valid(candidate: list[OHLCVBar]) -> bool:
+        build_latest_inference_example_from_bars(candidate, config)
+        return True
+
+    return _trim_base_bars(base_bars, is_valid)
+
+
+def _trim_base_bars(
+    base_bars: list[OHLCVBar],
+    is_valid,
+) -> list[OHLCVBar]:
+    low = 1
+    high = len(base_bars)
+    best = list(base_bars)
+
+    while low <= high:
+        middle = (low + high) // 2
+        candidate = base_bars[-middle:]
+        try:
+            if not is_valid(candidate):
+                raise ValueError("Candidate did not satisfy the requested dataset constraints.")
+        except ValueError:
+            low = middle + 1
+            continue
+        best = candidate
+        high = middle - 1
+
+    return best
+
+
+def _validate_base_bars(base_bars: list[OHLCVBar], target_name: str) -> None:
+    if len(base_bars) < 512:
+        raise ValueError(f"At least 512 base 30m bars are required to build a {target_name}.")
+
+
+def _build_features_by_timeframe(
+    base_bars: list[OHLCVBar],
+    config: TrainingConfig,
+) -> dict[str, list[TimeframeFeatureRow]]:
     bars_by_timeframe = _build_bars_by_timeframe(base_bars)
     features_by_timeframe = {
         timeframe: build_close_anchor_features(
@@ -28,7 +112,7 @@ def build_training_examples(
         )
         for timeframe in ALL_TIMEFRAMES
     }
-    return _build_examples(features_by_timeframe, config)
+    return features_by_timeframe
 
 
 def _build_bars_by_timeframe(base_bars: list[OHLCVBar]) -> dict[str, list[OHLCVBar]]:
@@ -104,6 +188,56 @@ def _build_examples(
     return examples
 
 
+def _build_latest_example(
+    features_by_timeframe: dict[str, list[TimeframeFeatureRow]],
+    config: TrainingConfig,
+) -> TrainingExample:
+    timestamps = {
+        timeframe: [row.timestamp for row in rows]
+        for timeframe, rows in features_by_timeframe.items()
+    }
+    bars_4h = features_by_timeframe["4h"]
+
+    for idx_4h in range(len(bars_4h) - 1, -1, -1):
+        anchor_row = bars_4h[idx_4h]
+        main_sequences: dict[str, list[tuple[float, ...]]] = {}
+        overlay_sequences: dict[str, list[tuple[float, ...]]] = {}
+        main_shape_targets: dict[str, tuple[float, float, float]] = {}
+
+        if not _collect_main_sequences(
+            anchor_row.timestamp,
+            idx_4h,
+            features_by_timeframe,
+            timestamps,
+            config,
+            main_sequences,
+            main_shape_targets,
+            require_future_target=False,
+        ):
+            continue
+
+        if not _collect_overlay_sequences(
+            anchor_row.timestamp,
+            features_by_timeframe,
+            timestamps,
+            config,
+            overlay_sequences,
+        ):
+            continue
+
+        return TrainingExample(
+            anchor_time=anchor_row.timestamp,
+            main_sequences=main_sequences,
+            overlay_sequences=overlay_sequences,
+            main_shape_targets=main_shape_targets,
+            returns_target=tuple(0.0 for _ in config.horizons),
+            overlay_target=0,
+            current_close=anchor_row.close,
+        )
+
+    raise ValueError("No inference example could be constructed from the provided data.")
+
+
 def _collect_main_sequences(
     anchor_time,
     idx_4h: int,
@@ -112,17 +246,21 @@ def _collect_main_sequences(
     config: TrainingConfig,
     main_sequences: dict[str, list[tuple[float, ...]]],
     main_shape_targets: dict[str, tuple[float, float, float]],
+    require_future_target: bool = True,
 ) -> bool:
     for timeframe in MAIN_TIMEFRAMES:
         index = idx_4h if timeframe == "4h" else _latest_index(timestamps[timeframe], anchor_time)
         if index is None:
             return False
         window = config.main_windows[timeframe]
-        if index < window - 1 or index + 1 >= len(features_by_timeframe[timeframe]):
+        if index < window - 1:
+            return False
+        if require_future_target and index + 1 >= len(features_by_timeframe[timeframe]):
             return False
         rows = features_by_timeframe[timeframe][index - window + 1 : index + 1]
         main_sequences[timeframe] = [row.vector for row in rows]
-        main_shape_targets[timeframe] = features_by_timeframe[timeframe][index + 1].shape
+        shape_index = min(index + 1, len(features_by_timeframe[timeframe]) - 1)
+        main_shape_targets[timeframe] = features_by_timeframe[timeframe][shape_index].shape
     return True
 
 
