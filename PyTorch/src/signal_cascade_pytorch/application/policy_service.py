@@ -58,6 +58,7 @@ def build_default_policy(config: TrainingConfig) -> dict[str, object]:
         "selector_model": _constant_model(0.5, SELECTOR_FEATURE_NAMES),
         "selection_thresholds": {
             "scope": "global",
+            "origin": "stored_policy",
             "global": None,
             "by_horizon": {str(horizon): None for horizon in config.horizons},
             "by_regime": {},
@@ -167,11 +168,40 @@ def build_selection_policy(
     )
 
     selection_records = _build_selection_threshold_records(snapshots, policy, config)
-    policy["selection_thresholds"] = _build_selection_thresholds(selection_records, config)
+    policy["selection_thresholds"] = _build_selection_thresholds(
+        selection_records,
+        config,
+        anchor_count=len(snapshots),
+    )
     overlay_records = _build_overlay_threshold_records(snapshots, policy, config)
     policy["overlay_thresholds"] = _build_overlay_thresholds(overlay_records, config)
     policy["metrics"] = evaluate_policy_snapshots(policy, snapshots, config)
     return policy
+
+
+def build_replay_selection_policy(
+    policy: dict[str, object] | None,
+    snapshots: Sequence[dict[str, object]],
+    config: TrainingConfig,
+) -> dict[str, object]:
+    replay_policy = dict(policy or build_default_policy(config))
+    replay_policy["allow_no_candidate"] = bool(config.allow_no_candidate)
+    replay_policy["selection_score_source"] = str(config.selection_score_source)
+    selection_records = _build_selection_threshold_records(snapshots, replay_policy, config)
+    replay_policy["selection_thresholds"] = _build_selection_thresholds(
+        selection_records,
+        config,
+        anchor_count=len(snapshots),
+        origin="validation_replay",
+    )
+    return replay_policy
+
+
+def selection_thresholds_match_config(
+    policy: dict[str, object],
+    config: TrainingConfig,
+) -> bool:
+    return _selection_thresholds_match_config(policy, config)
 
 
 def apply_selection_policy(
@@ -341,6 +371,7 @@ def _augment_snapshot(
     candidate_rows = [row for row in rows if bool(row["candidate"])]
     strict_candidate_rows = [row for row in rows if bool(row["strict_candidate"])]
     selection_pool = candidate_rows if config.allow_no_candidate else rows
+    threshold_context = _selection_threshold_context(policy, config)
     selected_row = (
         max(
             selection_pool,
@@ -368,6 +399,8 @@ def _augment_snapshot(
         }
         return {
             "selected_row": None,
+            "proposed_horizon": None,
+            "accepted_horizon": None,
             "selected_horizon": None,
             "selected_direction": 0,
             "position": 0.0,
@@ -379,7 +412,13 @@ def _augment_snapshot(
             "selection_score": 0.0,
             "selection_score_source": str(config.selection_score_source),
             "selection_threshold": None,
-            "precision_infeasible": False,
+            "threshold_status": str(threshold_context["status"]),
+            "threshold_origin": str(threshold_context["origin"]),
+            "stored_threshold_compatibility": str(
+                threshold_context["stored_threshold_compatibility"]
+            ),
+            "threshold_score_source": str(threshold_context["score_source"]),
+            "precision_infeasible": str(threshold_context["status"]) == "infeasible",
             "correctness_probability": 0.0,
             "hold_probability": overlay_probability,
             "hold_threshold": hold_threshold,
@@ -397,11 +436,11 @@ def _augment_snapshot(
             "horizon_rows": rows,
         }
 
-    selection_threshold = _lookup_selection_threshold(
-        policy,
-        str(snapshot["regime_id"]),
-        int(selected_row["horizon"]),
-        config,
+    proposed_horizon = int(selected_row["horizon"])
+    selection_threshold = (
+        float(threshold_context["threshold"])
+        if threshold_context["threshold"] is not None
+        else None
     )
     expected_direction = _sign_from_return(float(selected_row["mean"]))
     direction_alignment = bool(selected_row["direction_alignment"])
@@ -433,13 +472,16 @@ def _augment_snapshot(
         ),
     }
     raw_position = pre_threshold_position if accepted_signal else 0.0
+    accepted_horizon = proposed_horizon if accepted_signal else None
     overlay_probability = float(snapshot["overlay_probability"])
     overlay_action = "hold" if overlay_probability >= hold_threshold else "reduce"
     position = raw_position * overlay_probability
 
     return {
         "selected_row": selected_row,
-        "selected_horizon": int(selected_row["horizon"]),
+        "proposed_horizon": proposed_horizon,
+        "accepted_horizon": accepted_horizon,
+        "selected_horizon": proposed_horizon,
         "selected_direction": int(selected_row["predicted_sign"]),
         "position": position,
         "raw_position": raw_position,
@@ -450,7 +492,13 @@ def _augment_snapshot(
         "selection_score": float(selected_row["selection_score"]),
         "selection_score_source": str(config.selection_score_source),
         "selection_threshold": selection_threshold,
-        "precision_infeasible": selection_threshold is None,
+        "threshold_status": str(threshold_context["status"]),
+        "threshold_origin": str(threshold_context["origin"]),
+        "stored_threshold_compatibility": str(
+            threshold_context["stored_threshold_compatibility"]
+        ),
+        "threshold_score_source": str(threshold_context["score_source"]),
+        "precision_infeasible": str(threshold_context["status"]) == "infeasible",
         "correctness_probability": float(selected_row["q"]),
         "hold_probability": overlay_probability,
         "hold_threshold": hold_threshold,
@@ -536,7 +584,7 @@ def _build_selection_threshold_records(
         records.append(
             {
                 "regime_id": str(snapshot["regime_id"]),
-                "horizon": int(augmented["selected_horizon"]),
+                "horizon": int(augmented["proposed_horizon"]),
                 "score": float(augmented["selection_score"]),
                 "target": int(augmented["meta_label"]),
             }
@@ -562,10 +610,13 @@ def _build_overlay_threshold_records(
 def _build_selection_thresholds(
     records: Sequence[dict[str, object]],
     config: TrainingConfig,
+    anchor_count: int,
+    origin: str = "stored_policy",
 ) -> dict[str, object]:
-    global_bundle = _calibrate_threshold(records, config)
+    global_bundle = _calibrate_threshold(records, config, anchor_count=anchor_count)
     return {
         "scope": "global",
+        "origin": str(origin),
         "score_source": str(config.selection_score_source),
         "allow_no_candidate": bool(config.allow_no_candidate),
         "global": global_bundle["threshold"],
@@ -598,10 +649,10 @@ def _lookup_selection_threshold(
     horizon: int,
     config: TrainingConfig,
 ) -> float | None:
-    if not _selection_thresholds_match_config(policy, config):
+    context = _selection_threshold_context(policy, config)
+    if context["threshold"] is None:
         return None
-    global_threshold = policy.get("selection_thresholds", {}).get("global")
-    return None if global_threshold is None else float(global_threshold)
+    return float(context["threshold"])
 
 
 def _lookup_overlay_threshold(
@@ -704,6 +755,7 @@ def _constant_model(
 def _calibrate_threshold(
     records: Sequence[dict[str, object]],
     config: TrainingConfig,
+    anchor_count: int,
 ) -> dict[str, object]:
     if not records:
         return {"threshold": None, "meta": _empty_threshold_meta(), "scan": []}
@@ -734,7 +786,8 @@ def _calibrate_threshold(
             if selected_count > 0
             else 0.0
         )
-        coverage = selected_count / len(records) if records else 0.0
+        proposal_coverage = selected_count / len(records) if records else 0.0
+        anchor_coverage = selected_count / max(anchor_count, 1)
         feasible = (
             selected_count >= config.selection_min_support
             and precision_lcb >= config.precision_target
@@ -742,12 +795,17 @@ def _calibrate_threshold(
         scan_rows.append(
             {
                 "tau": threshold,
+                "accepted_count_at_tau": selected_count,
+                "success_count_at_tau": success_count,
+                "precision_at_tau": precision,
+                "proposal_coverage": proposal_coverage,
+                "anchor_coverage": anchor_coverage,
                 "selected_count": selected_count,
                 "success_count": success_count,
                 "precision": precision,
                 "lcb": precision_lcb,
                 "feasible": feasible,
-                "coverage": coverage,
+                "coverage": proposal_coverage,
             }
         )
         if selected_count < config.selection_min_support:
@@ -766,7 +824,7 @@ def _calibrate_threshold(
                 "success_count": success_count,
                 "precision": precision,
                 "precision_lcb": precision_lcb,
-                "coverage": coverage,
+                "coverage": proposal_coverage,
             }
 
         if precision_lcb >= config.precision_target:
@@ -784,7 +842,7 @@ def _calibrate_threshold(
                     "success_count": success_count,
                     "precision": precision,
                     "precision_lcb": precision_lcb,
-                    "coverage": coverage,
+                    "coverage": proposal_coverage,
                 }
 
     if best_candidate is None:
@@ -798,6 +856,7 @@ def _calibrate_threshold(
                 "precision": float(best_lcb_candidate["precision"]),
                 "precision_lcb": float(best_lcb_candidate["precision_lcb"]),
                 "coverage": float(best_lcb_candidate["coverage"]),
+                "accepted_count": int(best_lcb_candidate["selected_count"]),
                 "best_selection_lcb": float(best_lcb_candidate["precision_lcb"]),
                 "support_at_best_lcb": int(best_lcb_candidate["selected_count"]),
                 "precision_at_best_lcb": float(best_lcb_candidate["precision"]),
@@ -820,6 +879,7 @@ def _calibrate_threshold(
             "precision": float(best_candidate["precision"]),
             "precision_lcb": float(best_candidate["precision_lcb"]),
             "coverage": float(best_candidate["coverage"]),
+            "accepted_count": int(best_candidate["selected_count"]),
             "best_selection_lcb": float(best_lcb_candidate["precision_lcb"]),
             "support_at_best_lcb": int(best_lcb_candidate["selected_count"]),
             "precision_at_best_lcb": float(best_lcb_candidate["precision"]),
@@ -873,6 +933,7 @@ def _empty_threshold_meta() -> dict[str, object]:
         "feasible": False,
         "records": 0,
         "selected_count": 0,
+        "accepted_count": 0,
         "success_count": 0,
         "precision": 0.0,
         "precision_lcb": 0.0,
@@ -946,6 +1007,56 @@ def _selection_thresholds_match_config(
         stored_score_source == str(config.selection_score_source)
         and stored_allow_no_candidate == bool(config.allow_no_candidate)
     )
+
+
+def _selection_threshold_context(
+    policy: dict[str, object] | None,
+    config: TrainingConfig,
+) -> dict[str, object]:
+    if policy is None:
+        return {
+            "threshold": None,
+            "status": "missing",
+            "origin": "none",
+            "stored_threshold_compatibility": "not_applicable",
+            "score_source": str(config.selection_score_source),
+        }
+
+    thresholds = dict(policy.get("selection_thresholds", {}))
+    stored_score_source = str(
+        thresholds.get("score_source", policy.get("selection_score_source", config.selection_score_source))
+    )
+    if not _selection_thresholds_match_config(policy, config):
+        return {
+            "threshold": None,
+            "status": "missing",
+            "origin": "none",
+            "stored_threshold_compatibility": "config_mismatch",
+            "score_source": stored_score_source,
+        }
+
+    origin = str(thresholds.get("origin", "stored_policy"))
+    threshold = thresholds.get("global")
+    if threshold is not None:
+        return {
+            "threshold": float(threshold),
+            "status": "ready",
+            "origin": origin,
+            "stored_threshold_compatibility": "compatible",
+            "score_source": stored_score_source,
+        }
+
+    global_meta = dict(thresholds.get("meta", {}).get("global", {}))
+    has_calibration_attempt = bool(global_meta.get("records", 0)) or (
+        global_meta.get("tau_at_best_lcb") is not None
+    )
+    return {
+        "threshold": None,
+        "status": "infeasible" if has_calibration_attempt else "missing",
+        "origin": origin,
+        "stored_threshold_compatibility": "compatible",
+        "score_source": stored_score_source,
+    }
 
 
 def _normalize_selection_threshold(threshold: float, config: TrainingConfig) -> float:

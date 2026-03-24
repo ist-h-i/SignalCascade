@@ -4,7 +4,7 @@ from dataclasses import asdict
 from pathlib import Path
 
 from .application.config import TrainingConfig
-from .application.diagnostics_service import export_review_diagnostics
+from .application.diagnostics_service import build_validation_snapshots, export_review_diagnostics
 from .application.dataset_service import (
     build_latest_inference_example,
     build_latest_inference_example_from_bars,
@@ -14,8 +14,9 @@ from .application.dataset_service import (
     trim_base_bars_for_latest_inference,
 )
 from .application.inference_service import predict_from_example, predict_latest
+from .application.policy_service import build_replay_selection_policy, selection_thresholds_match_config
 from .application.report_service import generate_research_report
-from .application.training_service import train_model
+from .application.training_service import split_examples, train_model
 from .application.tuning_service import tune_latest_dataset
 from .infrastructure.data.csv_source import CsvMarketDataSource
 from .infrastructure.data.synthetic_source import SyntheticMarketDataSource
@@ -70,8 +71,8 @@ def train_command(args) -> int:
     print(f"trained samples: {summary['train_samples']}")
     print(f"validation samples: {summary['validation_samples']}")
     print(f"best validation loss: {summary['best_validation_loss']:.6f}")
-    print(f"validation selection precision: {summary['validation_metrics']['selection_precision']:.4f}")
-    print(f"validation coverage@precision: {summary['validation_metrics']['coverage_at_target_precision']:.4f}")
+    print(f"validation acceptance precision: {summary['validation_metrics']['acceptance_precision']:.4f}")
+    print(f"validation acceptance coverage: {summary['validation_metrics']['acceptance_coverage']:.4f}")
     print(f"validation directional accuracy: {summary['validation_metrics']['directional_accuracy']:.4f}")
     print(f"validation project value score: {summary['validation_metrics']['project_value_score']:.4f}")
     print(f"latest accepted signal: {prediction.accepted_signal}")
@@ -107,7 +108,8 @@ def predict_command(args) -> int:
     prediction = predict_from_example(model, latest_example, config, selection_policy)
     save_json(output_dir / "prediction.json", asdict(prediction))
 
-    print(f"selected horizon: {prediction.selected_horizon}")
+    print(f"proposed horizon: {prediction.proposed_horizon}")
+    print(f"accepted horizon: {prediction.accepted_horizon}")
     print(f"accepted signal: {prediction.accepted_signal}")
     print(f"selection probability: {prediction.selection_probability:.4f}")
     print(f"position: {prediction.position:.4f}")
@@ -116,9 +118,14 @@ def predict_command(args) -> int:
 
 
 def export_diagnostics_command(args) -> int:
-    output_dir = Path(args.output_dir)
-    config = _load_config_with_overrides(output_dir, args)
-    source_payload = _resolve_source_payload(args, output_dir)
+    artifact_dir = Path(args.output_dir).expanduser().resolve()
+    diagnostics_output_dir = (
+        ensure_directory(Path(args.diagnostics_output_dir).expanduser().resolve())
+        if getattr(args, "diagnostics_output_dir", None)
+        else artifact_dir
+    )
+    config = _load_config_with_overrides(artifact_dir, args)
+    source_payload = _resolve_source_payload(args, artifact_dir)
     source = _create_data_source(source_payload)
     source_rows_original = None
     source_rows_used = None
@@ -140,26 +147,67 @@ def export_diagnostics_command(args) -> int:
         num_horizons=len(config.horizons),
         dropout=config.dropout,
     )
-    load_checkpoint(output_dir / "model.pt", model)
-    selection_policy_path = output_dir / "selection_policy.json"
-    selection_policy = load_json(selection_policy_path) if selection_policy_path.exists() else None
+    load_checkpoint(artifact_dir / "model.pt", model)
+    selection_policy_path = artifact_dir / "selection_policy.json"
+    stored_selection_policy = load_json(selection_policy_path) if selection_policy_path.exists() else None
+    selection_policy = stored_selection_policy
+    threshold_mode = str(getattr(args, "selection_threshold_mode", "auto"))
+    stored_threshold_compatibility = (
+        "compatible"
+        if stored_selection_policy is not None
+        and selection_thresholds_match_config(stored_selection_policy, config)
+        else "config_mismatch"
+        if stored_selection_policy is not None
+        else "not_applicable"
+    )
+    resolved_threshold_mode = "none"
+    if threshold_mode == "none":
+        selection_policy = None
+        resolved_threshold_mode = "none"
+    elif stored_selection_policy is not None and threshold_mode == "stored":
+        resolved_threshold_mode = "stored"
+    elif selection_policy is not None and threshold_mode in {"auto", "replay"}:
+        should_replay = threshold_mode == "replay" or not selection_thresholds_match_config(
+            selection_policy,
+            config,
+        )
+        if should_replay:
+            _, validation_examples = split_examples(examples, config)
+            validation_snapshots = build_validation_snapshots(model, validation_examples, config)
+            selection_policy = build_replay_selection_policy(
+                selection_policy,
+                validation_snapshots,
+                config,
+            )
+            resolved_threshold_mode = "replay"
+        else:
+            resolved_threshold_mode = "stored"
+    elif selection_policy is not None:
+        resolved_threshold_mode = "stored"
     summary = export_review_diagnostics(
-        output_dir=output_dir,
+        output_dir=diagnostics_output_dir,
         model=model,
         examples=examples,
         config=config,
         selection_policy=selection_policy,
+        threshold_resolution={
+            "selection_threshold_mode_requested": threshold_mode,
+            "selection_threshold_mode_resolved": resolved_threshold_mode,
+            "stored_threshold_compatibility": stored_threshold_compatibility,
+        },
         source_payload=source_payload,
         source_rows_original=source_rows_original,
         source_rows_used=source_rows_used,
         base_bars=base_bars,
     )
 
-    print(f"validation rows: {output_dir / 'validation_rows.csv'}")
-    print(f"threshold scan: {output_dir / 'threshold_scan.csv'}")
-    print(f"horizon diagnostics: {output_dir / 'horizon_diag.csv'}")
-    print(f"summary: {output_dir / 'validation_summary.json'}")
-    print(f"validation selected rows: {summary['validation']['selected_row_count']}")
+    print(f"artifact dir: {artifact_dir}")
+    print(f"diagnostics dir: {diagnostics_output_dir}")
+    print(f"validation rows: {diagnostics_output_dir / 'validation_rows.csv'}")
+    print(f"threshold scan: {diagnostics_output_dir / 'threshold_scan.csv'}")
+    print(f"horizon diagnostics: {diagnostics_output_dir / 'horizon_diag.csv'}")
+    print(f"summary: {diagnostics_output_dir / 'validation_summary.json'}")
+    print(f"validation proposed rows: {summary['validation']['proposed_row_count']}")
     return 0
 
 
@@ -183,9 +231,9 @@ def tune_latest_command(args) -> int:
     print(f"archive session dir: {manifest['archive_session_dir']}")
     print(f"best validation loss: {best_candidate['best_validation_loss']:.6f}")
     print(f"best project value score: {best_candidate['project_value_score']:.6f}")
-    print(f"best selection precision: {best_candidate['selection_precision']:.6f}")
-    print(f"best coverage@precision: {best_candidate['coverage_at_target_precision']:.6f}")
-    print(f"selected horizon: {best_candidate['selected_horizon']}")
+    print(f"best acceptance precision: {best_candidate['acceptance_precision']:.6f}")
+    print(f"best acceptance coverage: {best_candidate['acceptance_coverage']:.6f}")
+    print(f"best proposed horizon: {best_candidate['proposed_horizon']}")
     return 0
 
 

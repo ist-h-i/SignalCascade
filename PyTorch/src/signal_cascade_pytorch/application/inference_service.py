@@ -66,7 +66,8 @@ def predict_from_example(
     return PredictionResult(
         anchor_time=example.anchor_time.isoformat(),
         current_close=float(example.current_close),
-        selected_horizon=decision["selected_horizon"],
+        proposed_horizon=decision["proposed_horizon"],
+        accepted_horizon=decision["accepted_horizon"],
         selected_direction=decision["selected_direction"],
         position=float(decision["position"]),
         expected_log_returns=expected_log_returns,
@@ -80,6 +81,8 @@ def predict_from_example(
             if decision["selection_threshold"] is None
             else float(decision["selection_threshold"])
         ),
+        threshold_status=str(decision["threshold_status"]),
+        threshold_origin=str(decision["threshold_origin"]),
         correctness_probability=float(decision["correctness_probability"]),
         hold_probability=float(decision["hold_probability"]),
         hold_threshold=float(decision["hold_threshold"]),

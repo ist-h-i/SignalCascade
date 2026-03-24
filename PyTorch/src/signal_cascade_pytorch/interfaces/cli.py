@@ -82,8 +82,19 @@ def build_parser() -> argparse.ArgumentParser:
         help="Export validation rows and threshold diagnostics from an existing artifact directory.",
     )
     export_parser.add_argument("--output-dir", default="artifacts/demo")
+    export_parser.add_argument(
+        "--diagnostics-output-dir",
+        default=None,
+        help="Optional directory to write replay diagnostics without overwriting the source artifact.",
+    )
     export_parser.add_argument("--csv", default=None, help="Override the data source with a CSV file.")
     export_parser.add_argument("--csv-lookback-days", type=int, default=None)
+    export_parser.add_argument(
+        "--selection-threshold-mode",
+        choices=("auto", "stored", "replay", "none"),
+        default="auto",
+        help="How export-diagnostics resolves selection thresholds. Defaults to auto replay on config mismatch.",
+    )
     export_parser.add_argument(
         "--allow-no-candidate",
         action=argparse.BooleanOptionalAction,

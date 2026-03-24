@@ -54,7 +54,8 @@ class TrainingExample:
 class PredictionResult:
     anchor_time: str
     current_close: float
-    selected_horizon: int | None
+    proposed_horizon: int | None
+    accepted_horizon: int | None
     selected_direction: int
     position: float
     expected_log_returns: dict[str, float]
@@ -64,8 +65,15 @@ class PredictionResult:
     selection_probability: float
     selection_score: float
     selection_threshold: float | None
+    threshold_status: str
+    threshold_origin: str
     correctness_probability: float
     hold_probability: float
     hold_threshold: float
     overlay_action: str
     regime_id: str
+
+    @property
+    def selected_horizon(self) -> int | None:
+        # Deprecated read-side alias for older call sites.
+        return self.proposed_horizon

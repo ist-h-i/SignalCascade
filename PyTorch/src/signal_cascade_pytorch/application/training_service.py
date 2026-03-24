@@ -194,6 +194,7 @@ def evaluate_model(
     pre_threshold_abs_value_sum = 0.0
     horizon_counts = {str(horizon): 0 for horizon in config.horizons}
     horizon_to_index = {horizon: index for index, horizon in enumerate(config.horizons)}
+    proposed_count = 0
     no_candidate_count = 0
     horizon_audit = {
         str(horizon): {
@@ -273,13 +274,14 @@ def evaluate_model(
                 selection_labels.append(int(decision["meta_label"]))
                 selection_probabilities.append(float(decision["selection_probability"]))
 
-                selected_horizon = decision["selected_horizon"]
-                if selected_horizon is None:
+                proposed_horizon = decision["proposed_horizon"]
+                if proposed_horizon is None:
                     no_candidate_count += 1
                     realized_return = 0.0
                 else:
-                    selected_index = horizon_to_index[int(selected_horizon)]
-                    horizon_counts[str(selected_horizon)] += 1
+                    proposed_count += 1
+                    selected_index = horizon_to_index[int(proposed_horizon)]
+                    horizon_counts[str(proposed_horizon)] += 1
                     realized_return = float(example.returns_target[selected_index])
                 realized_value = float(decision["position"]) * realized_return
                 pre_threshold_value = float(decision["pre_threshold_position"]) * realized_return
@@ -297,6 +299,7 @@ def evaluate_model(
                 max_drawdown = max(max_drawdown, peak_equity - equity)
 
     total_examples = max(len(examples), 1)
+    proposal_coverage = proposed_count / total_examples
     coverage = accepted_signals / max(len(examples), 1)
     selection_precision = accepted_clean / max(accepted_signals, 1)
     overlay_macro_f1 = _binary_macro_f1(overlay_predictions, hold_labels)
@@ -369,14 +372,27 @@ def evaluate_model(
         "coverage_at_1sigma": coverage_1sigma / max(total_points, 1),
         "overlay_accuracy": overlay_correct / max(len(examples), 1),
         "overlay_macro_f1": overlay_macro_f1,
+        "proposal_count": proposed_count,
+        "accepted_count": accepted_signals,
+        "proposal_coverage": proposal_coverage,
         "selection_precision": selection_precision,
         "selection_support": accepted_signals,
+        "acceptance_precision": selection_precision,
+        "acceptance_support": accepted_signals,
         "precision_feasible": precision_feasible,
         "threshold_calibration_feasible": threshold_calibration_feasible,
         "coverage_at_target_precision": coverage,
+        "acceptance_coverage": coverage,
         "no_trade_rate": 1.0 - coverage,
         "value_per_signal": realized_value_sum / total_examples,
+        "value_per_anchor": realized_value_sum / total_examples,
+        "value_per_proposed": (
+            None if proposed_count == 0 else realized_value_sum / proposed_count
+        ),
         "accepted_value_per_signal": accepted_value_per_signal,
+        "value_per_accepted": (
+            None if accepted_signals == 0 else realized_value_sum / accepted_signals
+        ),
         "downside_per_signal": downside_per_signal,
         "value_capture_ratio": value_capture_ratio,
         "profit_factor": profit_factor,
@@ -384,7 +400,10 @@ def evaluate_model(
         "signal_sortino": signal_sortino,
         "selection_brier_score": selection_brier_score,
         "selection_calibration_error": selection_calibration_error,
+        "selector_head_brier_score": selection_brier_score,
+        "selector_head_calibration_error": selection_calibration_error,
         "selection_score_source": str(config.selection_score_source),
+        "acceptance_score_source": str(config.selection_score_source),
         "allow_no_candidate": bool(config.allow_no_candidate),
         "hold_brier_score": hold_brier_score,
         "hold_rate": hold_rate,
@@ -406,6 +425,9 @@ def evaluate_model(
         "tau_at_best_lcb": threshold_meta["tau_at_best_lcb"],
         "utility_score": utility_score,
         "project_value_score": project_value_score,
+        "proposed_horizon_distribution": {
+            horizon: horizon_counts[horizon] / total_examples for horizon in sorted(horizon_counts)
+        },
         "selected_horizon_distribution": {
             horizon: horizon_counts[horizon] / total_examples for horizon in sorted(horizon_counts)
         },

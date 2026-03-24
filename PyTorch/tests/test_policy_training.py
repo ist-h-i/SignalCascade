@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import asdict
 import unittest
 from datetime import datetime, timezone
 
@@ -10,10 +11,11 @@ from signal_cascade_pytorch.application.policy_service import (
     _augment_snapshot,
     _calibrate_threshold,
     _lookup_selection_threshold,
+    build_replay_selection_policy,
     build_default_policy,
 )
 from signal_cascade_pytorch.application.training_service import examples_to_batch, restore_return_units
-from signal_cascade_pytorch.domain.entities import TrainingExample
+from signal_cascade_pytorch.domain.entities import PredictionResult, TrainingExample
 from signal_cascade_pytorch.domain.timeframes import MAIN_TIMEFRAMES, OVERLAY_TIMEFRAMES
 
 
@@ -95,6 +97,7 @@ class PolicyAndTrainingTests(unittest.TestCase):
         decision = _augment_snapshot(snapshot, policy, config)
 
         self.assertEqual(decision["selected_horizon"], 2)
+        self.assertEqual(decision["proposed_horizon"], 2)
         first_row = next(row for row in decision["horizon_rows"] if int(row["horizon"]) == 1)
         self.assertEqual(float(first_row["actionable_edge"]), 0.0)
         self.assertEqual(float(first_row["score"]), 0.0)
@@ -118,7 +121,7 @@ class PolicyAndTrainingTests(unittest.TestCase):
             {"score": 0.68, "target": 1, "horizon": 1, "regime_id": "r"},
         ]
 
-        bundle = _calibrate_threshold(records, config)
+        bundle = _calibrate_threshold(records, config, anchor_count=len(records))
         meta = dict(bundle["meta"])
 
         self.assertIn("best_selection_lcb", meta)
@@ -209,6 +212,11 @@ class PolicyAndTrainingTests(unittest.TestCase):
         self.assertEqual(decision["accept_reject_reason"], "selection_score_below_threshold")
         self.assertTrue(decision["reject_flags"]["selection_score_below_threshold"])
         self.assertTrue(decision["reject_flags"]["selector_probability_below_threshold"])
+        self.assertEqual(decision["proposed_horizon"], 1)
+        self.assertIsNone(decision["accepted_horizon"])
+        self.assertEqual(decision["threshold_status"], "ready")
+        self.assertEqual(decision["threshold_origin"], "stored_policy")
+        self.assertEqual(decision["stored_threshold_compatibility"], "compatible")
 
     def test_allow_no_candidate_returns_no_candidate_reject_reason(self) -> None:
         config = TrainingConfig(horizons=(1, 2), allow_no_candidate=True)
@@ -248,9 +256,102 @@ class PolicyAndTrainingTests(unittest.TestCase):
         decision = _augment_snapshot(snapshot, policy, config)
 
         self.assertIsNone(decision["selected_horizon"])
+        self.assertIsNone(decision["proposed_horizon"])
+        self.assertIsNone(decision["accepted_horizon"])
         self.assertEqual(decision["accept_reject_reason"], "no_candidate")
         self.assertTrue(decision["reject_flags"]["no_candidate"])
         self.assertFalse(decision["accepted_signal"])
+
+    def test_score_source_mismatch_marks_threshold_as_missing_with_compatibility(self) -> None:
+        config = TrainingConfig(horizons=(1,), selection_score_source="correctness_probability")
+        policy = build_default_policy(TrainingConfig(horizons=(1,)))
+        policy["selection_thresholds"]["global"] = 0.6
+        snapshot = {
+            "anchor_time": "2026-03-24T00:00:00+00:00",
+            "regime_id": "asia|low|range",
+            "regime_features": [1.0, 0.0, 0.0, 0.0, 0.0],
+            "realized_volatility": 0.02,
+            "trend_strength": 0.1,
+            "overlay_target": 0,
+            "overlay_probability": 0.8,
+            "horizons": [
+                {
+                    "horizon": 1,
+                    "mean": 0.03,
+                    "sigma": 0.01,
+                    "cost": 0.005,
+                    "predicted_sign": 1,
+                    "true_return": 0.03,
+                    "true_direction": 1,
+                    "direction_probabilities": [0.1, 0.1, 0.8],
+                }
+            ],
+        }
+
+        decision = _augment_snapshot(snapshot, policy, config)
+
+        self.assertEqual(decision["threshold_status"], "missing")
+        self.assertEqual(decision["threshold_origin"], "none")
+        self.assertEqual(decision["stored_threshold_compatibility"], "config_mismatch")
+        self.assertIsNone(decision["selection_threshold"])
+
+    def test_build_replay_selection_policy_sets_validation_replay_origin(self) -> None:
+        config = TrainingConfig(horizons=(1,))
+        policy = build_default_policy(config)
+        snapshots = [
+            {
+                "anchor_time": "2026-03-24T00:00:00+00:00",
+                "regime_id": "asia|low|range",
+                "regime_features": [1.0, 0.0, 0.0, 0.0, 0.0],
+                "realized_volatility": 0.02,
+                "trend_strength": 0.1,
+                "overlay_target": 0,
+                "overlay_probability": 0.8,
+                "horizons": [
+                    {
+                        "horizon": 1,
+                        "mean": 0.03,
+                        "sigma": 0.01,
+                        "cost": 0.005,
+                        "predicted_sign": 1,
+                        "true_return": 0.03,
+                        "true_direction": 1,
+                        "direction_probabilities": [0.1, 0.1, 0.8],
+                    }
+                ],
+            }
+        ]
+
+        replay_policy = build_replay_selection_policy(policy, snapshots, config)
+
+        self.assertEqual(replay_policy["selection_thresholds"]["origin"], "validation_replay")
+
+    def test_prediction_result_selected_horizon_is_read_side_alias(self) -> None:
+        prediction = PredictionResult(
+            anchor_time="2026-03-24T00:00:00+00:00",
+            current_close=100.0,
+            proposed_horizon=3,
+            accepted_horizon=None,
+            selected_direction=1,
+            position=0.0,
+            expected_log_returns={"3": 0.01},
+            predicted_closes={"3": 101.0},
+            uncertainties={"3": 0.02},
+            accepted_signal=False,
+            selection_probability=0.6,
+            selection_score=0.6,
+            selection_threshold=0.7,
+            threshold_status="missing",
+            threshold_origin="none",
+            correctness_probability=0.55,
+            hold_probability=0.5,
+            hold_threshold=0.5,
+            overlay_action="hold",
+            regime_id="asia|low|range",
+        )
+
+        self.assertEqual(prediction.selected_horizon, 3)
+        self.assertNotIn("selected_horizon", asdict(prediction))
 
 
 if __name__ == "__main__":
