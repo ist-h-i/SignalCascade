@@ -213,6 +213,7 @@ def _write_run_artifacts(
             "position": prediction.position,
             "accepted_signal": prediction.accepted_signal,
             "selection_probability": prediction.selection_probability,
+            "selection_score": prediction.selection_score,
             "selection_threshold": prediction.selection_threshold,
             "correctness_probability": prediction.correctness_probability,
             "hold_probability": prediction.hold_probability,

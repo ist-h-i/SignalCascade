@@ -54,7 +54,7 @@ class TrainingExample:
 class PredictionResult:
     anchor_time: str
     current_close: float
-    selected_horizon: int
+    selected_horizon: int | None
     selected_direction: int
     position: float
     expected_log_returns: dict[str, float]
@@ -62,6 +62,7 @@ class PredictionResult:
     uncertainties: dict[str, float]
     accepted_signal: bool
     selection_probability: float
+    selection_score: float
     selection_threshold: float | None
     correctness_probability: float
     hold_probability: float

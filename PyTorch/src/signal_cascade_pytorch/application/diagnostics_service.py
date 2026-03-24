@@ -58,11 +58,19 @@ def export_review_diagnostics(
             "validation_examples": _build_label_summary(validation_examples, config),
         },
         "validation": {
-            "selected_row_count": len(validation_examples),
+            "anchor_sample_count": len(validation_examples),
+            "selected_row_count": diagnostics["selected_row_count"],
+            "no_candidate_count": diagnostics["no_candidate_count"],
+            "any_candidate_rate": diagnostics["any_candidate_rate"],
+            "any_strict_candidate_rate": diagnostics["any_strict_candidate_rate"],
+            "candidate_count_per_anchor": diagnostics["candidate_count_per_anchor"],
+            "strict_candidate_count_per_anchor": diagnostics["strict_candidate_count_per_anchor"],
             "accept_reject_reason_counts": diagnostics["accept_reject_reason_counts"],
             "reject_flag_counts": diagnostics["reject_flag_counts"],
             "selected_horizon_summary": diagnostics["selected_horizon_summary"],
             "threshold_scan_source": diagnostics["threshold_scan_source"],
+            "selection_score_source": str(config.selection_score_source),
+            "allow_no_candidate": bool(config.allow_no_candidate),
         },
         "paths": {
             "validation_rows_csv": str(validation_rows_path),
@@ -84,6 +92,12 @@ def build_validation_diagnostics(
     validation_rows: list[dict[str, object]] = []
     accept_reject_reason_counts = defaultdict(int)
     reject_flag_counts = defaultdict(int)
+    selected_row_count = 0
+    no_candidate_count = 0
+    any_candidate_count = 0
+    any_strict_candidate_count = 0
+    total_candidate_count = 0
+    total_strict_candidate_count = 0
     selected_horizon_summary = {
         str(horizon): {
             "selected_count": 0,
@@ -119,14 +133,24 @@ def build_validation_diagnostics(
                     policy=selection_policy,
                     config=config,
                 )
-                selected_horizon = int(decision["selected_horizon"])
-                selected_summary = selected_horizon_summary[str(selected_horizon)]
-                selected_summary["selected_count"] += 1
-                selected_summary["clean_count"] += int(decision["meta_label"])
-                selected_summary["accepted_count"] += int(decision["accepted_signal"])
-                selected_summary["accepted_clean_count"] += int(
-                    decision["accepted_signal"] and decision["meta_label"]
+                selected_horizon_value = decision["selected_horizon"]
+                selected_horizon = (
+                    int(selected_horizon_value) if selected_horizon_value is not None else None
                 )
+                selected_row_count += int(selected_horizon is not None)
+                no_candidate_count += int(selected_horizon is None)
+                any_candidate_count += int(bool(decision["any_candidate"]))
+                any_strict_candidate_count += int(bool(decision["any_strict_candidate"]))
+                total_candidate_count += int(decision["candidate_count"])
+                total_strict_candidate_count += int(decision["strict_candidate_count"])
+                if selected_horizon is not None:
+                    selected_summary = selected_horizon_summary[str(selected_horizon)]
+                    selected_summary["selected_count"] += 1
+                    selected_summary["clean_count"] += int(decision["meta_label"])
+                    selected_summary["accepted_count"] += int(decision["accepted_signal"])
+                    selected_summary["accepted_clean_count"] += int(
+                        decision["accepted_signal"] and decision["meta_label"]
+                    )
 
                 accept_reject_reason_counts[str(decision["accept_reject_reason"])] += 1
                 for flag_name, enabled in dict(decision["reject_flags"]).items():
@@ -134,12 +158,9 @@ def build_validation_diagnostics(
 
                 for horizon_index, row in enumerate(decision["horizon_rows"]):
                     horizon = int(row["horizon"])
-                    row_selected = horizon == selected_horizon
+                    row_selected = selected_horizon is not None and horizon == selected_horizon
                     row_accepted = row_selected and bool(decision["accepted_signal"])
-                    row_alignment = (
-                        int(row["predicted_sign"]) != 0
-                        and int(row["predicted_sign"]) == _sign_of_value(float(row["mean"]))
-                    )
+                    row_alignment = bool(row["direction_alignment"])
                     row_meta_label = int(
                         int(row["predicted_sign"]) != 0
                         and int(row["predicted_sign"]) == int(row["true_direction"])
@@ -165,10 +186,15 @@ def build_validation_diagnostics(
                             "prob_gap": float(row["prob_gap"]),
                             "sign_agreement": float(row["sign_agreement"]),
                             "direction_alignment": int(row_alignment),
+                            "candidate": int(bool(row["candidate"])),
+                            "strict_candidate": int(bool(row["strict_candidate"])),
+                            "chooser_score": float(row["score"]),
                             "actionable_sign": int(row["actionable_sign"]),
                             "actionable_edge": float(row["actionable_edge"]),
                             "correctness_probability": float(row["q"]),
                             "selector_probability": float(row["selector_probability"]),
+                            "selection_score": float(row["selection_score"]),
+                            "selection_score_source": str(config.selection_score_source),
                             "selection_threshold": (
                                 None
                                 if decision["selection_threshold"] is None
@@ -196,7 +222,9 @@ def build_validation_diagnostics(
                                 bool(decision["pre_threshold_eligible"]) if row_selected else False
                             ),
                             "accept_reject_reason": (
-                                str(decision["accept_reject_reason"]) if row_selected else "not_selected"
+                                str(decision["accept_reject_reason"])
+                                if row_selected or selected_horizon is None
+                                else "not_selected"
                             ),
                         }
                     )
@@ -212,6 +240,14 @@ def build_validation_diagnostics(
         "threshold_scan": threshold_scan,
         "threshold_scan_source": threshold_scan_source,
         "horizon_diag": _build_horizon_diag(validation_rows, config),
+        "selected_row_count": selected_row_count,
+        "no_candidate_count": no_candidate_count,
+        "any_candidate_rate": any_candidate_count / max(len(validation_examples), 1),
+        "any_strict_candidate_rate": any_strict_candidate_count / max(len(validation_examples), 1),
+        "candidate_count_per_anchor": total_candidate_count / max(len(validation_examples), 1),
+        "strict_candidate_count_per_anchor": total_strict_candidate_count / max(
+            len(validation_examples), 1
+        ),
         "accept_reject_reason_counts": dict(sorted(accept_reject_reason_counts.items())),
         "reject_flag_counts": dict(sorted(reject_flag_counts.items())),
         "selected_horizon_summary": selected_horizon_summary,
@@ -341,6 +377,8 @@ def _build_horizon_diag(
                 "up_rate": _rate(rows, lambda row: int(row["direction_label"]) > 0),
                 "down_rate": _rate(rows, lambda row: int(row["direction_label"]) < 0),
                 "align_rate": _rate(rows, lambda row: int(row["direction_alignment"]) == 1),
+                "candidate_rate": _rate(rows, lambda row: int(row["candidate"]) == 1),
+                "strict_candidate_rate": _rate(rows, lambda row: int(row["strict_candidate"]) == 1),
                 "actionable_edge_rate": _rate(rows, lambda row: float(row["actionable_edge"]) > 0.0),
                 "mean_mu": _mean([float(row["mu_raw"]) for row in rows]),
                 "mean_sigma": _mean([float(row["sigma_raw"]) for row in rows]),
@@ -357,7 +395,7 @@ def _resolve_threshold_scan(
     selection_policy: dict[str, object] | None,
     config: TrainingConfig,
 ) -> tuple[list[dict[str, object]], str]:
-    if selection_policy is not None:
+    if selection_policy is not None and _policy_thresholds_match_config(selection_policy, config):
         scan = (
             selection_policy.get("selection_thresholds", {})
             .get("scan", {})
@@ -368,13 +406,16 @@ def _resolve_threshold_scan(
 
     records = [
         {
-            "score": float(row["selector_probability"]),
+            "score": float(row["selection_score"]),
             "target": int(row["meta_label"]),
         }
         for row in validation_rows
         if int(row["selected"]) == 1 and int(row["pre_threshold_eligible"]) == 1
     ]
-    return _build_threshold_scan(records, config), "validation_selected_rows"
+    return (
+        _build_threshold_scan(records, config),
+        f"validation_selected_rows:{config.selection_score_source}",
+    )
 
 
 def _build_threshold_scan(
@@ -430,6 +471,29 @@ def _chunk_examples(
 ) -> Sequence[list[TrainingExample]]:
     for start in range(0, len(examples), batch_size):
         yield list(examples[start : start + batch_size])
+
+
+def _policy_thresholds_match_config(
+    selection_policy: dict[str, object],
+    config: TrainingConfig,
+) -> bool:
+    thresholds = dict(selection_policy.get("selection_thresholds", {}))
+    stored_score_source = str(
+        thresholds.get(
+            "score_source",
+            selection_policy.get("selection_score_source", "selector_probability"),
+        )
+    )
+    stored_allow_no_candidate = bool(
+        thresholds.get(
+            "allow_no_candidate",
+            selection_policy.get("allow_no_candidate", False),
+        )
+    )
+    return (
+        stored_score_source == str(config.selection_score_source)
+        and stored_allow_no_candidate == bool(config.allow_no_candidate)
+    )
 
 
 def _describe(values: Sequence[float]) -> dict[str, object]:

@@ -194,6 +194,7 @@ def evaluate_model(
     pre_threshold_abs_value_sum = 0.0
     horizon_counts = {str(horizon): 0 for horizon in config.horizons}
     horizon_to_index = {horizon: index for index, horizon in enumerate(config.horizons)}
+    no_candidate_count = 0
     horizon_audit = {
         str(horizon): {
             "samples": 0,
@@ -272,9 +273,14 @@ def evaluate_model(
                 selection_labels.append(int(decision["meta_label"]))
                 selection_probabilities.append(float(decision["selection_probability"]))
 
-                selected_index = horizon_to_index[decision["selected_horizon"]]
-                horizon_counts[str(decision["selected_horizon"])] += 1
-                realized_return = float(example.returns_target[selected_index])
+                selected_horizon = decision["selected_horizon"]
+                if selected_horizon is None:
+                    no_candidate_count += 1
+                    realized_return = 0.0
+                else:
+                    selected_index = horizon_to_index[int(selected_horizon)]
+                    horizon_counts[str(selected_horizon)] += 1
+                    realized_return = float(example.returns_target[selected_index])
                 realized_value = float(decision["position"]) * realized_return
                 pre_threshold_value = float(decision["pre_threshold_position"]) * realized_return
                 realized_value_sum += realized_value
@@ -378,10 +384,13 @@ def evaluate_model(
         "signal_sortino": signal_sortino,
         "selection_brier_score": selection_brier_score,
         "selection_calibration_error": selection_calibration_error,
+        "selection_score_source": str(config.selection_score_source),
+        "allow_no_candidate": bool(config.allow_no_candidate),
         "hold_brier_score": hold_brier_score,
         "hold_rate": hold_rate,
         "turnover": turnover,
         "max_drawdown": max_drawdown,
+        "no_candidate_rate": no_candidate_count / total_examples,
         "capture_score": capture_score,
         "profit_factor_score": profit_factor_score,
         "sortino_score": sortino_score,

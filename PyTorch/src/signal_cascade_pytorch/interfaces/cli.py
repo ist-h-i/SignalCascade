@@ -6,6 +6,12 @@ from ..bootstrap import export_diagnostics_command, predict_command, train_comma
 
 
 def build_parser() -> argparse.ArgumentParser:
+    selection_score_sources = (
+        "selector_probability",
+        "correctness_probability",
+        "actionable_edge",
+        "edge_correctness_product",
+    )
     parser = argparse.ArgumentParser(
         prog="signal-cascade",
         description="PyTorch reference implementation for the SignalCascade project.",
@@ -30,6 +36,18 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--base-cost", type=float, default=None)
     train_parser.add_argument("--delta-multiplier", type=float, default=None)
     train_parser.add_argument("--mae-multiplier", type=float, default=None)
+    train_parser.add_argument(
+        "--allow-no-candidate",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Allow policy evaluation to emit no selection when no horizon has positive actionable edge.",
+    )
+    train_parser.add_argument(
+        "--selection-score-source",
+        choices=selection_score_sources,
+        default=None,
+        help="Score source used for threshold calibration and acceptance.",
+    )
     train_parser.add_argument("--shape-loss-weight", type=float, default=None)
     train_parser.add_argument("--overlay-loss-weight", type=float, default=None)
     train_parser.add_argument("--direction-loss-weight", type=float, default=None)
@@ -45,6 +63,18 @@ def build_parser() -> argparse.ArgumentParser:
     predict_parser.add_argument("--output-dir", default="artifacts/demo")
     predict_parser.add_argument("--csv", default=None, help="Override the data source with a CSV file.")
     predict_parser.add_argument("--csv-lookback-days", type=int, default=None)
+    predict_parser.add_argument(
+        "--allow-no-candidate",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override the saved config and allow no-selection outputs when no candidate survives.",
+    )
+    predict_parser.add_argument(
+        "--selection-score-source",
+        choices=selection_score_sources,
+        default=None,
+        help="Override the saved config threshold score source for diagnostics or replay.",
+    )
     predict_parser.set_defaults(handler=predict_command)
 
     export_parser = subparsers.add_parser(
@@ -54,6 +84,18 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--output-dir", default="artifacts/demo")
     export_parser.add_argument("--csv", default=None, help="Override the data source with a CSV file.")
     export_parser.add_argument("--csv-lookback-days", type=int, default=None)
+    export_parser.add_argument(
+        "--allow-no-candidate",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Override the saved config and allow no-selection diagnostics when no candidate survives.",
+    )
+    export_parser.add_argument(
+        "--selection-score-source",
+        choices=selection_score_sources,
+        default=None,
+        help="Override the saved config threshold score source for validation replay.",
+    )
     export_parser.set_defaults(handler=export_diagnostics_command)
 
     tune_parser = subparsers.add_parser(
@@ -77,6 +119,18 @@ def build_parser() -> argparse.ArgumentParser:
     tune_parser.add_argument("--base-cost", type=float, default=None)
     tune_parser.add_argument("--delta-multiplier", type=float, default=None)
     tune_parser.add_argument("--mae-multiplier", type=float, default=None)
+    tune_parser.add_argument(
+        "--allow-no-candidate",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+        help="Allow candidate-free anchors during tuning diagnostics and policy calibration.",
+    )
+    tune_parser.add_argument(
+        "--selection-score-source",
+        choices=selection_score_sources,
+        default=None,
+        help="Score source used for threshold calibration during tuning.",
+    )
     tune_parser.add_argument("--shape-loss-weight", type=float, default=None)
     tune_parser.add_argument("--overlay-loss-weight", type=float, default=None)
     tune_parser.add_argument("--direction-loss-weight", type=float, default=None)

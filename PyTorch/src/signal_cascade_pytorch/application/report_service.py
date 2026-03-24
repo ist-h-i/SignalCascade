@@ -68,15 +68,18 @@ def _build_analysis(
     validation = dict(metrics.get("validation_metrics", {}))
     top_candidates = [dict(candidate) for candidate in leaderboard[:3]]
     forecast_rows = _build_forecast_rows(forecast_summary, prediction)
-    selected_horizon = int(prediction["selected_horizon"])
+    selected_horizon_raw = prediction.get("selected_horizon")
+    selected_horizon = None if selected_horizon_raw is None else int(selected_horizon_raw)
     selected_forecast = next(
         (
             row
             for row in forecast_rows
-            if int(row["horizon_4h"]) == selected_horizon
+            if selected_horizon is not None and int(row["horizon_4h"]) == selected_horizon
         ),
         forecast_rows[0] if forecast_rows else None,
     )
+    if selected_horizon is None:
+        selected_forecast = None
     comparison = _build_comparison(validation, previous_metrics)
     generated_at_utc = datetime.now(UTC)
     generated_at_jst = generated_at_utc.astimezone(JST)
@@ -126,10 +129,23 @@ def _build_analysis(
             "anchor_close": float(prediction.get("current_close", 0.0)),
             "selected_horizon": selected_horizon,
             "selected_direction": int(prediction.get("selected_direction", 0)),
-            "selected_direction_label": _direction_label(int(prediction.get("selected_direction", 0))),
+            "selected_direction_label": (
+                "none"
+                if selected_horizon is None
+                else _direction_label(int(prediction.get("selected_direction", 0)))
+            ),
             "accepted_signal": bool(prediction.get("accepted_signal", False)),
             "position": float(prediction.get("position", 0.0)),
             "selection_probability": float(prediction.get("selection_probability", 0.0)),
+            "selection_score": float(
+                prediction.get("selection_score", prediction.get("selection_probability", 0.0))
+            ),
+            "selection_score_source": str(
+                validation.get(
+                    "selection_score_source",
+                    config.get("selection_score_source", "selector_probability"),
+                )
+            ),
             "selection_threshold": (
                 None
                 if prediction.get("selection_threshold") is None
@@ -140,10 +156,13 @@ def _build_analysis(
             "hold_threshold": float(prediction.get("hold_threshold", 0.0)),
             "overlay_action": str(prediction.get("overlay_action", "hold")),
             "selected_forecast": selected_forecast,
-            "expected_return_direction_label": _expected_return_direction_label(selected_forecast),
-            "direction_alignment": _direction_alignment(
-                int(prediction.get("selected_direction", 0)),
-                selected_forecast,
+            "expected_return_direction_label": (
+                "none" if selected_forecast is None else _expected_return_direction_label(selected_forecast)
+            ),
+            "direction_alignment": (
+                "n/a"
+                if selected_forecast is None
+                else _direction_alignment(int(prediction.get("selected_direction", 0)), selected_forecast)
             ),
             "rows": forecast_rows,
         },
@@ -538,7 +557,7 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f" 段階評価は `{project_assessment['stage']}` となった。"
             f" `precision_feasible={validation.get('precision_feasible', False)}` で、"
             f" research 進捗として `best_selection_lcb={float(validation.get('best_selection_lcb', 0.0)):.4f}` を得た。"
-            f" 選択 horizon は {forecast['selected_horizon']} 本先、"
+            f" 選択 horizon は {forecast['selected_horizon'] if forecast['selected_horizon'] is not None else 'none'}、"
             f" overlay 判定は `{forecast['overlay_action']}`、"
             f" ポジションは {float(forecast['position']):.4f} である。"
         ),
@@ -716,7 +735,13 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f"- Expected return direction: `{forecast['expected_return_direction_label']}`",
             f"- Direction alignment: `{forecast['direction_alignment']}`",
             f"- Accepted signal: `{forecast['accepted_signal']}`",
-            f"- Selection probability / threshold: `{float(forecast['selection_probability']):.4f}` / `{_fmt(forecast['selection_threshold'])}`",
+            (
+                f"- Selection score source / score / threshold: "
+                f"`{forecast['selection_score_source']}` / "
+                f"`{float(forecast['selection_score']):.4f}` / "
+                f"`{_fmt(forecast['selection_threshold'])}`"
+            ),
+            f"- Selector probability: `{float(forecast['selection_probability']):.4f}`",
             f"- Hold probability / threshold: `{float(forecast['hold_probability']):.4f}` / `{float(forecast['hold_threshold']):.4f}`",
         ]
     )
@@ -733,6 +758,8 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
                 f"{float(selected_forecast['one_sigma_high_close']):.4f}]`"
             )
         )
+    elif forecast.get("selected_horizon") is None:
+        lines.append("- 選択 forecast: `none`")
 
     forecast_rows = [
         (

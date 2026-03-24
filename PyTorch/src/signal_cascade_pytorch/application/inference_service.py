@@ -74,6 +74,7 @@ def predict_from_example(
         uncertainties=uncertainties,
         accepted_signal=bool(decision["accepted_signal"]),
         selection_probability=float(decision["selection_probability"]),
+        selection_score=float(decision["selection_score"]),
         selection_threshold=(
             None
             if decision["selection_threshold"] is None

@@ -105,7 +105,7 @@ class PolicyAndTrainingTests(unittest.TestCase):
         policy["selection_thresholds"]["global"] = 0.61
         policy["selection_thresholds"]["by_horizon"]["1"] = 0.95
 
-        threshold = _lookup_selection_threshold(policy, "asia|low|range", 1)
+        threshold = _lookup_selection_threshold(policy, "asia|low|range", 1, config)
 
         self.assertAlmostEqual(float(threshold), 0.61)
 
@@ -178,7 +178,7 @@ class PolicyAndTrainingTests(unittest.TestCase):
         self.assertEqual(decision["accept_reject_reason"], "selection_threshold_missing")
         self.assertTrue(decision["reject_flags"]["selection_threshold_missing"])
 
-    def test_accept_reject_reason_reports_selector_below_threshold(self) -> None:
+    def test_accept_reject_reason_reports_selection_score_below_threshold(self) -> None:
         config = TrainingConfig(horizons=(1,))
         policy = build_default_policy(config)
         policy["selection_thresholds"]["global"] = 0.6
@@ -206,8 +206,51 @@ class PolicyAndTrainingTests(unittest.TestCase):
 
         decision = _augment_snapshot(snapshot, policy, config)
 
-        self.assertEqual(decision["accept_reject_reason"], "selector_probability_below_threshold")
+        self.assertEqual(decision["accept_reject_reason"], "selection_score_below_threshold")
+        self.assertTrue(decision["reject_flags"]["selection_score_below_threshold"])
         self.assertTrue(decision["reject_flags"]["selector_probability_below_threshold"])
+
+    def test_allow_no_candidate_returns_no_candidate_reject_reason(self) -> None:
+        config = TrainingConfig(horizons=(1, 2), allow_no_candidate=True)
+        policy = build_default_policy(config)
+        snapshot = {
+            "anchor_time": "2026-03-24T00:00:00+00:00",
+            "regime_id": "asia|low|range",
+            "regime_features": [1.0, 0.0, 0.0, 0.0, 0.0],
+            "realized_volatility": 0.02,
+            "trend_strength": 0.1,
+            "overlay_target": 0,
+            "overlay_probability": 0.8,
+            "horizons": [
+                {
+                    "horizon": 1,
+                    "mean": -0.03,
+                    "sigma": 0.01,
+                    "cost": 0.005,
+                    "predicted_sign": 1,
+                    "true_return": -0.03,
+                    "true_direction": -1,
+                    "direction_probabilities": [0.1, 0.1, 0.8],
+                },
+                {
+                    "horizon": 2,
+                    "mean": 0.0,
+                    "sigma": 0.01,
+                    "cost": 0.005,
+                    "predicted_sign": 0,
+                    "true_return": 0.0,
+                    "true_direction": 0,
+                    "direction_probabilities": [0.1, 0.8, 0.1],
+                },
+            ],
+        }
+
+        decision = _augment_snapshot(snapshot, policy, config)
+
+        self.assertIsNone(decision["selected_horizon"])
+        self.assertEqual(decision["accept_reject_reason"], "no_candidate")
+        self.assertTrue(decision["reject_flags"]["no_candidate"])
+        self.assertFalse(decision["accepted_signal"])
 
 
 if __name__ == "__main__":

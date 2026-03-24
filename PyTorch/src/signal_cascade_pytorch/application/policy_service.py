@@ -40,12 +40,20 @@ SELECTOR_FEATURE_NAMES = (
     "horizon_norm",
 )
 SIGN_INDEX_TO_VALUE = (-1, 0, 1)
+SELECTION_SCORE_SOURCES = (
+    "selector_probability",
+    "correctness_probability",
+    "actionable_edge",
+    "edge_correctness_product",
+)
 
 
 def build_default_policy(config: TrainingConfig) -> dict[str, object]:
     return {
         "precision_target": config.precision_target,
         "selection_alpha": config.selection_alpha,
+        "allow_no_candidate": bool(config.allow_no_candidate),
+        "selection_score_source": str(config.selection_score_source),
         "correctness_model": _constant_model(0.5, Q_FEATURE_NAMES),
         "selector_model": _constant_model(0.5, SELECTOR_FEATURE_NAMES),
         "selection_thresholds": {
@@ -232,7 +240,12 @@ def evaluate_policy_snapshots(
             hold_predictions += 1
             hold_correct += overlay_target
 
-        realized_return = float(augmented["selected_row"]["true_return"])
+        selected_row = augmented["selected_row"]
+        realized_return = (
+            float(selected_row["true_return"])
+            if isinstance(selected_row, dict)
+            else 0.0
+        )
         realized_value = float(augmented["position"]) * realized_return
         cumulative_value += realized_value
         cumulative_abs_value += abs(realized_return)
@@ -280,12 +293,19 @@ def _prepare_horizon_rows(
         row["sign_agreement"] = agreement
         row["actionable_sign"] = actionable_sign
         row["q"] = _predict_binary_model(policy["correctness_model"], _q_feature_vector(row, snapshot, config))
+        direction_alignment = (
+            int(row["predicted_sign"]) != 0
+            and int(row["predicted_sign"]) == _sign_from_return(float(row["mean"]))
+        )
         actionable_edge = (
             max((float(actionable_sign) * float(row["mean"])) - float(row["cost"]), 0.0)
             if actionable_sign != 0
             else 0.0
         )
         row["actionable_edge"] = actionable_edge
+        row["direction_alignment"] = direction_alignment
+        row["candidate"] = bool(actionable_sign != 0 and actionable_edge > 0.0)
+        row["strict_candidate"] = bool(row["candidate"] and direction_alignment)
         if actionable_sign == 0 or actionable_edge <= 0.0:
             score = 0.0
         else:
@@ -316,31 +336,76 @@ def _augment_snapshot(
             policy["selector_model"],
             _selector_feature_vector(row, snapshot, config),
         )
+        row["selection_score"] = _selection_score_value(row, config.selection_score_source)
 
-    selected_row = max(
-        rows,
-        key=lambda row: (
-            float(row["score"]),
-            float(row["actionable_edge"]),
-            abs(float(row["mean"])),
-        ),
+    candidate_rows = [row for row in rows if bool(row["candidate"])]
+    strict_candidate_rows = [row for row in rows if bool(row["strict_candidate"])]
+    selection_pool = candidate_rows if config.allow_no_candidate else rows
+    selected_row = (
+        max(
+            selection_pool,
+            key=lambda row: (
+                float(row["score"]),
+                float(row["actionable_edge"]),
+                abs(float(row["mean"])),
+            ),
+        )
+        if selection_pool
+        else None
     )
+    hold_threshold = _lookup_overlay_threshold(policy, str(snapshot["regime_id"]))
+    if selected_row is None:
+        overlay_probability = float(snapshot["overlay_probability"])
+        overlay_action = "hold" if overlay_probability >= hold_threshold else "reduce"
+        reject_flags = {
+            "no_candidate": True,
+            "actionable_sign_zero": False,
+            "actionable_edge_non_positive": False,
+            "direction_alignment_false": False,
+            "selection_threshold_missing": False,
+            "selection_score_below_threshold": False,
+            "selector_probability_below_threshold": False,
+        }
+        return {
+            "selected_row": None,
+            "selected_horizon": None,
+            "selected_direction": 0,
+            "position": 0.0,
+            "raw_position": 0.0,
+            "pre_threshold_eligible": False,
+            "pre_threshold_position": 0.0,
+            "accepted_signal": False,
+            "selection_probability": 0.0,
+            "selection_score": 0.0,
+            "selection_score_source": str(config.selection_score_source),
+            "selection_threshold": None,
+            "precision_infeasible": False,
+            "correctness_probability": 0.0,
+            "hold_probability": overlay_probability,
+            "hold_threshold": hold_threshold,
+            "overlay_action": overlay_action,
+            "expected_direction": 0,
+            "direction_alignment": False,
+            "accept_reject_reason": _accept_reject_reason(False, reject_flags),
+            "reject_flags": reject_flags,
+            "meta_label": 0,
+            "direction_correct": 0,
+            "candidate_count": len(candidate_rows),
+            "strict_candidate_count": len(strict_candidate_rows),
+            "any_candidate": bool(candidate_rows),
+            "any_strict_candidate": bool(strict_candidate_rows),
+            "horizon_rows": rows,
+        }
+
     selection_threshold = _lookup_selection_threshold(
         policy,
         str(snapshot["regime_id"]),
         int(selected_row["horizon"]),
+        config,
     )
-    hold_threshold = _lookup_overlay_threshold(policy, str(snapshot["regime_id"]))
     expected_direction = _sign_from_return(float(selected_row["mean"]))
-    direction_alignment = (
-        int(selected_row["predicted_sign"]) != 0
-        and int(selected_row["predicted_sign"]) == expected_direction
-    )
-    pre_threshold_eligible = (
-        int(selected_row["predicted_sign"]) != 0
-        and float(selected_row["score"]) > 0.0
-        and direction_alignment
-    )
+    direction_alignment = bool(selected_row["direction_alignment"])
+    pre_threshold_eligible = bool(selected_row["strict_candidate"])
     pre_threshold_position = (
         math.tanh(config.position_scale * (float(selected_row["mean"]) / max(float(selected_row["sigma"]), 1e-6)))
         if pre_threshold_eligible
@@ -349,15 +414,21 @@ def _augment_snapshot(
     accepted_signal = (
         pre_threshold_eligible
         and selection_threshold is not None
-        and float(selected_row["selector_probability"]) >= float(selection_threshold)
+        and float(selected_row["selection_score"]) >= float(selection_threshold)
     )
     reject_flags = {
+        "no_candidate": False,
         "actionable_sign_zero": int(selected_row["actionable_sign"]) == 0,
         "actionable_edge_non_positive": float(selected_row["actionable_edge"]) <= 0.0,
         "direction_alignment_false": not direction_alignment,
         "selection_threshold_missing": selection_threshold is None,
-        "selector_probability_below_threshold": (
+        "selection_score_below_threshold": (
             selection_threshold is not None
+            and float(selected_row["selection_score"]) < float(selection_threshold)
+        ),
+        "selector_probability_below_threshold": (
+            config.selection_score_source == "selector_probability"
+            and selection_threshold is not None
             and float(selected_row["selector_probability"]) < float(selection_threshold)
         ),
     }
@@ -376,6 +447,8 @@ def _augment_snapshot(
         "pre_threshold_position": pre_threshold_position * overlay_probability,
         "accepted_signal": accepted_signal,
         "selection_probability": float(selected_row["selector_probability"]),
+        "selection_score": float(selected_row["selection_score"]),
+        "selection_score_source": str(config.selection_score_source),
         "selection_threshold": selection_threshold,
         "precision_infeasible": selection_threshold is None,
         "correctness_probability": float(selected_row["q"]),
@@ -394,6 +467,10 @@ def _augment_snapshot(
             int(selected_row["predicted_sign"]) != 0
             and int(selected_row["predicted_sign"]) == _sign_from_return(float(selected_row["true_return"]))
         ),
+        "candidate_count": len(candidate_rows),
+        "strict_candidate_count": len(strict_candidate_rows),
+        "any_candidate": bool(candidate_rows),
+        "any_strict_candidate": bool(strict_candidate_rows),
         "horizon_rows": rows,
     }
 
@@ -460,7 +537,7 @@ def _build_selection_threshold_records(
             {
                 "regime_id": str(snapshot["regime_id"]),
                 "horizon": int(augmented["selected_horizon"]),
-                "score": float(augmented["selection_probability"]),
+                "score": float(augmented["selection_score"]),
                 "target": int(augmented["meta_label"]),
             }
         )
@@ -489,6 +566,8 @@ def _build_selection_thresholds(
     global_bundle = _calibrate_threshold(records, config)
     return {
         "scope": "global",
+        "score_source": str(config.selection_score_source),
+        "allow_no_candidate": bool(config.allow_no_candidate),
         "global": global_bundle["threshold"],
         "by_horizon": {str(horizon): None for horizon in config.horizons},
         "by_regime": {},
@@ -517,7 +596,10 @@ def _lookup_selection_threshold(
     policy: dict[str, object],
     regime_id: str,
     horizon: int,
+    config: TrainingConfig,
 ) -> float | None:
+    if not _selection_thresholds_match_config(policy, config):
+        return None
     global_threshold = policy.get("selection_thresholds", {}).get("global")
     return None if global_threshold is None else float(global_threshold)
 
@@ -729,7 +811,7 @@ def _calibrate_threshold(
         }
 
     return {
-        "threshold": float(max(0.05, min(0.99, float(best_candidate["threshold"])))),
+        "threshold": _normalize_selection_threshold(float(best_candidate["threshold"]), config),
         "meta": {
             "feasible": True,
             "records": len(records),
@@ -822,6 +904,8 @@ def _accept_reject_reason(
 ) -> str:
     if accepted_signal:
         return "accepted"
+    if reject_flags["no_candidate"]:
+        return "no_candidate"
     if reject_flags["actionable_sign_zero"]:
         return "actionable_sign_zero"
     if reject_flags["actionable_edge_non_positive"]:
@@ -830,9 +914,44 @@ def _accept_reject_reason(
         return "direction_alignment_false"
     if reject_flags["selection_threshold_missing"]:
         return "selection_threshold_missing"
-    if reject_flags["selector_probability_below_threshold"]:
-        return "selector_probability_below_threshold"
+    if reject_flags["selection_score_below_threshold"]:
+        return "selection_score_below_threshold"
     return "rejected"
+
+
+def _selection_score_value(row: dict[str, object], score_source: str) -> float:
+    if score_source == "selector_probability":
+        return float(row["selector_probability"])
+    if score_source == "correctness_probability":
+        return float(row["q"])
+    if score_source == "actionable_edge":
+        return float(row["actionable_edge"])
+    if score_source == "edge_correctness_product":
+        return float(row["actionable_edge"]) * float(row["q"])
+    raise ValueError(f"Unsupported selection_score_source: {score_source}")
+
+
+def _selection_thresholds_match_config(
+    policy: dict[str, object],
+    config: TrainingConfig,
+) -> bool:
+    thresholds = dict(policy.get("selection_thresholds", {}))
+    stored_score_source = str(
+        thresholds.get("score_source", policy.get("selection_score_source", "selector_probability"))
+    )
+    stored_allow_no_candidate = bool(
+        thresholds.get("allow_no_candidate", policy.get("allow_no_candidate", False))
+    )
+    return (
+        stored_score_source == str(config.selection_score_source)
+        and stored_allow_no_candidate == bool(config.allow_no_candidate)
+    )
+
+
+def _normalize_selection_threshold(threshold: float, config: TrainingConfig) -> float:
+    if config.selection_score_source in {"selector_probability", "correctness_probability"}:
+        return float(max(0.05, min(0.99, threshold)))
+    return float(threshold)
 
 
 def _sign_agreement(predicted_signs: Sequence[int], current_sign: int) -> float:

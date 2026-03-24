@@ -82,7 +82,7 @@ def train_command(args) -> int:
 
 def predict_command(args) -> int:
     output_dir = Path(args.output_dir)
-    config = TrainingConfig.from_dict(load_json(output_dir / "config.json"))
+    config = _load_config_with_overrides(output_dir, args)
     source_payload = _resolve_source_payload(args, output_dir)
     source = _create_data_source(source_payload)
 
@@ -117,7 +117,7 @@ def predict_command(args) -> int:
 
 def export_diagnostics_command(args) -> int:
     output_dir = Path(args.output_dir)
-    config = TrainingConfig.from_dict(load_json(output_dir / "config.json"))
+    config = _load_config_with_overrides(output_dir, args)
     source_payload = _resolve_source_payload(args, output_dir)
     source = _create_data_source(source_payload)
     source_rows_original = None
@@ -197,6 +197,12 @@ def _build_config(args) -> TrainingConfig:
     )
 
 
+def _load_config_with_overrides(output_dir: Path, args) -> TrainingConfig:
+    payload = load_json(output_dir / "config.json")
+    payload.update(_config_overrides_from_args(args))
+    return TrainingConfig.from_dict(payload)
+
+
 def _build_source_payload(args, config: TrainingConfig) -> dict[str, object]:
     if args.csv:
         payload = {"kind": "csv", "path": str(Path(args.csv).expanduser().resolve())}
@@ -236,6 +242,8 @@ def _config_overrides_from_args(args) -> dict[str, object]:
     maybe("base_cost", getattr(args, "base_cost", None))
     maybe("delta_multiplier", getattr(args, "delta_multiplier", None))
     maybe("mae_multiplier", getattr(args, "mae_multiplier", None))
+    maybe("allow_no_candidate", getattr(args, "allow_no_candidate", None))
+    maybe("selection_score_source", getattr(args, "selection_score_source", None))
     maybe("shape_loss_weight", getattr(args, "shape_loss_weight", None))
     maybe("overlay_loss_weight", getattr(args, "overlay_loss_weight", None))
     maybe("direction_loss_weight", getattr(args, "direction_loss_weight", None))
