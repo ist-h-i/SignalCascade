@@ -5,6 +5,7 @@ from datetime import datetime
 
 FeatureVector = tuple[float, float, float, float, float, float]
 ShapeVector = tuple[float, float, float]
+RegimeVector = tuple[float, float, float, float, float]
 
 
 @dataclass(frozen=True)
@@ -32,15 +33,30 @@ class TrainingExample:
     overlay_sequences: dict[str, list[FeatureVector]]
     main_shape_targets: dict[str, ShapeVector]
     returns_target: tuple[float, ...]
+    direction_targets: tuple[int, ...]
+    direction_weights: tuple[float, ...]
+    horizon_costs: tuple[float, ...]
     overlay_target: int
     current_close: float
+    regime_id: str
+    regime_features: RegimeVector
+    realized_volatility: float
+    trend_strength: float
 
 
 @dataclass(frozen=True)
 class PredictionResult:
     anchor_time: str
     selected_horizon: int
+    selected_direction: int
     position: float
     predicted_closes: dict[str, float]
     uncertainties: dict[str, float]
+    accepted_signal: bool
+    selection_probability: float
+    selection_threshold: float
+    correctness_probability: float
+    hold_probability: float
+    hold_threshold: float
     overlay_action: str
+    regime_id: str

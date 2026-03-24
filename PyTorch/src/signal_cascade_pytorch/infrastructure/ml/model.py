@@ -58,6 +58,7 @@ class SignalCascadeModel(nn.Module):
         dropout: float,
     ) -> None:
         super().__init__()
+        self.num_horizons = num_horizons
         self.main_encoders = nn.ModuleDict(
             {
                 timeframe: TemporalEncoder(feature_dim, hidden_dim, dropout)
@@ -82,12 +83,13 @@ class SignalCascadeModel(nn.Module):
         )
         self.return_mean_head = nn.Linear(hidden_dim, num_horizons)
         self.return_scale_head = nn.Linear(hidden_dim, num_horizons)
+        self.direction_head = nn.Linear(hidden_dim, num_horizons * 3)
         overlay_context_dim = (hidden_dim * 3) + num_horizons
         self.overlay_head = nn.Sequential(
             nn.Linear(overlay_context_dim, hidden_dim),
             nn.GELU(),
             nn.Dropout(dropout),
-            nn.Linear(hidden_dim, 4),
+            nn.Linear(hidden_dim, 1),
         )
 
     def forward(
@@ -102,6 +104,7 @@ class SignalCascadeModel(nn.Module):
         fused = self.main_fusion(torch.cat([main_latents[timeframe] for timeframe in MAIN_TIMEFRAMES], dim=1))
         mean = self.return_mean_head(fused)
         sigma = functional.softplus(self.return_scale_head(fused)) + 1e-4
+        direction_logits = self.direction_head(fused).view(fused.size(0), self.num_horizons, 3)
         overlay_latents = {
             timeframe: self.overlay_encoders[timeframe](overlay_sequences[timeframe])
             for timeframe in OVERLAY_TIMEFRAMES
@@ -114,6 +117,7 @@ class SignalCascadeModel(nn.Module):
         return {
             "mu": mean,
             "sigma": sigma,
+            "direction_logits": direction_logits,
             "shape_predictions": {
                 timeframe: self.main_shape_heads[timeframe](main_latents[timeframe])
                 for timeframe in MAIN_TIMEFRAMES
