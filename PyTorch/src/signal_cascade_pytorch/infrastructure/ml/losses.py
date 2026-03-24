@@ -18,13 +18,25 @@ def total_loss(
     )
     shape_loss = main_shape_loss(outputs["shape_predictions"], batch["shape_targets"])
     overlay_loss = overlay_binary_loss(outputs["overlay_logits"], batch["overlay_target"])
-    total = return_loss + (0.35 * direction_loss) + (0.25 * shape_loss) + (0.15 * overlay_loss)
+    consistency_loss = direction_consistency_loss(
+        outputs["mu"],
+        outputs["sigma"],
+        outputs["direction_logits"],
+    )
+    total = (
+        return_loss
+        + (0.35 * direction_loss)
+        + (0.25 * shape_loss)
+        + (0.15 * overlay_loss)
+        + (0.10 * consistency_loss)
+    )
     return total, {
         "total": float(total.item()),
         "return_loss": float(return_loss.item()),
         "direction_loss": float(direction_loss.item()),
         "shape_loss": float(shape_loss.item()),
         "overlay_loss": float(overlay_loss.item()),
+        "consistency_loss": float(consistency_loss.item()),
     }
 
 
@@ -75,3 +87,28 @@ def overlay_binary_loss(
 ) -> torch.Tensor:
     squeezed_logits = logits.squeeze(-1)
     return functional.binary_cross_entropy_with_logits(squeezed_logits, targets)
+
+
+def direction_consistency_loss(
+    mean: torch.Tensor,
+    sigma: torch.Tensor,
+    direction_logits: torch.Tensor,
+    flat_band: float = 0.01,
+) -> torch.Tensor:
+    clamped_sigma = sigma.clamp_min(1e-4)
+    sqrt_two = torch.sqrt(torch.tensor(2.0, dtype=mean.dtype, device=mean.device))
+
+    z_up = (flat_band - mean) / clamped_sigma
+    z_down = (-flat_band - mean) / clamped_sigma
+    p_up = 1.0 - (0.5 * (1.0 + torch.erf(z_up / sqrt_two)))
+    p_down = 0.5 * (1.0 + torch.erf(z_down / sqrt_two))
+    p_flat = (1.0 - p_up - p_down).clamp_min(1e-6)
+    implied_probabilities = torch.stack([p_down, p_flat, p_up], dim=-1)
+    implied_probabilities = implied_probabilities / implied_probabilities.sum(dim=-1, keepdim=True)
+
+    predicted_log_probabilities = functional.log_softmax(direction_logits, dim=-1)
+    return functional.kl_div(
+        predicted_log_probabilities,
+        implied_probabilities.detach(),
+        reduction="batchmean",
+    )

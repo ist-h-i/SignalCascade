@@ -37,6 +37,8 @@ class TrainingConfig:
     dropout: float = 0.1
     train_ratio: float = 0.8
     precision_target: float = 0.8
+    selection_min_support: int = 5
+    precision_confidence_z: float = 1.96
     selection_alpha: float = 0.7
     base_cost: float = 6e-4
     delta_multiplier: float = 1.35
@@ -81,6 +83,8 @@ class TrainingConfig:
             "dropout": self.dropout,
             "train_ratio": self.train_ratio,
             "precision_target": self.precision_target,
+            "selection_min_support": self.selection_min_support,
+            "precision_confidence_z": self.precision_confidence_z,
             "selection_alpha": self.selection_alpha,
             "base_cost": self.base_cost,
             "delta_multiplier": self.delta_multiplier,
@@ -120,6 +124,8 @@ class TrainingConfig:
             dropout=float(payload["dropout"]),
             train_ratio=float(payload["train_ratio"]),
             precision_target=float(payload.get("precision_target", 0.8)),
+            selection_min_support=int(payload.get("selection_min_support", 5)),
+            precision_confidence_z=float(payload.get("precision_confidence_z", 1.96)),
             selection_alpha=float(payload.get("selection_alpha", 0.7)),
             base_cost=float(payload.get("base_cost", 6e-4)),
             delta_multiplier=float(payload.get("delta_multiplier", 1.35)),

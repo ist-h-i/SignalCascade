@@ -49,8 +49,13 @@ def build_default_policy(config: TrainingConfig) -> dict[str, object]:
         "correctness_model": _constant_model(0.5, Q_FEATURE_NAMES),
         "selector_model": _constant_model(0.5, SELECTOR_FEATURE_NAMES),
         "selection_thresholds": {
-            "global": {str(horizon): 1.0 for horizon in config.horizons},
+            "global": None,
+            "by_horizon": {str(horizon): None for horizon in config.horizons},
             "by_regime": {},
+            "meta": {
+                "global": _empty_threshold_meta(),
+                "by_horizon": {str(horizon): _empty_threshold_meta() for horizon in config.horizons},
+            },
         },
         "overlay_thresholds": {
             "global": 0.5,
@@ -234,6 +239,12 @@ def evaluate_policy_snapshots(
 
     total = max(len(snapshots), 1)
     coverage = accepted / total
+    threshold_meta = dict(policy.get("selection_thresholds", {}).get("meta", {}))
+    global_meta = dict(threshold_meta.get("global", {}))
+    horizon_meta = dict(threshold_meta.get("by_horizon", {}))
+    feasible_horizons = sum(
+        1 for meta in horizon_meta.values() if isinstance(meta, dict) and bool(meta.get("feasible"))
+    )
     return {
         "selection_precision": accepted_clean / max(accepted, 1),
         "coverage_at_target_precision": coverage,
@@ -243,6 +254,8 @@ def evaluate_policy_snapshots(
         "value_capture_ratio": cumulative_value / max(cumulative_abs_value, 1e-6),
         "turnover": turnover,
         "max_drawdown": max_drawdown,
+        "precision_feasible": float(bool(global_meta.get("feasible")) or feasible_horizons > 0),
+        "feasible_horizon_count": float(feasible_horizons),
     }
 
 
@@ -301,10 +314,17 @@ def _augment_snapshot(
         int(selected_row["horizon"]),
     )
     hold_threshold = _lookup_overlay_threshold(policy, str(snapshot["regime_id"]))
+    expected_direction = _sign_from_return(float(selected_row["mean"]))
+    direction_alignment = (
+        int(selected_row["predicted_sign"]) != 0
+        and int(selected_row["predicted_sign"]) == expected_direction
+    )
     accepted_signal = (
         int(selected_row["predicted_sign"]) != 0
         and float(selected_row["score"]) > 0.0
-        and float(selected_row["selector_probability"]) >= selection_threshold
+        and selection_threshold is not None
+        and float(selected_row["selector_probability"]) >= float(selection_threshold)
+        and direction_alignment
     )
     raw_position = (
         math.tanh(config.position_scale * (float(selected_row["mean"]) / max(float(selected_row["sigma"]), 1e-6)))
@@ -324,10 +344,13 @@ def _augment_snapshot(
         "accepted_signal": accepted_signal,
         "selection_probability": float(selected_row["selector_probability"]),
         "selection_threshold": selection_threshold,
+        "precision_infeasible": selection_threshold is None,
         "correctness_probability": float(selected_row["q"]),
         "hold_probability": overlay_probability,
         "hold_threshold": hold_threshold,
         "overlay_action": overlay_action,
+        "expected_direction": expected_direction,
+        "direction_alignment": direction_alignment,
         "meta_label": int(
             int(selected_row["predicted_sign"]) != 0
             and int(selected_row["predicted_sign"]) == int(selected_row["true_direction"])
@@ -426,35 +449,24 @@ def _build_selection_thresholds(
     records: Sequence[dict[str, object]],
     config: TrainingConfig,
 ) -> dict[str, object]:
-    global_thresholds = {
-        str(horizon): _calibrate_threshold(
-            [
-                record
-                for record in records
-                if int(record["horizon"]) == horizon
-            ],
-            config.precision_target,
+    global_bundle = _calibrate_threshold(records, config)
+    by_horizon: dict[str, float | None] = {}
+    horizon_meta: dict[str, dict[str, object]] = {}
+    for horizon in config.horizons:
+        bundle = _calibrate_threshold(
+            [record for record in records if int(record["horizon"]) == horizon],
+            config,
         )
-        for horizon in config.horizons
-    }
-    by_regime: dict[str, dict[str, float]] = {}
-    regimes = sorted({str(record["regime_id"]) for record in records})
-    for regime_id in regimes:
-        thresholds: dict[str, float] = {}
-        for horizon in config.horizons:
-            horizon_records = [
-                record
-                for record in records
-                if str(record["regime_id"]) == regime_id and int(record["horizon"]) == horizon
-            ]
-            if len(horizon_records) < 12:
-                continue
-            thresholds[str(horizon)] = _calibrate_threshold(horizon_records, config.precision_target)
-        if thresholds:
-            by_regime[regime_id] = thresholds
+        by_horizon[str(horizon)] = bundle["threshold"]
+        horizon_meta[str(horizon)] = bundle["meta"]
     return {
-        "global": global_thresholds,
-        "by_regime": by_regime,
+        "global": global_bundle["threshold"],
+        "by_horizon": by_horizon,
+        "by_regime": {},
+        "meta": {
+            "global": global_bundle["meta"],
+            "by_horizon": horizon_meta,
+        },
     }
 
 
@@ -462,16 +474,9 @@ def _build_overlay_thresholds(
     records: Sequence[dict[str, object]],
     config: TrainingConfig,
 ) -> dict[str, object]:
-    by_regime: dict[str, float] = {}
-    regimes = sorted({str(record["regime_id"]) for record in records})
-    for regime_id in regimes:
-        regime_records = [record for record in records if str(record["regime_id"]) == regime_id]
-        if len(regime_records) < 12:
-            continue
-        by_regime[regime_id] = _calibrate_threshold(regime_records, config.precision_target)
     return {
-        "global": _calibrate_threshold(records, config.precision_target),
-        "by_regime": by_regime,
+        "global": _calibrate_overlay_threshold(records, config),
+        "by_regime": {},
     }
 
 
@@ -479,13 +484,12 @@ def _lookup_selection_threshold(
     policy: dict[str, object],
     regime_id: str,
     horizon: int,
-) -> float:
-    by_regime = dict(policy.get("selection_thresholds", {}).get("by_regime", {}))
-    regime_thresholds = dict(by_regime.get(regime_id, {}))
-    if str(horizon) in regime_thresholds:
-        return float(regime_thresholds[str(horizon)])
-    global_thresholds = dict(policy.get("selection_thresholds", {}).get("global", {}))
-    return float(global_thresholds.get(str(horizon), 1.0))
+) -> float | None:
+    by_horizon = dict(policy.get("selection_thresholds", {}).get("by_horizon", {}))
+    if str(horizon) in by_horizon and by_horizon[str(horizon)] is not None:
+        return float(by_horizon[str(horizon)])
+    global_threshold = policy.get("selection_thresholds", {}).get("global")
+    return None if global_threshold is None else float(global_threshold)
 
 
 def _lookup_overlay_threshold(
@@ -587,30 +591,159 @@ def _constant_model(
 
 def _calibrate_threshold(
     records: Sequence[dict[str, object]],
-    precision_target: float,
-) -> float:
+    config: TrainingConfig,
+) -> dict[str, object]:
     if not records:
-        return 1.0
+        return {"threshold": None, "meta": _empty_threshold_meta()}
 
     candidates = sorted({float(record["score"]) for record in records})
-    best_threshold = 1.0
-    best_coverage = 0.0
+    best_candidate: dict[str, object] | None = None
+    best_infeasible = {
+        "threshold": None,
+        "selected_count": 0,
+        "success_count": 0,
+        "precision": 0.0,
+        "precision_lcb": 0.0,
+        "coverage": 0.0,
+    }
 
     for threshold in candidates:
         selected = [record for record in records if float(record["score"]) >= threshold]
-        if not selected:
+        selected_count = len(selected)
+        if selected_count < config.selection_min_support:
             continue
-        precision = sum(int(record["target"]) for record in selected) / len(selected)
-        coverage = len(selected) / len(records)
-        if precision < precision_target:
-            continue
-        if coverage > best_coverage or (math.isclose(coverage, best_coverage) and threshold < best_threshold):
-            best_threshold = threshold
-            best_coverage = coverage
 
-    if best_coverage == 0.0:
-        return 1.0
-    return float(max(0.05, min(0.99, best_threshold)))
+        success_count = sum(int(record["target"]) for record in selected)
+        precision = success_count / selected_count
+        precision_lcb = _precision_lower_bound(
+            success_count,
+            selected_count,
+            config.precision_confidence_z,
+        )
+        coverage = selected_count / len(records)
+
+        if precision_lcb >= config.precision_target:
+            if (
+                best_candidate is None
+                or coverage > float(best_candidate["coverage"])
+                or (
+                    math.isclose(coverage, float(best_candidate["coverage"]))
+                    and threshold < float(best_candidate["threshold"])
+                )
+            ):
+                best_candidate = {
+                    "threshold": threshold,
+                    "selected_count": selected_count,
+                    "success_count": success_count,
+                    "precision": precision,
+                    "precision_lcb": precision_lcb,
+                    "coverage": coverage,
+                }
+        elif (
+            precision_lcb > float(best_infeasible["precision_lcb"])
+            or (
+                math.isclose(precision_lcb, float(best_infeasible["precision_lcb"]))
+                and selected_count > int(best_infeasible["selected_count"])
+            )
+        ):
+            best_infeasible = {
+                "threshold": threshold,
+                "selected_count": selected_count,
+                "success_count": success_count,
+                "precision": precision,
+                "precision_lcb": precision_lcb,
+                "coverage": coverage,
+            }
+
+    if best_candidate is None:
+        return {
+            "threshold": None,
+            "meta": {
+                "feasible": False,
+                "records": len(records),
+                "selected_count": int(best_infeasible["selected_count"]),
+                "success_count": int(best_infeasible["success_count"]),
+                "precision": float(best_infeasible["precision"]),
+                "precision_lcb": float(best_infeasible["precision_lcb"]),
+                "coverage": float(best_infeasible["coverage"]),
+            },
+        }
+
+    return {
+        "threshold": float(max(0.05, min(0.99, float(best_candidate["threshold"])))),
+        "meta": {
+            "feasible": True,
+            "records": len(records),
+            "selected_count": int(best_candidate["selected_count"]),
+            "success_count": int(best_candidate["success_count"]),
+            "precision": float(best_candidate["precision"]),
+            "precision_lcb": float(best_candidate["precision_lcb"]),
+            "coverage": float(best_candidate["coverage"]),
+        },
+    }
+
+
+def _calibrate_overlay_threshold(
+    records: Sequence[dict[str, object]],
+    config: TrainingConfig,
+) -> float:
+    if not records:
+        return 0.5
+
+    candidates = sorted({float(record["score"]) for record in records})
+    best_threshold = 0.5
+    best_precision_lcb = -1.0
+    best_support = 0
+
+    for threshold in candidates:
+        selected = [record for record in records if float(record["score"]) >= threshold]
+        selected_count = len(selected)
+        if selected_count < config.selection_min_support:
+            continue
+        success_count = sum(int(record["target"]) for record in selected)
+        precision_lcb = _precision_lower_bound(
+            success_count,
+            selected_count,
+            config.precision_confidence_z,
+        )
+        if (
+            precision_lcb > best_precision_lcb
+            or (
+                math.isclose(precision_lcb, best_precision_lcb)
+                and selected_count > best_support
+            )
+        ):
+            best_threshold = threshold
+            best_precision_lcb = precision_lcb
+            best_support = selected_count
+
+    return float(max(0.05, min(0.95, best_threshold)))
+
+
+def _empty_threshold_meta() -> dict[str, object]:
+    return {
+        "feasible": False,
+        "records": 0,
+        "selected_count": 0,
+        "success_count": 0,
+        "precision": 0.0,
+        "precision_lcb": 0.0,
+        "coverage": 0.0,
+    }
+
+
+def _precision_lower_bound(success_count: int, total_count: int, z_score: float) -> float:
+    if total_count <= 0:
+        return 0.0
+    proportion = success_count / total_count
+    z2 = z_score**2
+    denominator = 1.0 + (z2 / total_count)
+    centre = proportion + (z2 / (2.0 * total_count))
+    margin = z_score * math.sqrt(
+        ((proportion * (1.0 - proportion)) / total_count)
+        + (z2 / (4.0 * (total_count**2)))
+    )
+    return max(0.0, (centre - margin) / denominator)
 
 
 def _sign_agreement(predicted_signs: Sequence[int], current_sign: int) -> float:

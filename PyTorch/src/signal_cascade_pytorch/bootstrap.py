@@ -12,6 +12,7 @@ from .application.dataset_service import (
     trim_base_bars_for_latest_inference,
 )
 from .application.inference_service import predict_from_example, predict_latest
+from .application.report_service import generate_research_report
 from .application.training_service import train_model
 from .application.tuning_service import tune_latest_dataset
 from .infrastructure.data.csv_source import CsvMarketDataSource
@@ -50,6 +51,7 @@ def train_command(args) -> int:
     save_json(output_dir / "metrics.json", summary)
     save_json(output_dir / "selection_policy.json", selection_policy)
     save_json(output_dir / "prediction.json", asdict(prediction))
+    generate_research_report(output_dir)
 
     print(f"trained samples: {summary['train_samples']}")
     print(f"validation samples: {summary['validation_samples']}")
@@ -57,6 +59,7 @@ def train_command(args) -> int:
     print(f"validation selection precision: {summary['validation_metrics']['selection_precision']:.4f}")
     print(f"validation coverage@precision: {summary['validation_metrics']['coverage_at_target_precision']:.4f}")
     print(f"validation directional accuracy: {summary['validation_metrics']['directional_accuracy']:.4f}")
+    print(f"validation project value score: {summary['validation_metrics']['project_value_score']:.4f}")
     print(f"latest accepted signal: {prediction.accepted_signal}")
     print(f"latest selection probability: {prediction.selection_probability:.4f}")
     print(f"latest overlay action: {prediction.overlay_action}")
@@ -110,6 +113,7 @@ def tune_latest_command(args) -> int:
     print(f"current run dir: {manifest['current_dir']}")
     print(f"archive session dir: {manifest['archive_session_dir']}")
     print(f"best validation loss: {best_candidate['best_validation_loss']:.6f}")
+    print(f"best project value score: {best_candidate['project_value_score']:.6f}")
     print(f"best selection precision: {best_candidate['selection_precision']:.6f}")
     print(f"best coverage@precision: {best_candidate['coverage_at_target_precision']:.6f}")
     print(f"selected horizon: {best_candidate['selected_horizon']}")

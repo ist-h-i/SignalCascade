@@ -49,6 +49,10 @@ def predict_from_example(
         str(horizon): example.current_close * math.exp(float(mean[index].item()))
         for index, horizon in enumerate(config.horizons)
     }
+    expected_log_returns = {
+        str(horizon): float(mean[index].item())
+        for index, horizon in enumerate(config.horizons)
+    }
     uncertainties = {
         str(horizon): float(sigma[index].item())
         for index, horizon in enumerate(config.horizons)
@@ -56,14 +60,20 @@ def predict_from_example(
 
     return PredictionResult(
         anchor_time=example.anchor_time.isoformat(),
+        current_close=float(example.current_close),
         selected_horizon=decision["selected_horizon"],
         selected_direction=decision["selected_direction"],
         position=float(decision["position"]),
+        expected_log_returns=expected_log_returns,
         predicted_closes=predicted_closes,
         uncertainties=uncertainties,
         accepted_signal=bool(decision["accepted_signal"]),
         selection_probability=float(decision["selection_probability"]),
-        selection_threshold=float(decision["selection_threshold"]),
+        selection_threshold=(
+            None
+            if decision["selection_threshold"] is None
+            else float(decision["selection_threshold"])
+        ),
         correctness_probability=float(decision["correctness_probability"]),
         hold_probability=float(decision["hold_probability"]),
         hold_threshold=float(decision["hold_threshold"]),

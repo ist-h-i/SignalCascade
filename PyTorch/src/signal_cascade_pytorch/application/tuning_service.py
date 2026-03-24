@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import math
 import shutil
 from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
@@ -12,6 +13,7 @@ from .dataset_service import (
     trim_base_bars_for_latest_inference,
 )
 from .inference_service import predict_from_example
+from .report_service import generate_research_report
 from .training_service import train_model
 from ..infrastructure.data.csv_source import CsvMarketDataSource
 from ..infrastructure.persistence import ensure_directory, load_json, save_json
@@ -70,14 +72,20 @@ def tune_latest_dataset(
             {
                 "candidate": candidate_name,
                 "best_validation_loss": summary["best_validation_loss"],
+                "project_value_score": summary["validation_metrics"]["project_value_score"],
+                "utility_score": summary["validation_metrics"]["utility_score"],
+                "precision_feasible": summary["validation_metrics"]["precision_feasible"],
                 "selection_precision": summary["validation_metrics"]["selection_precision"],
                 "coverage_at_target_precision": summary["validation_metrics"]["coverage_at_target_precision"],
+                "selection_brier_score": summary["validation_metrics"]["selection_brier_score"],
                 "value_capture_ratio": summary["validation_metrics"]["value_capture_ratio"],
+                "profit_factor": summary["validation_metrics"]["profit_factor"],
+                "signal_sortino": summary["validation_metrics"]["signal_sortino"],
                 "directional_accuracy": summary["validation_metrics"]["directional_accuracy"],
                 "overlay_accuracy": summary["validation_metrics"]["overlay_accuracy"],
                 "selected_horizon": prediction.selected_horizon,
-                "position": prediction.position,
                 "accepted_signal": prediction.accepted_signal,
+                "position": prediction.position,
                 "anchor_time": prediction.anchor_time,
                 **parameters,
             }
@@ -85,8 +93,10 @@ def tune_latest_dataset(
 
     leaderboard.sort(
         key=lambda row: (
+            -int(bool(row["precision_feasible"])),
             -float(row["selection_precision"]),
             -float(row["coverage_at_target_precision"]),
+            float(row["selection_brier_score"]),
             -float(row["value_capture_ratio"]),
             -float(row["directional_accuracy"]),
             float(row["best_validation_loss"]),
@@ -136,6 +146,10 @@ def tune_latest_dataset(
             },
         },
     )
+    generate_research_report(
+        current_dir,
+        report_path=artifact_root.parent.parent / "report_signalcascade_xauusd.md",
+    )
     return manifest
 
 
@@ -159,6 +173,7 @@ def _write_run_artifacts(
     metrics_payload["source"] = source_payload
     metrics_payload["source_rows_original"] = source_rows
     metrics_payload["source_rows_used"] = source_rows
+    anchor_close = float(prediction.current_close)
     save_json(output_dir / "config.json", config.to_dict())
     save_json(output_dir / "source.json", source_payload)
     save_json(output_dir / "metrics.json", metrics_payload)
@@ -168,9 +183,18 @@ def _write_run_artifacts(
         output_dir / "forecast_summary.json",
         {
             "anchor_time": prediction.anchor_time,
+            "anchor_close": anchor_close,
             "selected_horizon": prediction.selected_horizon,
+            "selected_direction": prediction.selected_direction,
             "position": prediction.position,
+            "accepted_signal": prediction.accepted_signal,
+            "selection_probability": prediction.selection_probability,
+            "selection_threshold": prediction.selection_threshold,
+            "correctness_probability": prediction.correctness_probability,
+            "hold_probability": prediction.hold_probability,
+            "hold_threshold": prediction.hold_threshold,
             "overlay_action": prediction.overlay_action,
+            "expected_log_returns": prediction.expected_log_returns,
             "predicted_closes": prediction.predicted_closes,
             "uncertainties": prediction.uncertainties,
             "forecast_rows": [
@@ -180,8 +204,23 @@ def _write_run_artifacts(
                         datetime.fromisoformat(prediction.anchor_time)
                         + timedelta(hours=4 * horizon)
                     ).isoformat(),
+                    "expected_log_return": prediction.expected_log_returns[str(horizon)],
+                    "expected_return_pct": (
+                        prediction.predicted_closes[str(horizon)] / max(anchor_close, 1e-6)
+                    )
+                    - 1.0,
                     "predicted_close": prediction.predicted_closes[str(horizon)],
                     "uncertainty": prediction.uncertainties[str(horizon)],
+                    "one_sigma_low_close": anchor_close
+                    * math.exp(
+                        prediction.expected_log_returns[str(horizon)]
+                        - prediction.uncertainties[str(horizon)]
+                    ),
+                    "one_sigma_high_close": anchor_close
+                    * math.exp(
+                        prediction.expected_log_returns[str(horizon)]
+                        + prediction.uncertainties[str(horizon)]
+                    ),
                 }
                 for horizon in config.horizons
             ],

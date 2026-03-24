@@ -1,1592 +1,648 @@
-# ロジック説明書 v1.2（完全置換版）
-## マルチタイムフレーム・Close Anchor 予測モデル
-### 4時間足主モデル + 1時間足 / 30分足離脱オーバーレイ  
-### Path-Averaged Directional Balance と加算型 \(L_0\) を組み込んだ再構築版
+# Logic Multiframe Candlestick Model
 
----
+最終更新: 2026-03-24 JST
 
-## 1. 文書の目的
+この文書は、`/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch` の現行実装を基準にした仕様書です。旧版にあった次の記述は、現在の実装では廃止または置換されています。
 
-本書は、v1.2 における数式仕様・構造仕様・学習仕様を統合的に記述する。  
-v1.1 からの主要変更点は以下である。
+- overlay の 4 クラス分類 (`hold / reduce / full_exit / hard_exit`)
+- regime x horizon ごとの selection threshold
+- precision 未達 run でも `positive` に見えやすい旧スコア運用
 
-1. close-only 改善案として Path-Averaged Directional Balance を導入した
-2. \(L_0\) を乗算型から加算型の close anchor 残差構造へ変更した
-3. 補正量を価格単位へ変換するスケール \(a_i\) を導入した
-4. シミュレーションメソッド / パラメータ最適化メソッドを、v1.2 構造に合わせて再定義した
+現行版の主眼は、`precision-first` の採用判定を first-class にし、学習・評価・推論・保存フォーマットを同じポリシーで通すことです。
 
----
+## 1. 目的
 
-## 2. 記号と前提
+モデルは 30 分足を基底データとして、複数時間足のローソク特徴量から次を同時に学習します。
 
-### 2.1 時間足集合
+1. `4h / 1d / 1w` の main horizon return
+2. 各 horizon の方向分類 `{-1, 0, +1}`
+3. main timeframes の次バー shape
+4. `30m / 1h` を使った binary overlay risk filter (`reduce / hold`)
+5. OOF ベースの correctness / selector / threshold policy
 
-主モデルで用いる時間足集合を
+最終的な採用判定は「予測した」かどうかではなく、「precision 下側信頼限界を満たす signal だけを accept したか」で決まります。
 
-\[
-\mathcal T_{\text{main}}=\{4h,1d,1w\}
-\]
+## 2. 時間足と horizon
 
-とする。
+### 2.1 時間足
 
-離脱オーバーレイで用いる時間足集合を
+- base: `30m`
+- overlay: `30m`, `1h`
+- main: `4h`, `1d`, `1w`
 
-\[
-\mathcal T_{\text{ov}}=\{1h,30m\}
-\]
-
-とする。
-
-全時間足集合を
-
-\[
-\mathcal T=\mathcal T_{\text{main}}\cup\mathcal T_{\text{ov}}
-\]
-
-とする。
+各時間足バーは base の `30m` から resample して作成します。
 
 ### 2.2 horizon
 
-4 時間足基準の保有 horizon を
-
-\[
-\mathcal H=\{1,2,3,6,12,18,30\}
-\]
-
-とする。  
-各値は 4h バー本数であり、対応する時間は以下である。
-
-- 1: 4h
-- 2: 8h
-- 3: 12h
-- 6: 1d
-- 12: 2d
-- 18: 3d
-- 30: 5d
-
-### 2.3 足データ
-
-各時間足 \(\tau\) の \(i\) 本目のローソク足を
-
-\[
-B_i^{(\tau)}=
-\left(
-O_i^{(\tau)},H_i^{(\tau)},L_i^{(\tau)},C_i^{(\tau)},V_i^{(\tau)}
-\right)
-\]
-
-とする。  
-本理論における `d(i)` は常に終値である。
-
-\[
-d_i^{(\tau)}=C_i^{(\tau)}
-\]
-
----
-
-## 3. 足形状の自己教師ベクトル \(Q\)
-
-各足から次の自己教師ベクトルを定義する。
-
-\[
-R_i^{(\tau)} = H_i^{(\tau)}-L_i^{(\tau)}+\varepsilon_R
-\]
-
-\[
-u_i^{(\tau)}
-=
-\frac{
-H_i^{(\tau)}-\max(O_i^{(\tau)},C_i^{(\tau)})
-}{
-R_i^{(\tau)}
-}
-\]
-
-\[
-b_i^{(\tau)}
-=
-\frac{
-C_i^{(\tau)}-O_i^{(\tau)}
-}{
-R_i^{(\tau)}
-}
-\]
-
-\[
-\ell_i^{(\tau)}
-=
-\frac{
-\min(O_i^{(\tau)},C_i^{(\tau)})-L_i^{(\tau)}
-}{
-R_i^{(\tau)}
-}
-\]
-
-\[
-Q_i^{(\tau)}
-=
-\begin{bmatrix}
-u_i^{(\tau)}\\
-b_i^{(\tau)}\\
-\ell_i^{(\tau)}
-\end{bmatrix}
-\in\mathbb R^3
-\]
-
-意味は以下で固定する。
-
-- 第1成分 \(u\): 上髭
-- 第2成分 \(b\): 符号付き実体
-- 第3成分 \(\ell\): 下髭
-
-このとき理想的には
-
-\[
-u_i^{(\tau)}+|b_i^{(\tau)}|+\ell_i^{(\tau)}\approx 1
-\]
-
-が成り立つ。
-
----
+現行の forecast horizon は次の 7 本です。
 
-## 4. Path-Averaged Directional Balance \(\chi\)
+`H = {1, 2, 3, 6, 12, 18, 30}`
 
-### 4.1 発想
-OHLC しか観測されない場合、1本の足の内部経路は通常不明である。  
-代表的な単純経路として、以下の2通りを考える。
+ここで horizon は `4h` バー単位です。たとえば `h = 3` は 12 時間先、`h = 30` は 120 時間先に相当します。
 
-1. \(O\to H\to L\to C\)
-2. \(O\to L\to H\to C\)
+## 3. Close-Anchor 特徴量
 
-この2経路において、  
-\[
-\frac{|上昇量|}{|上昇量|+|下落量|}
-\]
-に対応する量を作り、それを \([-1,1]\) の符号付き量に変換し、2経路平均した指標を close-only 改善量として使う。
+各バー `t` について、6 次元特徴量
 
-### 4.2 補助記号
+`x_t = (z_t, dz_t, chi_t, g_t, rho_t, nu_t)`
 
-\[
-A_i^{(\tau)} = 2\bigl(H_i^{(\tau)}-L_i^{(\tau)}\bigr)
-\]
+を作ります。これは `close_anchor.py` と `candlestick.py` の実装に一致します。
 
-\[
-B_i^{(\tau)} = C_i^{(\tau)}-O_i^{(\tau)}
-\]
+### 3.1 Shape
 
-\[
-X_i^{(\tau)}
-=
-\frac{B_i^{(\tau)}}{A_i^{(\tau)}+\varepsilon_X}
-\]
+OHLC を `O_t, H_t, L_t, C_t`、微小値を `eps` とすると、レンジ
 
-理論上 \(|B_i|\le H_i-L_i\) なので、\(|X_i|\le \frac12\) が基本となる。  
-数値安定のため、実装上は
+`R_t = (H_t - L_t) + eps`
 
-\[
-X_i^{(\tau)}
-=
-\operatorname{clip}
-\left(
-\frac{B_i^{(\tau)}}{A_i^{(\tau)}+\varepsilon_X},
--\frac12,\frac12
-\right)
-\]
+を用いて shape を
 
-とする。
+- upper shadow: `(H_t - max(O_t, C_t)) / R_t`
+- body: `(C_t - O_t) / R_t`
+- lower shadow: `(min(O_t, C_t) - L_t) / R_t`
 
-### 4.3 2経路平均から得られる量
+で定義します。
 
-2経路平均から得られるスカラーを
+### 3.2 Path-Averaged Directional Balance
 
-\[
-x_i^{(\tau)}
-=
-\frac{X_i^{(\tau)}}{1-\left(X_i^{(\tau)}\right)^2}
-\]
+Directional balance `chi_t` は
 
-と定義する。  
-\(|X_i|\le \frac12\) より、\(x_i\) の理論値域は
+`x = (C_t - O_t) / (2 * (H_t - L_t) + eps)`
 
-\[
-x_i^{(\tau)}\in\left[-\frac23,\frac23\right]
-\]
+`x_clip = clip(x, -0.5, 0.5)`
 
-となる。
+`chi_t = clip(1.5 * (x_clip / (1 - x_clip^2 + eps)), -1, 1)`
 
-### 4.4 正規化
+で計算します。
 
-v1.2 では、2/3 問題は正規化で対処する。  
-最終的な方向バランス指標を
+### 3.3 Local Scale
 
-\[
-\boxed{
-\chi_i^{(\tau)}
-=
-\operatorname{clip}
-\left(
-\frac32\,x_i^{(\tau)},
--1,1
-\right)
-}
-\]
+各時間足ごとにレンジ `H_t - L_t` の EMA を取り、
 
-と定義する。
+`a_t = EMA(H_t - L_t) + eps`
 
-\(\chi_i\) の意味は以下である。
+を local scale とします。
 
-- \(\chi_i>0\): 上昇優勢
-- \(\chi_i<0\): 下降優勢
-- \(\chi_i\approx0\): 中立
+### 3.4 Feedback Gate
 
-### 4.5 性質
+1 本前の shape を `s_{t-1} = (u_{t-1}, b_{t-1}, l_{t-1})` とし、時間足ごとに設定された gate 重み `w = (w_u, w_b, w_l)` を用いて
 
-\[
-\chi_i^{(\tau)}
-\]
-は close-only に対する改善指標だが、情報源は OHLC に限られる。  
-したがって、完全な intrabar path 再構成ではなく、**終値だけでは失われる方向性を低次元に補うためのスカラー**と位置づける。
+`g_t = tanh(w_u u_{t-1} + w_b b_{t-1} + w_l l_{t-1} + bias)`
 
----
+を計算します。初期 shape は `(0, 0, 0)` です。
 
-## 5. ローカル価格スケール \(a_i\)
+### 3.5 Additive Close Anchor
 
-加算型 \(L_0\) を構築するため、補正項を価格単位へ変換するローカルスケールを定義する。
+Residual 項を
 
-\[
-a_i^{(\tau)}
-=
-\operatorname{EMA}_{m_\tau}
-\left(
-H^{(\tau)}-L^{(\tau)}
-\right)_i
-+
-\varepsilon_a
-\]
+`r_t = beta0 + beta_v g_t + beta_x chi_t + beta_vx g_t chi_t`
 
-ここで \(m_\tau\) は時間足ごとの smoothing window である。  
-例として、
+と置くと、close anchor `L0_t` は
 
-- 30m, 1h: 24〜48 バー
-- 4h: 20〜40 バー
-- 1d: 20 バー
-- 1w: 13 バー
+`L0_t = C_t + a_t * r_t`
 
-程度を初期候補とする。
+です。さらに `EMA(L0)_t` を使って
 
-\(a_i^{(\tau)}\) は価格単位であり、以下の役割を持つ。
+`z_t = (L0_t - EMA(L0)_t) / a_t`
 
-1. 無次元の補助信号を価格スケールへ変換する
-2. 補正量を市場ボラティリティに応じて自然に変える
-3. \(L_0\) の単位整合性を確保する
+`dz_t = z_t - z_{t-1}`
 
----
+`rho_t = (H_t - L_t) / a_t`
 
-## 6. \(L_5\) の branch 出力と前時点状態ベクトル
+`nu_t = (V_t / EMA(V)_t) - 1`
 
-各時間足 \(\tau\) の branch から得られる次足形状予測を
+を作り、最終特徴量を
 
-\[
-L_{5,i}^{(\tau)}=\hat Q_i^{(\tau)}\in\mathbb R^3
-\]
+`x_t = (z_t, dz_t, chi_t, g_t, rho_t, nu_t)`
 
-とする。  
-inference では、前時点の shape 予測を
+とします。
 
-\[
-v_{i-1}^{(\tau)} = L_{5,i-1}^{(\tau)}
-\]
+### 3.6 時間足別パラメータ
 
-として使う。
+既定値は次のとおりです。
 
-学習初期には安定化のため teacher forcing を使い、
+| Timeframe | EMA window | Gate weights |
+| --- | ---: | --- |
+| `30m` | 32 | `(0.60, 0.30, -0.20)` |
+| `1h` | 32 | `(0.60, 0.30, -0.20)` |
+| `4h` | 24 | `(0.75, 0.40, -0.25)` |
+| `1d` | 20 | `(0.85, 0.45, -0.30)` |
+| `1w` | 13 | `(0.95, 0.50, -0.35)` |
 
-\[
-v_{i-1}^{(\tau)} = Q_{i-1}^{(\tau)}
-\]
+Residual の既定値は共通で `beta0 = 0.0`, `beta_v = 0.05`, `beta_x = 0.15`, `beta_vx = 0.05` です。
 
-としてよい。  
-後半は scheduled sampling により \(\hat Q\) へ切り替える。
+## 4. 学習サンプルの組み立て
 
----
+### 4.1 必要データ量
 
-## 7. \(Fv\) による状態フィードバック
+学習サンプル構築には最低 `512` 本の `30m` base bar が必要です。
 
-各時間足で、前時点の状態ベクトルをスカラーゲートに射影する。
+### 4.2 Sequence window
 
-\[
-F^{(\tau)}\in\mathbb R^{1\times 3}
-\]
-
-\[
-g_i^{(\tau)}
-=
-\tanh
-\left(
-F^{(\tau)}v_{i-1}^{(\tau)}
-+
-b_F^{(\tau)}
-\right)
-\]
-
-ここで \(g_i^{(\tau)}\in[-1,1]\) である。  
-役割は、前時点の足形状予測を close anchor 補正へ穏やかに反映することである。
-
----
-
-## 8. 加算型 \(L_0\)（v1.2 の中心仕様）
-
-### 8.1 基本思想
-旧構造:
-\[
-L_0=d_i(1+\cdots)
-\]
-
-v1.2:
-\[
-L_0=d_i+\text{補正量}
-\]
-
-とする。  
-これにより、close を主系列として保持しながら、OHLC 由来の情報を残差として加える。
-
-### 8.2 定義
-
-\[
-\boxed{
-L_i^{(0,\tau)}
-=
-d_i^{(\tau)}
-+
-a_i^{(\tau)}
-\Bigl(
-\beta_0^{(\tau)}
-+
-\beta_v^{(\tau)}g_i^{(\tau)}
-+
-\beta_x^{(\tau)}\chi_i^{(\tau)}
-+
-\beta_{vx}^{(\tau)}g_i^{(\tau)}\chi_i^{(\tau)}
-\Bigr)
-}
-\]
+anchor は `4h` バーで取り、各時間足で anchor 時点までの sequence を集めます。
 
-### 8.3 各項の意味
+| Group | Timeframe | Window |
+| --- | --- | ---: |
+| main | `4h` | 48 |
+| main | `1d` | 21 |
+| main | `1w` | 8 |
+| overlay | `1h` | 48 |
+| overlay | `30m` | 96 |
 
-- \(d_i^{(\tau)}\): 生の終値
-- \(a_i^{(\tau)}\): 補正量の価格スケール
-- \(\beta_0^{(\tau)}\): 時間足ごとのベース補正
-- \(\beta_v^{(\tau)}g_i^{(\tau)}\): 前時点の状態による補正
-- \(\beta_x^{(\tau)}\chi_i^{(\tau)}\): 今の足内部方向バランスによる補正
-- \(\beta_{vx}^{(\tau)}g_i^{(\tau)}\chi_i^{(\tau)}\): 状態と今の足形状の相互作用
+main shape target は「各 main timeframe の次バー shape」です。
 
-### 8.4 制約
-close anchor の意味を壊さないため、以下を推奨する。
+### 4.3 Regime 特徴
 
-\[
-|\beta_0^{(\tau)}|,\ |\beta_v^{(\tau)}|,\ |\beta_x^{(\tau)}|,\ |\beta_{vx}^{(\tau)}|
-\]
-は初期値を小さく置く。  
-例えば 0 近傍から学習を開始し、補正量に正則化を入れる。
-
----
-
-## 9. close anchor 入力ベクトル \(\xi\)
-
-\(L_0\) を直接使うだけでなく、系列学習しやすいよう正規化入力を構築する。
+regime は `30m` ベースの情報から作ります。
 
-\[
-z_i^{(\tau)}
-=
-\frac{
-L_i^{(0,\tau)}
--
-\operatorname{EMA}_{m_\tau}(L^{(0,\tau)})_i
-}{
-a_i^{(\tau)}
-}
-\]
+- session: `asia / london / ny`
+- realized volatility: 直近 48 本 `30m` の平均絶対 log return
+- baseline volatility: 直近 192 本 `30m` の平均絶対 log return
+- volatility ratio: `realized / baseline`
+- trend strength: `abs(chi_4h) + 0.5 * abs(dz_4h)`
 
-\[
-\Delta z_i^{(\tau)}=z_i^{(\tau)}-z_{i-1}^{(\tau)}
-\]
-
-\[
-\rho_i^{(\tau)}
-=
-\frac{
-H_i^{(\tau)}-L_i^{(\tau)}
-}{
-a_i^{(\tau)}
-}
-\]
-
-最終入力ベクトルを
+保存される regime feature は
 
-\[
-\boxed{
-\xi_i^{(\tau)}
-=
-\begin{bmatrix}
-z_i^{(\tau)}\\
-\Delta z_i^{(\tau)}\\
-\chi_i^{(\tau)}\\
-g_i^{(\tau)}\\
-\rho_i^{(\tau)}
-\end{bmatrix}
-}
-\]
+`(session_asia, session_london, session_ny, clipped_volatility_ratio, trend_strength)`
 
-と定義する。
+です。`regime_id` は
 
-必要に応じて volume を使う場合は、
+`session|volatility_bin|trend_bin`
 
-\[
-\nu_i^{(\tau)}=\text{normalized volume feature}
-\]
+形式で保存されます。
 
-を付加し、
+重要なのは、現行版では regime は特徴量やラベル生成には使う一方、selection threshold を regime ごとに分ける用途には使っていない、という点です。
 
-\[
-\xi_i^{(\tau)}=
-[z_i,\Delta z_i,\chi_i,g_i,\rho_i,\nu_i]^\top
-\]
+## 5. Main ラベル生成
 
-としてもよい。
-
----
+各 anchor と horizon `h` について、`4h` future path
 
-## 10. 主モデルの branch encoder
+`r_{t,1}, ..., r_{t,h}`
 
-各 \(\tau\in\mathcal T_{\text{main}}\) に対して、  
-causal dilated TCN を用いて branch 表現を構築する。
-
-### 10.1 履歴長
-初期仕様では以下を採用する。
-
-\[
-L_{4h}=192,\qquad
-L_{1d}=252,\qquad
-L_{1w}=78
-\]
-
-### 10.2 hidden 次元
-
-\[
-d_h=64
-\]
-
-### 10.3 encoder
-
-時刻 \(t\) における時間足 \(\tau\) の最後の確定足 index を \(n_\tau(t)\) とする。  
-branch 表現は
-
-\[
-h_t^{(\tau)}
-=
-\mathrm{TCN}_\tau
-\left(
-\xi_{n_\tau(t)-L_\tau+1:n_\tau(t)}^{(\tau)}
-\right)
-\in\mathbb R^{d_h}
-\]
-
-とする。
-
----
-
-## 11. 各 branch の shape head
-
-各 branch は、次の足形状を予測する。
-
-\[
-\boxed{
-L_{5,t}^{(\tau)}
-=
-\hat Q_t^{(\tau)}
-=
-\begin{bmatrix}
-\sigma(a_{u,\tau}^{\top}h_t^{(\tau)}+c_{u,\tau})\\
-\tanh(a_{b,\tau}^{\top}h_t^{(\tau)}+c_{b,\tau})\\
-\sigma(a_{\ell,\tau}^{\top}h_t^{(\tau)}+c_{\ell,\tau})
-\end{bmatrix}
-}
-\]
-
-教師は
-
-\[
-\hat Q_t^{(\tau)} \approx Q_{n_\tau(t)+1}^{(\tau)}
-\]
+を
 
-である。
+`r_{t,k} = log(C_{t+k} / C_t)`
 
----
+で作ります。
 
-## 12. 主モデルのマルチタイムフレーム統合
+- target return: `r_{t,h}`
+- long MAE: `max(0, max(-r_{t,k}))`
+- short MAE: `max(0, max(r_{t,k}))`
+- long MFE: `max(0, max(r_{t,k}))`
+- short MFE: `max(0, max(-r_{t,k}))`
+- cost: `c_h = base_cost * sqrt(h)`
 
-統合は coarse-to-fine のベクトルゲートで行う。  
-週足を大局、日足を中間、4時間足を最終判断とする。
+### 5.1 方向ラベル
 
-### 12.1 週足表現
-
-\[
-R_t^{(1w)} = U_w h_t^{(1w)}
-\]
+main move threshold は
 
-### 12.2 日足統合
+`delta_h = c_h + m_delta * sigma_t * sqrt(h)`
 
-\[
-a_t^{(1d)}
-=
-\sigma
-\left(
-A_d h_t^{(1d)} + B_d R_t^{(1w)} + c_d
-\right)
-\in (0,1)^{d_h}
-\]
+で、`m_delta` は次の regime 補正付きです。
 
-\[
-R_t^{(1d)}
-=
-a_t^{(1d)} \odot U_d h_t^{(1d)}
-+
-(1-a_t^{(1d)})\odot V_d R_t^{(1w)}
-\]
+- まず `delta_multiplier = 1.35`
+- high volatility なら `x 1.15`, low なら `x 0.90`
+- trend なら `x 0.85`, range なら `x 1.05`
+- asia session ならさらに `x 1.05`
 
-### 12.3 4時間足統合
+main MAE threshold は
 
-\[
-a_t^{(4h)}
-=
-\sigma
-\left(
-A_h h_t^{(4h)} + B_h R_t^{(1d)} + c_h
-\right)
-\in (0,1)^{d_h}
-\]
+`eta_h = m_mae * sigma_t * sqrt(h)`
 
-\[
-\boxed{
-R_t
-=
-a_t^{(4h)} \odot U_h h_t^{(4h)}
-+
-(1-a_t^{(4h)})\odot V_h R_t^{(1d)}
-}
-\]
+で、`m_mae` は次の補正付きです。
 
-\(R_t\) を主モデルの統合表現とする。
-
----
+- まず `mae_multiplier = 0.95`
+- high volatility なら `x 1.10`, low なら `x 0.95`
+- trend なら `x 0.90`, range なら `x 1.05`
+- asia session ならさらに `x 1.05`
 
-## 13. 融合後の総合 \(L_5^\ast\)
-
-branch ごとの \(L_5\) とは別に、融合後のグローバルな足形状予測を持つ。
+方向ラベルは
 
-\[
-\boxed{
-L_{5,t}^{\ast}
-=
-\begin{bmatrix}
-\sigma(w_U^\top R_t+b_U)\\
-\tanh(w_B^\top R_t+b_B)\\
-\sigma(w_L^\top R_t+b_L)
-\end{bmatrix}
-}
-\]
+- `+1` if `target_return >= delta_h` and `long_MAE <= eta_h`
+- `-1` if `target_return <= -delta_h` and `short_MAE <= eta_h`
+- `0` otherwise
 
-この出力は、総合的な次足形状・方向性の説明ベクトルとして用いる。
+です。
 
----
+### 5.2 Direction Weight
 
-## 14. multi-horizon return / uncertainty head
+学習時の direction loss には clean signal を重くする重みを掛けます。
 
-### 14.1 future return
+`denom = sigma_t * sqrt(h) + 1e-6`
 
-4h 基準の forward return を
+`excess = max(abs(target_return) - c_h, 0) / denom`
 
-\[
-r_{t,h}^{\mathrm{fwd}}
-=
-\log\frac{C_{t+h}^{(4h)}}{C_t^{(4h)}},
-\qquad h\in\mathcal H
-\]
-
-とする。
-
-### 14.2 期待値と不確実性
-
-各 horizon ごとに
-
-\[
-\mu_{t,h}=w_{\mu,h}^{\top}R_t+b_{\mu,h}
-\]
-
-\[
-\sigma_{t,h}
-=
-\operatorname{softplus}(w_{\sigma,h}^{\top}R_t+b_{\sigma,h})
-+\sigma_{\min}
-\]
-
-を出力する。
+`w = 1 + clean_weight_return_scale * excess`
 
-### 14.3 予測終値
+non-flat ラベルならさらに `clean_weight_bonus` を加えます。
 
-\[
-\boxed{
-\hat C_{t+h}^{(4h)}
-=
-C_t^{(4h)}\exp(\mu_{t,h})
-}
-\]
+そのうえで、long なら `long_MFE / long_MAE`、short なら `short_MFE / short_MAE` を最大 `4.0` まで使い、
 
----
+`w += clean_weight_ratio_scale * ratio`
 
-## 15. horizon 選択と主ポジション
+を加え、最終的に `[1, 6]` に clip します。
 
-### 15.1 コスト込み標準化エッジ
+既定値は
 
-\[
-S_{t,h}
-=
-\frac{
-|\mu_{t,h}|-c_h
-}{
-\sigma_{t,h}
-}
-\]
+- `clean_weight_return_scale = 0.75`
+- `clean_weight_bonus = 0.65`
+- `clean_weight_ratio_scale = 0.35`
 
-ここで \(c_h\) は horizon ごとの round-trip cost 推定である。
+です。
 
-### 15.2 最適 horizon
+## 6. Overlay ラベル生成
 
-\[
-h_t^\star = \arg\max_{h\in\mathcal H} S_{t,h}
-\]
+overlay は多値 exit policy ではなく、binary risk filter です。
 
-### 15.3 主ポジションサイズ
+- `0 = reduce`
+- `1 = hold`
 
-\[
-\boxed{
-\pi_t^{\text{main}}
-=
-\tanh
-\left(
-\gamma\frac{\mu_{t,h_t^\star}}{\sigma_{t,h_t^\star}}
-\right)
-}
-\]
+### 6.1 Primary Direction
 
-\[
-\operatorname{sign}(\pi_t^{\text{main}})=\operatorname{sign}(\mu_{t,h_t^\star})
-\]
+各 anchor で non-zero direction target のうち、`direction_weight` が最大のものを primary direction とします。non-zero がなければ overlay target は `reduce` です。
 
-である。
-
----
+### 6.2 Binary Hold Label
 
-## 16. 1h / 30m 離脱オーバーレイ
-
-### 16.1 役割
-離脱オーバーレイは、主モデルで立てたシナリオを 4h レビュー間に監視し、途中での逸脱に対応する。  
-新規エントリーは行わず、以下のみを担当する。
-
-- hold
-- reduce
-- full exit
-- hard exit
-
-### 16.2 入力
-オーバーレイも close anchor 入力 \(\xi\) を使う。
-
-\[
-z_u^{(1h)}
-=
-\mathrm{TCN}_{1h}^{\text{ov}}
-\left(
-\xi_{n_{1h}(u)-L_{1h}^{\text{ov}}+1:n_{1h}(u)}^{(1h)}
-\right)
-\]
-
-\[
-z_u^{(30m)}
-=
-\mathrm{TCN}_{30m}^{\text{ov}}
-\left(
-\xi_{n_{30m}(u)-L_{30m}^{\text{ov}}+1:n_{30m}(u)}^{(30m)}
-\right)
-\]
-
-初期仕様:
-
-\[
-L_{1h}^{\text{ov}}=96,\qquad
-L_{30m}^{\text{ov}}=160,\qquad
-d_{\text{ov}}=32
-\]
-
-### 16.3 レビュー区間と進捗量
-
-4h レビュー時刻を \(t_k\)、次レビューを \(t_{k+1}\)、現在監視時刻を \(u\in(t_k,t_{k+1}]\) とする。
-
-主モデルが選んだ方向を
-
-\[
-s_k=\operatorname{sign}(\pi_{t_k}^{\text{main}})
-\]
-
-とする。
-
-レビュー開始からの符号付き実現リターン:
-
-\[
-r_u^{\text{pos}}
-=
-s_k\log\frac{P_u}{P_{t_k}}
-\]
-
-経過率:
-
-\[
-\eta_u
-=
-\frac{u-t_k}{t_{k+1}-t_k}
-\in(0,1]
-\]
-
-主モデルの次 4h 期待リターンを \(\mu_{k,1}=\mu_{t_k,1}\)、不確実性を \(\sigma_{k,1}=\sigma_{t_k,1}\) とすると、途中期待進捗を
-
-\[
-\bar r_u=\eta_u\mu_{k,1}
-\]
-
-逸脱 z スコアを
-
-\[
-\delta_u
-=
-\frac{
-r_u^{\text{pos}}-\bar r_u
-}{
-\sigma_{k,1}\sqrt{\eta_u+\varepsilon_\eta}
-}
-\]
-
-と定義する。
-
-### 16.4 MFE / MAE / peak drawdown
-
-\[
-\mathrm{MFE}_u
-=
-\max_{v\in[t_k,u]}
-s_k\log\frac{P_v}{P_{t_k}}
-\]
-
-\[
-\mathrm{MAE}_u
-=
--\min_{v\in[t_k,u]}
-s_k\log\frac{P_v}{P_{t_k}}
-\ge0
-\]
-
-\[
-D_u^{\text{peak}}
-=
-\mathrm{MFE}_u-r_u^{\text{pos}}
-\ge0
-\]
-
-### 16.5 オーバーレイ文脈ベクトル
-
-\[
-c_u=
-\begin{bmatrix}
-s_k\\
-\eta_u\\
-1-\eta_u\\
-h_k^\star\\
-S_{t_k,h_k^\star}\\
-\mu_{k,1}\\
-\sigma_{k,1}\\
-r_u^{\text{pos}}\\
-\delta_u\\
-\mathrm{MFE}_u\\
-\mathrm{MAE}_u\\
-D_u^{\text{peak}}\\
-L_{5,t_k}^{(4h)}\\
-L_{5,t_k}^{(1d)}\\
-L_{5,t_k}^{(1w)}
-\end{bmatrix}
-\]
-
-### 16.6 1h / 30m 統合
-
-\[
-g_u^{\text{ov}}
-=
-\sigma
-\left(
-A_{\text{ov}}z_u^{(1h)}
-+
-B_{\text{ov}}z_u^{(30m)}
-+
-C_{\text{ov}}c_u
-+
-d_{\text{ov}}
-\right)
-\in(0,1)^{d_{\text{ov}}}
-\]
-
-\[
-o_u
-=
-g_u^{\text{ov}}\odot U_{\text{ov}}z_u^{(1h)}
-+
-(1-g_u^{\text{ov}})\odot V_{\text{ov}}z_u^{(30m)}
-\]
-
-### 16.7 オーバーレイ出力
-
-#### 残余リターン head
-
-\[
-\mu_u^{\text{rev}}
-=
-w_{\mu}^{\top}
-\begin{bmatrix}
-o_u\\
-c_u
-\end{bmatrix}
-+b_\mu
-\]
-
-\[
-\sigma_u^{\text{rev}}
-=
-\operatorname{softplus}
-\left(
-w_{\sigma}^{\top}
-\begin{bmatrix}
-o_u\\
-c_u
-\end{bmatrix}
-+b_\sigma
-\right)
-+\sigma_{\min}
-\]
-
-#### adverse excursion 確率
-
-レビュー区間の許容 DD 予算を
-
-\[
-d_k^{\max}
-=
-d_0+d_1\sigma_{k,1}+d_2\log(1+h_k^\star)
-\]
-
-とし、
-
-\[
-p_u^{\text{adv}}
-=
-\sigma
-\left(
-w_{\text{adv}}^{\top}
-\begin{bmatrix}
-o_u\\
-c_u
-\end{bmatrix}
-+b_{\text{adv}}
-\right)
-\]
-
-とする。
-
-#### 短期逆向き形状スコア
-
-1h:
-
-\[
-\chi_u^{(1h,\text{shape})}
-=
--s_k \hat b_u^{(1h)}
-+
-\beta_w
-\left(
-\hat u_u^{(1h)}+\hat \ell_u^{(1h)}
-\right)
-\]
-
-30m:
-
-\[
-\chi_u^{(30m,\text{shape})}
-=
--s_k \hat b_u^{(30m)}
-+
-\beta_w
-\left(
-\hat u_u^{(30m)}+\hat \ell_u^{(30m)}
-\right)
-\]
-
-混合係数:
-
-\[
-\omega_u
-=
-\sigma
-\left(
-a_\omega^\top
-\begin{bmatrix}
-o_u\\
-c_u
-\end{bmatrix}
-+b_\omega
-\right)
-\]
-
-\[
-\chi_u^{\text{mix}}
-=
-\omega_u \chi_u^{(30m,\text{shape})}
-+
-(1-\omega_u)\chi_u^{(1h,\text{shape})}
-\]
-
-#### 離脱特徴と離脱確率
-
-\[
-\phi_u=
-\begin{bmatrix}
-[-\delta_u]_+\\
-\left[
--\dfrac{\mu_u^{\text{rev}}-c_{\text{rev}}}{\sigma_u^{\text{rev}}}
-\right]_+\\
-p_u^{\text{adv}}\\
-\chi_u^{\text{mix}}\\
-\mathrm{MAE}_u\\
-D_u^{\text{peak}}\\
-\eta_u
-\end{bmatrix}
-\]
-
-\[
-p_u^{\text{exit}}
-=
-\sigma(w_{\text{exit}}^\top\phi_u+b_{\text{exit}})
-\]
-
-### 16.8 実行ルール
-
-閾値を
-
-\[
-\theta_{\text{red}},\qquad \theta_{\text{full}}
-\]
-
-とする。
-
-- \(p_u^{\text{exit}}<\theta_{\text{red}}\): hold
-- \(\theta_{\text{red}}\le p_u^{\text{exit}}<\theta_{\text{full}}\): reduce
-- \(p_u^{\text{exit}}\ge \theta_{\text{full}}\): full exit
-
-reduce 率:
-
-\[
-\rho_u
-=
-\operatorname{clip}
-\left(
-\frac{p_u^{\text{exit}}-\theta_{\text{red}}}{\theta_{\text{full}}-\theta_{\text{red}}},
-0,1
-\right)
-\]
-
-\[
-\pi_u=(1-\rho_u)\pi_{t_k}^{\text{main}}
-\]
-
-hard exit:
-
-\[
-r_u^{\text{pos}}\le -d_k^{\max}
-\Rightarrow \pi_u=0
-\]
-
----
-
-## 17. シミュレーションメソッド
-
-### 17.1 定義
-
-\[
-\boxed{
-\mathrm{SimulateEnhancedCloseModel}
-(\mathcal D,\Theta^\ast,\text{config})
-\rightarrow
-\mathcal R
-}
-\]
-
-### 17.2 入力
-- \(\mathcal D\): 原 OHLCV 系列
-- \(\Theta^\ast\): 学習済みパラメータ
-- config: 時間足、コスト、閾値、履歴長、初期状態など
-
-### 17.3 出力
-- 各 horizon の \(\hat C_{t+h}^{(4h)}\)
-- 各時間足の \(L_5\)
-- 融合後 \(L_5^\ast\)
-- 選択 horizon \(h_t^\star\)
-- 主ポジション \(\pi_t^{\text{main}}\)
-- overlay 後の実効ポジション \(\pi_u\)
-- 取引ログ
-- PnL / utility / DD 系列
-
-### 17.4 時系列前進手順
-
-1. 原系列から 30m/1h/4h/1d/1w の確定足を生成
-2. 各時間足で \(Q,\chi,a\) を計算
-3. 前時点の \(L_5\) を使って \(g_i\) を計算
-4. \(L_0\) を構築
-5. \(\xi\) を生成
-6. 4h レビュー時刻ごとに主モデル forward
-7. horizon 選択と主ポジション決定
-8. レビュー区間内で 30m overlay を forward
-9. 実効ポジションを更新
-10. 損益系列を更新
-
-### 17.5 擬似コード
-
-```python
-def SimulateEnhancedCloseModel(raw_ohlcv, theta, config):
-    bars = build_bars(raw_ohlcv, ["30m","1h","4h","1d","1w"])
-    feat_state = init_feature_state()
-    model_state = init_model_state()
-
-    results = []
-
-    for t in review_times_4h(bars["4h"]):
-        update_bar_features_until(t, bars, feat_state, theta)
-
-        x_main = build_close_anchor_inputs(
-            bars, feat_state, model_state, t, ["4h","1d","1w"], theta
-        )
-
-        h_main = forward_main_branches(x_main, theta)
-        R_t, L5_dict, L5_star, mu_vec, sigma_vec = forward_main_heads(h_main, theta)
-
-        h_star = argmax((abs(mu_vec) - config.cost_vec) / sigma_vec)
-        pi_main = tanh(config.gamma * mu_vec[h_star] / sigma_vec[h_star])
-
-        model_state.set_main_review(t, h_star, pi_main, mu_vec, sigma_vec, L5_dict, L5_star)
-
-        for u in overlay_times_30m(t, next_review_time(t)):
-            update_bar_features_until(u, bars, feat_state, theta)
-
-            x_ov = build_close_anchor_inputs(
-                bars, feat_state, model_state, u, ["1h","30m"], theta
-            )
-
-            overlay_out = forward_overlay(x_ov, model_state, theta, u)
-            model_state.apply_overlay_decision(u, overlay_out, config)
-
-        results.append(snapshot(model_state, t))
-
-    return finalize_simulation_results(results)
-```
-
----
-
-## 18. パラメータ最適化メソッド
-
-### 18.1 定義
-
-\[
-\boxed{
-\mathrm{OptimizeEnhancedCloseModelParameters}
-(\mathcal D,\Theta_0,\text{config})
-\rightarrow
-\Theta^\ast
-}
-\]
-
-### 18.2 役割
-- 特徴量生成
-- 学習 / 検証 split
-- shape pretraining
-- main training
-- overlay training
-- utility fine-tuning
-- モデル選択
-
-を一体で実行し、最終的な \(\Theta^\ast\) を返す。
-
----
-
-## 19. loss 定義
-
-## 19.1 主モデル return loss
-
-forward return に対する heteroscedastic Huber を使う。
-
-\[
-\rho_\delta(x)=
-\begin{cases}
-\dfrac{x^2}{2\delta}, & |x|\le\delta\\[4pt]
-|x|-\dfrac{\delta}{2}, & |x|>\delta
-\end{cases}
-\]
-
-\[
-\mathcal L_{\mathrm{ret}}
-=
-\sum_{h\in\mathcal H}
-w_h
-\left[
-\rho_\delta
-\left(
-\frac{r_{t,h}^{\mathrm{fwd}}-\mu_{t,h}}{\sigma_{t,h}}
-\right)
-+
-\log \sigma_{t,h}
-\right]
-\]
-
-## 19.2 direction loss
-
-\[
-p_{t,h}
-=
-\sigma
-\left(
-\kappa\frac{\mu_{t,h}}{\sigma_{t,h}}
-\right)
-\]
-
-\[
-\mathcal L_{\mathrm{dir}}
-=
-\sum_{h\in\mathcal H}
-w_h\,
-\mathrm{BCE}
-\left(
-p_{t,h},
-\mathbf 1[r_{t,h}^{\mathrm{fwd}}>0]
-\right)
-\]
-
-## 19.3 shape loss
-
-主モデルと overlay で共通に使う shape loss を
-
-\[
-\mathcal L_{\mathrm{shape}}
-=
-\sum_{\tau}
-\lambda_\tau
-\Bigl[
-\rho(\hat u_t^{(\tau)}-u_{t+1}^{(\tau)})
-+
-2\rho(\hat b_t^{(\tau)}-b_{t+1}^{(\tau)})
-+
-\rho(\hat \ell_t^{(\tau)}-\ell_{t+1}^{(\tau)})
-\Bigr]
-\]
-
-とする。
-
-## 19.4 geometry loss
-
-\[
-\mathcal L_{\mathrm{geom}}
-=
-\sum_{\tau}
-\eta_\tau
-\left(
-\hat u_t^{(\tau)}
-+
-|\hat b_t^{(\tau)}|
-+
-\hat \ell_t^{(\tau)}
--1
-\right)^2
-\]
-
-## 19.5 close anchor 補正量正則化
-
-今回新設した \(L_0\) 補正が暴走しないよう、  
-補正量に直接正則化をかける。
-
-\[
-\boxed{
-\mathcal L_{\mathrm{corr}}
-=
-\sum_{\tau,i}
-\left(
-\frac{
-L_i^{(0,\tau)}-d_i^{(\tau)}
-}{
-a_i^{(\tau)}
-}
-\right)^2
-}
-\]
-
-この loss が重要である理由は以下の通り。
-
-- close anchor の主従関係を維持できる
-- \(\chi\) や \(g\) の寄与が過大化しにくい
-- 補正が「補助量」に留まりやすい
-
-## 19.6 fusion smoothness
-
-\[
-\mathcal L_{\mathrm{fuse}}
-=
-\zeta_d\|a_t^{(1d)}-a_{t-1}^{(1d)}\|_1
-+
-\zeta_h\|a_t^{(4h)}-a_{t-1}^{(4h)}\|_1
-\]
-
-## 19.7 overlay residual return loss
-
-\[
-\mathcal L_{\mathrm{ov-rev}}
-=
-\rho_\delta
-\left(
-\frac{
-r_u^{\mathrm{rev}}-\mu_u^{\mathrm{rev}}
-}{
-\sigma_u^{\mathrm{rev}}
-}
-\right)
-+
-\log \sigma_u^{\mathrm{rev}}
-\]
-
-## 19.8 overlay adverse excursion loss
-
-\[
-\mathcal L_{\mathrm{ov-adv}}
-=
-\mathrm{BCE}(p_u^{\mathrm{adv}},y_u^{\mathrm{adv}})
-\]
-
-## 19.9 overlay exit loss
-
-\[
-\mathcal L_{\mathrm{ov-exit}}
-=
-\mathrm{BCE}(p_u^{\mathrm{exit}},y_u^{\mathrm{exit}})
-\]
-
-## 19.10 overlay chatter loss
-
-\[
-\mathcal L_{\mathrm{ov-chat}}
-=
-|p_u^{\mathrm{exit}}-p_{u-30m}^{\mathrm{exit}}|
-\]
-
-## 19.11 utility loss
-
-\[
-\tilde w_{t,h}
-=
-\tanh
-\left(
-\gamma\frac{\mu_{t,h}}{\sigma_{t,h}}
-\right)
-\]
-
-\[
-\mathcal L_{\mathrm{util}}
-=
--
-\sum_{h\in\mathcal H}
-\nu_h
-\left[
-\tilde w_{t,h}r_{t,h}^{\mathrm{fwd}}
--
-c_h|\tilde w_{t,h}-\tilde w_{t-1,h}|
-\right]
-\]
-
----
-
-## 20. 総損失
-
-### 20.1 主モデル損失
-
-\[
-\boxed{
-\mathcal J_{\mathrm{main}}
-=
-\mathcal L_{\mathrm{ret}}
-+
-\lambda_{\mathrm{dir}}\mathcal L_{\mathrm{dir}}
-+
-\lambda_{\mathrm{shape}}\mathcal L_{\mathrm{shape,main}}
-+
-\lambda_{\mathrm{geom}}\mathcal L_{\mathrm{geom,main}}
-+
-\lambda_{\mathrm{corr}}\mathcal L_{\mathrm{corr}}
-+
-\lambda_{\mathrm{fuse}}\mathcal L_{\mathrm{fuse}}
-+
-\lambda_2\|\Theta\|_2^2
-}
-\]
-
-### 20.2 オーバーレイ損失
-
-\[
-\boxed{
-\mathcal J_{\mathrm{ov}}
-=
-0.30\,\mathcal L_{\mathrm{ov-rev}}
-+
-0.25\,\mathcal L_{\mathrm{ov-adv}}
-+
-0.25\,\mathcal L_{\mathrm{ov-exit}}
-+
-0.15\,\mathcal L_{\mathrm{shape,ov}}
-+
-0.05\,\mathcal L_{\mathrm{ov-chat}}
-+
-\lambda_{2,\mathrm{ov}}\|\Theta_{\mathrm{ov}}\|_2^2
-}
-\]
-
-### 20.3 全体損失
-
-\[
-\boxed{
-\mathcal J_{\mathrm{total}}
-=
-\mathcal J_{\mathrm{main}}
-+
-\lambda_{\mathrm{ov}}\mathcal J_{\mathrm{ov}}
-+
-\lambda_{\mathrm{util}}\mathcal L_{\mathrm{util}}
-}
-\]
-
----
-
-## 21. 学習手順
-
-### Step 0. バー生成
-原 OHLCV から 30m / 1h / 4h / 1d / 1w の確定足を生成する。
-
-### Step 1. 自己教師と close anchor 特徴生成
-各時間足で以下を生成する。
-
-- \(Q_i^{(\tau)}\)
-- \(\chi_i^{(\tau)}\)
-- \(a_i^{(\tau)}\)
-- 初期 \(L_0\)
-- \(\xi_i^{(\tau)}\)
-
-### Step 2. 時系列分割
-purged / embargoed walk-forward split を使う。  
-各 fold で訓練・検証を時系列順に分ける。
-
-### Step 3. shape pretraining
-各 branch をまず
-
-\[
-\mathcal L_{\mathrm{shape}}+\mathcal L_{\mathrm{geom}}
-\]
-
-だけで学習し、足形状の意味を安定化させる。
-
-### Step 4. main joint training
-主モデルを
-
-\[
-\mathcal J_{\mathrm{main}}
-\]
-
-で学習する。  
-このとき \(v_{i-1}\) は teacher forcing から scheduled sampling に移行する。
-
-### Step 5. overlay training
-主モデルを基本凍結し、overlay を
-
-\[
-\mathcal J_{\mathrm{ov}}
-\]
-
-で学習する。
-
-### Step 6. utility fine-tuning
-上位 fusion 層と head を中心に
-
-\[
-\mathcal J_{\mathrm{total}}
-\]
-
-で微調整する。
-
-### Step 7. threshold calibration
-validation fold を用いて以下を校正する。
-
-- \(\theta_{\mathrm{red}}\)
-- \(\theta_{\mathrm{full}}\)
-- \(\gamma\)
-- \(d_0,d_1,d_2\)
-- cost model \(c_h\)
-
-### Step 8. model selection
-評価指標:
-
-- net utility
-- drawdown
-- turnover
-- no-trade 率
-- directional accuracy
-- shape accuracy
-
-に基づいて \(\Theta^\ast\) を選ぶ。
-
----
-
-## 22. 最適化メソッドの擬似コード
-
-```python
-def OptimizeEnhancedCloseModelParameters(raw_ohlcv, theta0, config):
-    folds = make_purged_walkforward_splits(raw_ohlcv, config)
-    best_theta = None
-    best_score = -float("inf")
-
-    for fold in folds:
-        bars = build_bars(fold.train_and_valid, ["30m","1h","4h","1d","1w"])
-        feats = make_close_anchor_features(bars, config)
-
-        theta = init_or_copy(theta0)
-
-        # A. shape pretraining
-        theta = train_shape_pretraining(theta, feats, config)
-
-        # B. main joint training
-        theta = train_main_model(theta, feats, loss="J_main", config=config)
-
-        # C. overlay training
-        theta = train_overlay_model(theta, feats, loss="J_ov", config=config)
-
-        # D. utility fine-tune
-        theta = fine_tune_top_layers(theta, feats, loss="J_total", config=config)
-
-        score = evaluate_validation(theta, fold.valid, config)
-
-        if score > best_score:
-            best_score = score
-            best_theta = copy(theta)
-
-    return best_theta
-```
-
----
-
-## 23. 実装上の注意
-
-### 23.1 \(\chi\) の位置づけ
-\(\chi\) は OHLC path の簡易代理量であり、close anchor 補正の補助に使う。  
-主情報源は依然として close と multi-timeframe context である。
-
-### 23.2 \(L_0\) は補正であって本体ではない
-補正量が大きくなりすぎると close anchor の意味が崩れるため、\(\mathcal L_{\mathrm{corr}}\) を必ず入れる。
-
-### 23.3 branch の因果性
-上位足は必ず「その時点で確定している最後のバー」だけを使う。
-
-### 23.4 overlay の役割制限
-overlay は主モデルの代替ではない。  
-役割は 4h シナリオの途中破綻検知に限定する。
-
-### 23.5 過学習防止
-utility fine-tune は最後に少量だけ行い、encoder 全体を過度に更新しない。
-
----
-
-## 24. v1.2 の数理的な意義
-
-v1.2 の改善は、単なる特徴量追加ではない。  
-本質は以下の 3 点にある。
-
-1. **close-only を捨てずに強化したこと**  
-   中心は close のまま、OHLC を残差補正として組み込んだ。
-
-2. **乗算型から加算型に変えたこと**  
-   補正の意味が明確になり、数値的に安定した。
-
-3. **補助量の単位を揃えたこと**  
-   \(\chi\) と \(g\) をそのまま足すのではなく、\(a_i\) によって価格単位へ変換した。
-
----
-
-## 25. 最終まとめ
-
-v1.2 のモデルは、以下で要約できる。
-
-\[
-\boxed{
-L_i^{(0,\tau)}
-=
-C_i^{(\tau)}
-+
-a_i^{(\tau)}
-\Bigl(
-\beta_0^{(\tau)}
-+
-\beta_v^{(\tau)}g_i^{(\tau)}
-+
-\beta_x^{(\tau)}\chi_i^{(\tau)}
-+
-\beta_{vx}^{(\tau)}g_i^{(\tau)}\chi_i^{(\tau)}
-\Bigr)
-}
-\]
-
-これを close anchor として各時間足の causal TCN に入力し、
-
-- 4h / 1d / 1w で主シグナルを作る
-- 1h / 30m で離脱監視を行う
-- multi-horizon return と uncertainty を出す
-- shape 自己教師で意味を固定する
-
-というのが v1.2 の全体像である。
-
----
-
-## 26. メソッド定義（ロジックレベル）
-
-### 26.1 シミュレーションメソッド
-\[
-\mathrm{SimulateEnhancedCloseModel}
-\]
-
-役割:
-- 学習済み \(\Theta^\ast\) を使って時系列を逐次前進させる
-- 予測終値、\(L_5\)、ポジション、overlay 離脱、PnL を返す
-
-### 26.2 パラメータ最適化メソッド
-\[
-\mathrm{OptimizeEnhancedCloseModelParameters}
-\]
-
-役割:
-- 原 OHLCV から feature generation、学習、検証、モデル選択までを実行し、\(\Theta^\ast\) を返す
-
----
-
-以上を v1.2 の正式ロジック仕様とする。
+anchor 以降 8 本の `30m` future bar を使います。primary direction を `d in {-1, +1}` とすると、directed path return は
+
+`p_k = d * log(C_{t+k} / C_t)`
+
+です。
+
+- final return: `p_8`
+- adverse excursion: `abs(min(min_k p_k, 0))`
+
+overlay threshold は
+
+`delta_overlay = c_1 + overlay_delta_multiplier * sigma_t * sqrt(8)`
+
+`eta_overlay = overlay_mae_multiplier * sigma_t * sqrt(8)`
+
+で、既定値は
+
+- `overlay_delta_multiplier = 0.75`
+- `overlay_mae_multiplier = 0.7`
+
+です。overlay label は
+
+- `hold` if `final_return >= delta_overlay` and `adverse_excursion <= eta_overlay`
+- otherwise `reduce`
+
+です。
+
+## 7. モデル構造
+
+現行版のネットワークは「各時間足 encoder + simple fusion」で、旧文書にあった coarse-to-fine gated fusion とは異なります。
+
+### 7.1 TemporalEncoder
+
+各時間足は共通構造の `TemporalEncoder` で処理します。
+
+1. 入力 `feature_dim=6` を `hidden_dim` に線形射影
+2. 1D residual temporal block を dilation `1, 2, 4` で 3 段適用
+3. 各 block は `Conv1d(kernel=3) -> GELU -> Dropout -> residual`
+4. 最終時点ベクトルに `LayerNorm`
+
+### 7.2 Main Fusion
+
+`4h / 1d / 1w` の latent を concatenate し、MLP で融合します。
+
+`concat(main_4h, main_1d, main_1w) -> Linear -> GELU -> Dropout -> Linear -> GELU`
+
+### 7.3 出力 head
+
+main fusion から次を出力します。
+
+- `mu`: 各 horizon の期待 log return
+- `sigma`: 各 horizon の不確実性。`softplus(head) + 1e-4`
+- `direction_logits`: 各 horizon の 3 クラス logits
+
+各 main timeframe latent から次を出力します。
+
+- `shape_predictions[tf]`: 次バー shape 3 成分
+
+overlay 側は `1h / 30m` latent と edge を結合して binary head に入れます。
+
+`edge = mu / sigma`
+
+`overlay_input = concat(fused_main, latent_1h, latent_30m, edge)`
+
+`overlay_logits = MLP(overlay_input)`
+
+## 8. 損失関数
+
+総損失は
+
+`L = L_return + 0.35 L_dir + 0.25 L_shape + 0.15 L_overlay + 0.10 L_consistency`
+
+です。
+
+### 8.1 Return loss
+
+Heteroscedastic Huber loss を使います。
+
+`e = y - mu`
+
+`q = min(|e|, delta)`
+
+`l = |e| - q`
+
+`Huber = 0.5 q^2 + delta l`
+
+`L_return = mean(Huber / sigma^2 + log(sigma))`
+
+既定値は `delta = 0.02` です。
+
+### 8.2 Direction loss
+
+3 クラス softmax に対する focal loss です。
+
+- `gamma = 1.5`
+- class alpha = `[1.2, 0.7, 1.2]`
+- 各サンプルに `direction_weight` を掛ける
+
+### 8.3 Shape loss
+
+各 main timeframe の `smooth_l1_loss` の平均です。
+
+### 8.4 Overlay loss
+
+`binary_cross_entropy_with_logits` を使った binary loss です。
+
+### 8.5 Direction Consistency loss
+
+return head と direction head の整合を取るため、`(mu, sigma)` から implied direction probability を作り、direction logits と KL で近づけます。
+
+flat band を `b = 0.01` とすると、
+
+`p_up = 1 - Phi((b - mu) / sigma)`
+
+`p_down = Phi((-b - mu) / sigma)`
+
+`p_flat = 1 - p_up - p_down`
+
+を作り、
+
+`L_consistency = KL(log_softmax(direction_logits) || implied_probs)`
+
+を最小化します。
+
+## 9. 学習 split と OOF
+
+### 9.1 Holdout split
+
+sample 数を `N`、validation 希望数を
+
+`n_valid = max(1, int(N * (1 - train_ratio)))`
+
+とし、`n_valid <= N - 1` に切ります。
+
+purge 数は
+
+`purge = min(max_horizon, max(N - n_valid - 1, 0))`
+
+です。最終的に
+
+- train: `[0, train_end)`
+- purge: `[train_end, validation_start)`
+- validation: `[validation_start, N)`
+
+となるように切ります。
+
+これにより、purge と validation holdout が両立します。
+
+### 9.2 Walk-forward OOF
+
+policy fitting には `walk_forward_folds = 3` の OOF snapshot を使います。ここで fit するのは予測器本体ではなく、
+
+- correctness model
+- selector model
+- selection threshold
+- overlay threshold
+
+です。
+
+## 10. Selection Policy
+
+現行版の policy は `policy_service.py` に実装されています。
+
+### 10.1 Per-horizon row の特徴
+
+各 horizon row から次を作ります。
+
+- `edge = |mu| / sigma`
+- `prob_gap = top1(direction_prob) - top2(direction_prob)`
+- `sign_agreement = actionable horizons のうち現在 sign と一致する比率`
+- `raw_edge = max(|mu| - cost, 0)`
+
+correctness model の入力は
+
+- `edge`
+- `p_down`, `p_flat`, `p_up`
+- `prob_gap`
+- `sign_agreement`
+- session one-hot
+- volatility ratio
+- trend strength
+- normalized horizon
+
+selector model の入力は上記に加えて
+
+- `q`
+- `top_gap`
+
+を含みます。
+
+両モデルとも、標準化した特徴量に対する線形 logistic model です。学習には class imbalance を反映した `pos_weight` と BCE を使い、selector 側には `selector_brier_weight = 0.2` の Brier 項を追加します。
+
+### 10.2 Correctness score と selector score
+
+correctness model の出力を `q` とし、row score は
+
+`score = q^alpha * raw_edge^(1 - alpha)`
+
+です。既定値は `alpha = 0.7` です。
+
+ただし次の場合は score を `0` にします。
+
+- `predicted_sign == 0`
+- `raw_edge <= 0`
+
+selected horizon は
+
+1. `score` 最大
+2. tie の場合は `|mu|` 最大
+
+で決まります。
+
+### 10.3 Threshold calibration
+
+selection threshold は selected horizon に対する `selector_probability` 上で校正します。threshold は
+
+- global
+- by_horizon
+
+の 2 段だけを持ち、`by_regime` は現行版では空です。
+
+候補 threshold `tau` ごとに
+
+- `selected_count(tau)`
+- `success_count(tau)`
+- `precision(tau)`
+
+を計算し、Wilson 下側信頼限界
+
+`LCB(tau) = (p + z^2/(2n) - z * sqrt(p(1-p)/n + z^2/(4n^2))) / (1 + z^2/n)`
+
+を使います。ここで `p = k / n`, `k = success_count`, `n = selected_count`, `z = 1.96` です。
+
+feasible 条件は
+
+- `selected_count >= selection_min_support`
+- `LCB >= precision_target`
+
+です。既定値は
+
+- `selection_min_support = 5`
+- `precision_target = 0.8`
+
+です。
+
+feasible な候補がある場合は coverage 最大、同率なら threshold が低い方を採用します。feasible 候補が 1 つもない場合は
+
+- `selection_threshold = null`
+- `precision_infeasible = true`
+
+となり、その run は accept できません。
+
+### 10.4 Overlay threshold
+
+overlay threshold は `hold_probability` に対する global threshold だけを持ちます。こちらは feasible gate ではなく、LCB と support が最大になる threshold を選び、`[0.05, 0.95]` に clip します。
+
+### 10.5 Alignment gate
+
+direction classifier と return head の矛盾 signal は reject します。
+
+- `expected_direction = sign(mu_selected)`
+- `direction_alignment = predicted_sign != 0 and predicted_sign == expected_direction`
+
+accept 条件は次の全てです。
+
+- `predicted_sign != 0`
+- `score > 0`
+- `selection_threshold is not null`
+- `selector_probability >= selection_threshold`
+- `direction_alignment == true`
+
+## 11. 推論出力
+
+推論時は selection policy を通したうえで次を返します。
+
+- `selected_horizon`
+- `selected_direction`
+- `expected_log_returns`
+- `predicted_closes`
+- `uncertainties`
+- `accepted_signal`
+- `selection_probability`
+- `selection_threshold`
+- `correctness_probability`
+- `hold_probability`
+- `hold_threshold`
+- `overlay_action`
+- `direction_alignment`
+- `regime_id`
+- `current_close`
+
+ポジションは
+
+`raw_position = tanh(position_scale * mu_selected / sigma_selected)`
+
+をベースにし、accept されなければ `0`、最終ポジションは
+
+`position = raw_position * hold_probability`
+
+です。overlay action は
+
+- `hold` if `hold_probability >= hold_threshold`
+- `reduce` otherwise
+
+で決まります。
+
+## 12. 評価と tuning
+
+### 12.1 主な validation metrics
+
+現行版で重視するのは次です。
+
+- `selection_precision`
+- `selection_support`
+- `precision_feasible`
+- `threshold_calibration_feasible`
+- `coverage_at_target_precision`
+- `selection_brier_score`
+- `value_capture_ratio`
+- `directional_accuracy`
+- `overlay_accuracy`
+
+`profit_factor` と `signal_sortino` は保存はしますが、accepted signal が `selection_min_support` 未満なら `0` とし、sparse signal の極端値が tuning を壊さないようにしています。
+
+### 12.2 Project value score
+
+`utility_score` と `project_value_score` は依然として保存しますが、`precision_feasible == false` の run には強い penalty を掛けます。
+
+- `utility_score *= 0.5`
+- `project_value_score *= 0.25`
+
+つまり、主 KPI 未達 run が見かけ上 `positive` になりにくい仕様です。
+
+### 12.3 Leaderboard の並び順
+
+tuning の candidate 比較は、現在は次の順です。
+
+1. `precision_feasible` が真
+2. `selection_precision` が高い
+3. `coverage_at_target_precision` が高い
+4. `selection_brier_score` が低い
+5. `value_capture_ratio` が高い
+6. `directional_accuracy` が高い
+7. `best_validation_loss` が低い
+
+`profit_factor` や `signal_sortino` は leaderboard の主ソートキーには使いません。
+
+## 13. 保存物
+
+artifact には少なくとも次が出力されます。
+
+- `config.json`
+- `metrics.json`
+- `prediction.json`
+- `forecast_summary.json`
+- `analysis.json`
+- `research_report.md`
+
+これにより、モデル性能だけでなく
+
+- threshold が feasible だったか
+- signal が no-trade だったか
+- direction の不一致が起きたか
+
+まで追跡できます。
+
+## 14. 現時点の制約
+
+現行実装は前進していますが、まだ次の制約があります。
+
+1. selection threshold は `global / horizon-only` で、regime 別 partial pooling までは未実装です。
+2. selector は軽量な線形 logistic model で、複雑な non-linear meta-model は使っていません。
+3. return target の強い正規化や長期 forward simulation は未導入です。
+4. overlay は binary risk filter であり、多段 exit policy ではありません。
+
+## 15. 旧版からの読み替え
+
+旧文書を読んでいる場合は、次の読み替えをしてください。
+
+- `full_exit / hard_exit` は削除され、overlay は `reduce / hold` の 2 値です。
+- regime 別 selection threshold は現行版では使いません。
+- `accepted_signal` は単なる classifier 出力ではなく、selector threshold と alignment gate を通過したものだけです。
+- `selection_threshold = 1.0` を既定 fallback とする運用はやめ、feasible でなければ `null` を返します。
+- precision 未達 run は `project_value_score` が残っていても、研究上は low-confidence / infeasible として扱います。
