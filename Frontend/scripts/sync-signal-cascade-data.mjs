@@ -108,9 +108,14 @@ const payload = {
           coverageAt1Sigma: validationMetrics.coverage_at_1sigma ?? null,
           overlayAccuracy: validationMetrics.overlay_accuracy ?? null,
           overlayMacroF1: validationMetrics.overlay_macro_f1 ?? null,
+          selectionPrecision: validationMetrics.selection_precision ?? null,
+          coverageAtTargetPrecision: validationMetrics.coverage_at_target_precision ?? null,
+          noTradeRate: validationMetrics.no_trade_rate ?? null,
           valuePerSignal: validationMetrics.value_per_signal ?? null,
           downsidePerSignal: validationMetrics.downside_per_signal ?? null,
           valueCaptureRatio: validationMetrics.value_capture_ratio ?? null,
+          turnover: validationMetrics.turnover ?? null,
+          maxDrawdown: validationMetrics.max_drawdown ?? null,
           utilityScore: validationMetrics.utility_score ?? null,
         }
       : null,
@@ -568,7 +573,13 @@ function interpolateForecast({ anchorBar, horizonRows, bars4h, anchorIndex }) {
 
 function buildNarrative({ prediction, horizonRows }) {
   const selected = horizonRows.find((row) => row.horizon === prediction.selected_horizon) ?? horizonRows[0]
-  const directionalWord = prediction.position < -0.25 ? '下向きです。' : prediction.position > 0.25 ? '上向きです。' : '横ばいです。'
+  const directionalWord = prediction.accepted_signal === false
+    ? '見送りです。'
+    : prediction.position < -0.25
+      ? '下向きです。'
+      : prediction.position > 0.25
+        ? '上向きです。'
+        : '横ばいです。'
   const overlayWord = prediction.overlay_action === 'hold'
     ? '短期判断は維持です。'
     : `短期判断は ${translateOverlay(prediction.overlay_action)} です。`
@@ -593,7 +604,9 @@ function buildNarrative({ prediction, horizonRows }) {
     bullets: [
       `変化率は ${selected.expectedReturnPct.toFixed(2)}%、不確実性は ${selected.uncertainty.toFixed(4)} です。`,
       `予測幅は ${Math.round(selected.lowerClose).toLocaleString('ja-JP')} - ${Math.round(selected.upperClose).toLocaleString('ja-JP')} です。`,
-      `判断は ${translateOverlay(prediction.overlay_action)}、強さは ${Math.abs(prediction.position).toFixed(2)} です。`,
+      prediction.accepted_signal === false
+        ? `採用確率は ${(prediction.selection_probability * 100).toFixed(1)}%、閾値は ${(prediction.selection_threshold * 100).toFixed(1)}% です。`
+        : `判断は ${translateOverlay(prediction.overlay_action)}、強さは ${Math.abs(prediction.position).toFixed(2)} です。`,
     ],
     segments,
   }

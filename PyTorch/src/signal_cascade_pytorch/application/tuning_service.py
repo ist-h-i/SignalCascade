@@ -53,13 +53,15 @@ def tune_latest_dataset(
         candidate_dir = ensure_directory(session_dir / candidate_name)
         config = TrainingConfig(seed=seed, output_dir=str(candidate_dir), **parameters)
         model, summary = train_model(examples, config, candidate_dir)
+        selection_policy = dict(summary.pop("selection_policy"))
         latest_example = _build_latest_example(base_bars, config)
-        prediction = predict_from_example(model, latest_example, config)
+        prediction = predict_from_example(model, latest_example, config, selection_policy)
         _write_run_artifacts(
             output_dir=candidate_dir,
             config=config,
             source_payload=source_payload,
             summary=summary,
+            selection_policy=selection_policy,
             prediction=prediction,
             sample_count=len(examples),
             source_rows=len(base_bars),
@@ -68,13 +70,14 @@ def tune_latest_dataset(
             {
                 "candidate": candidate_name,
                 "best_validation_loss": summary["best_validation_loss"],
-                "utility_score": summary["validation_metrics"]["utility_score"],
-                "value_per_signal": summary["validation_metrics"]["value_per_signal"],
+                "selection_precision": summary["validation_metrics"]["selection_precision"],
+                "coverage_at_target_precision": summary["validation_metrics"]["coverage_at_target_precision"],
                 "value_capture_ratio": summary["validation_metrics"]["value_capture_ratio"],
                 "directional_accuracy": summary["validation_metrics"]["directional_accuracy"],
-                "overlay_macro_f1": summary["validation_metrics"]["overlay_macro_f1"],
+                "overlay_accuracy": summary["validation_metrics"]["overlay_accuracy"],
                 "selected_horizon": prediction.selected_horizon,
                 "position": prediction.position,
+                "accepted_signal": prediction.accepted_signal,
                 "anchor_time": prediction.anchor_time,
                 **parameters,
             }
@@ -82,7 +85,8 @@ def tune_latest_dataset(
 
     leaderboard.sort(
         key=lambda row: (
-            -float(row["utility_score"]),
+            -float(row["selection_precision"]),
+            -float(row["coverage_at_target_precision"]),
             -float(row["value_capture_ratio"]),
             -float(row["directional_accuracy"]),
             float(row["best_validation_loss"]),
@@ -145,6 +149,7 @@ def _write_run_artifacts(
     config: TrainingConfig,
     source_payload: dict[str, object],
     summary: dict[str, object],
+    selection_policy: dict[str, object],
     prediction,
     sample_count: int,
     source_rows: int,
@@ -157,6 +162,7 @@ def _write_run_artifacts(
     save_json(output_dir / "config.json", config.to_dict())
     save_json(output_dir / "source.json", source_payload)
     save_json(output_dir / "metrics.json", metrics_payload)
+    save_json(output_dir / "selection_policy.json", selection_policy)
     save_json(output_dir / "prediction.json", asdict(prediction))
     save_json(
         output_dir / "forecast_summary.json",

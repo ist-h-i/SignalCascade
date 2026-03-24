@@ -115,7 +115,7 @@ def build_selection_policy(
     for snapshot in snapshots:
         prepared_rows = _prepare_horizon_rows(snapshot, policy, config)
         for row in prepared_rows:
-            q_rows.append(_q_feature_vector(row))
+            q_rows.append(_q_feature_vector(row, snapshot, config))
             q_targets.append(
                 int(
                     row["predicted_sign"] != 0
@@ -134,7 +134,7 @@ def build_selection_policy(
     for snapshot in snapshots:
         prepared_rows = _prepare_horizon_rows(snapshot, policy, config)
         for row in prepared_rows:
-            selector_rows.append(_selector_feature_vector(row))
+            selector_rows.append(_selector_feature_vector(row, snapshot, config))
             selector_targets.append(
                 int(
                     row["predicted_sign"] != 0

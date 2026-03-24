@@ -37,7 +37,8 @@ def train_command(args) -> int:
         examples = build_training_examples(source, config)
 
     model, summary = train_model(examples, config, output_dir)
-    prediction = predict_latest(model, examples, config)
+    selection_policy = dict(summary.pop("selection_policy"))
+    prediction = predict_latest(model, examples, config, selection_policy)
 
     summary["sample_count"] = len(examples)
     summary["source"] = source_payload
@@ -47,13 +48,17 @@ def train_command(args) -> int:
     save_json(output_dir / "config.json", config.to_dict())
     save_json(output_dir / "source.json", source_payload)
     save_json(output_dir / "metrics.json", summary)
+    save_json(output_dir / "selection_policy.json", selection_policy)
     save_json(output_dir / "prediction.json", asdict(prediction))
 
     print(f"trained samples: {summary['train_samples']}")
     print(f"validation samples: {summary['validation_samples']}")
     print(f"best validation loss: {summary['best_validation_loss']:.6f}")
-    print(f"validation utility score: {summary['validation_metrics']['utility_score']:.6f}")
+    print(f"validation selection precision: {summary['validation_metrics']['selection_precision']:.4f}")
+    print(f"validation coverage@precision: {summary['validation_metrics']['coverage_at_target_precision']:.4f}")
     print(f"validation directional accuracy: {summary['validation_metrics']['directional_accuracy']:.4f}")
+    print(f"latest accepted signal: {prediction.accepted_signal}")
+    print(f"latest selection probability: {prediction.selection_probability:.4f}")
     print(f"latest overlay action: {prediction.overlay_action}")
     return 0
 
@@ -79,10 +84,14 @@ def predict_command(args) -> int:
         dropout=config.dropout,
     )
     load_checkpoint(output_dir / "model.pt", model)
-    prediction = predict_from_example(model, latest_example, config)
+    selection_policy_path = output_dir / "selection_policy.json"
+    selection_policy = load_json(selection_policy_path) if selection_policy_path.exists() else None
+    prediction = predict_from_example(model, latest_example, config, selection_policy)
     save_json(output_dir / "prediction.json", asdict(prediction))
 
     print(f"selected horizon: {prediction.selected_horizon}")
+    print(f"accepted signal: {prediction.accepted_signal}")
+    print(f"selection probability: {prediction.selection_probability:.4f}")
     print(f"position: {prediction.position:.4f}")
     print(f"overlay action: {prediction.overlay_action}")
     return 0
@@ -101,7 +110,8 @@ def tune_latest_command(args) -> int:
     print(f"current run dir: {manifest['current_dir']}")
     print(f"archive session dir: {manifest['archive_session_dir']}")
     print(f"best validation loss: {best_candidate['best_validation_loss']:.6f}")
-    print(f"best utility score: {best_candidate['utility_score']:.6f}")
+    print(f"best selection precision: {best_candidate['selection_precision']:.6f}")
+    print(f"best coverage@precision: {best_candidate['coverage_at_target_precision']:.6f}")
     print(f"selected horizon: {best_candidate['selected_horizon']}")
     return 0
 
