@@ -6,7 +6,7 @@ import torch
 
 from .config import TrainingConfig
 from .policy_service import apply_selection_policy
-from .training_service import examples_to_batch
+from .training_service import examples_to_batch, restore_return_units
 from ..domain.entities import PredictionResult, TrainingExample
 from ..infrastructure.ml.model import SignalCascadeModel
 
@@ -26,13 +26,18 @@ def predict_from_example(
     config: TrainingConfig,
     selection_policy: dict[str, object] | None = None,
 ) -> PredictionResult:
-    batch = examples_to_batch([example])
+    batch = examples_to_batch([example], config)
     model.eval()
     with torch.no_grad():
         outputs = model(batch["main"], batch["overlay"])
 
-    mean = outputs["mu"][0]
-    sigma = outputs["sigma"][0]
+    mean, sigma = restore_return_units(
+        outputs["mu"],
+        outputs["sigma"],
+        batch["return_scale"],
+    )
+    mean = mean[0]
+    sigma = sigma[0]
     direction_probabilities = torch.softmax(outputs["direction_logits"][0], dim=-1)
     overlay_probability = float(torch.sigmoid(outputs["overlay_logits"][0]).item())
     decision = apply_selection_policy(

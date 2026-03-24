@@ -49,8 +49,14 @@ class TrainingConfig:
     clean_weight_bonus: float = 0.65
     clean_weight_ratio_scale: float = 0.35
     selector_brier_weight: float = 0.2
+    direction_loss_weight: float = 0.35
+    shape_loss_weight: float = 0.25
+    overlay_loss_weight: float = 0.10
+    consistency_loss_weight: float = 0.20
     walk_forward_folds: int = 3
     position_scale: float = 1.0
+    standardized_return_clip: float = 6.0
+    return_scale_epsilon: float = 1e-4
     output_dir: str = "artifacts/demo"
     horizons: tuple[int, ...] = HORIZONS
     main_windows: dict[str, int] = field(default_factory=_default_main_windows)
@@ -95,8 +101,14 @@ class TrainingConfig:
             "clean_weight_bonus": self.clean_weight_bonus,
             "clean_weight_ratio_scale": self.clean_weight_ratio_scale,
             "selector_brier_weight": self.selector_brier_weight,
+            "direction_loss_weight": self.direction_loss_weight,
+            "shape_loss_weight": self.shape_loss_weight,
+            "overlay_loss_weight": self.overlay_loss_weight,
+            "consistency_loss_weight": self.consistency_loss_weight,
             "walk_forward_folds": self.walk_forward_folds,
             "position_scale": self.position_scale,
+            "standardized_return_clip": self.standardized_return_clip,
+            "return_scale_epsilon": self.return_scale_epsilon,
             "output_dir": self.output_dir,
             "horizons": list(self.horizons),
             "main_windows": dict(self.main_windows),
@@ -136,8 +148,14 @@ class TrainingConfig:
             clean_weight_bonus=float(payload.get("clean_weight_bonus", 0.65)),
             clean_weight_ratio_scale=float(payload.get("clean_weight_ratio_scale", 0.35)),
             selector_brier_weight=float(payload.get("selector_brier_weight", 0.2)),
+            direction_loss_weight=float(payload.get("direction_loss_weight", 0.35)),
+            shape_loss_weight=float(payload.get("shape_loss_weight", 0.25)),
+            overlay_loss_weight=float(payload.get("overlay_loss_weight", 0.10)),
+            consistency_loss_weight=float(payload.get("consistency_loss_weight", 0.20)),
             walk_forward_folds=int(payload.get("walk_forward_folds", 3)),
             position_scale=float(payload.get("position_scale", 1.0)),
+            standardized_return_clip=float(payload.get("standardized_return_clip", 6.0)),
+            return_scale_epsilon=float(payload.get("return_scale_epsilon", 1e-4)),
             output_dir=str(payload["output_dir"]),
             horizons=tuple(int(value) for value in payload["horizons"]),
             main_windows={key: int(value) for key, value in dict(payload["main_windows"]).items()},

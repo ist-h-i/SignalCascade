@@ -81,6 +81,7 @@ def _build_analysis(
     generated_at_utc = datetime.now(UTC)
     generated_at_jst = generated_at_utc.astimezone(JST)
     project_stage = _project_stage(validation)
+    learning_diagnostics = _build_learning_diagnostics(metrics)
 
     return {
         "instrument": _infer_instrument(metrics, output_dir),
@@ -108,8 +109,15 @@ def _build_analysis(
             "profit_factor": "利益総額 / 損失総額の絶対値。数値安定化のため 10.0 で上限 clip する。",
             "signal_sortino": "下方偏差で割ったリスク調整後価値。数値安定化のため 10.0 で上限 clip する。",
             "selection_brier_score": "採用確率の calibration 誤差。小さいほど良い。",
+            "best_selection_lcb": "infeasible run 同士を比較するための research 指標。候補 threshold 群で最大の Wilson LCB。",
+            "alignment_rate": "horizon ごとに `sign(mu)` と actionable sign が一致した率。",
+            "pre_threshold_capture": "threshold を課す前の仮想 capture。signal 自体に価値があるかを閾値分離で観察する。",
+            "actionable_edge_rate": "cost 控除後に positive edge が残った horizon row の比率。",
         },
+        "learning_diagnostics": learning_diagnostics,
+        "learning_findings": _build_learning_findings(learning_diagnostics, validation),
         "validation_metrics": validation,
+        "horizon_diagnostics": _build_horizon_diagnostics(validation),
         "leaderboard_top": top_candidates,
         "comparison_to_previous": comparison,
         "forecast": {
@@ -269,6 +277,8 @@ def _build_comparison(
         "utility_score",
         "selection_precision",
         "coverage_at_target_precision",
+        "best_selection_lcb",
+        "alignment_rate",
         "value_capture_ratio",
         "profit_factor",
         "signal_sortino",
@@ -327,6 +337,109 @@ def _extract_best_params(
     }
 
 
+def _build_learning_diagnostics(metrics: dict[str, object]) -> dict[str, object] | None:
+    history_raw = metrics.get("history")
+    if not isinstance(history_raw, list) or not history_raw:
+        return None
+
+    history = [dict(row) for row in history_raw if isinstance(row, dict)]
+    if not history:
+        return None
+
+    epoch_count = len(history)
+    best_epoch = max(1, int(round(float(metrics.get("best_epoch", 1.0)))))
+    best_record = next(
+        (
+            row
+            for row in history
+            if int(round(float(row.get("epoch", 0.0)))) == best_epoch
+        ),
+        history[min(best_epoch - 1, epoch_count - 1)],
+    )
+    first_record = history[0]
+    last_record = history[-1]
+    best_validation_total = float(best_record.get("validation_total", 0.0))
+    last_validation_total = float(last_record.get("validation_total", best_validation_total))
+    best_train_total = float(best_record.get("train_total", 0.0))
+
+    return {
+        "epoch_count": epoch_count,
+        "best_epoch": best_epoch,
+        "best_epoch_ratio": best_epoch / max(epoch_count, 1),
+        "first_validation_total": float(first_record.get("validation_total", 0.0)),
+        "best_validation_total": best_validation_total,
+        "last_validation_total": last_validation_total,
+        "generalization_gap_at_best": best_validation_total - best_train_total,
+        "validation_drift_from_best_to_last": last_validation_total - best_validation_total,
+        "early_peak": best_epoch <= max(1, epoch_count // 4),
+    }
+
+
+def _build_learning_findings(
+    learning_diagnostics: dict[str, object] | None,
+    validation: dict[str, object],
+) -> list[str]:
+    findings: list[str] = []
+    if learning_diagnostics:
+        best_epoch = int(learning_diagnostics.get("best_epoch", 0))
+        epoch_count = int(learning_diagnostics.get("epoch_count", 0))
+        drift = float(learning_diagnostics.get("validation_drift_from_best_to_last", 0.0))
+        if bool(learning_diagnostics.get("early_peak")):
+            findings.append(
+                f"best validation loss は epoch {best_epoch}/{epoch_count} で最小化し、その後の validation total は {drift:+.4f} 悪化した。早期ピーク型で、direction head の汎化がまだ不安定である。"
+            )
+        else:
+            findings.append(
+                f"best validation loss は epoch {best_epoch}/{epoch_count} で到達し、best 時点の generalization gap は {float(learning_diagnostics.get('generalization_gap_at_best', 0.0)):+.4f} であった。"
+            )
+
+    selection_brier_score = float(validation.get("selection_brier_score", 0.0))
+    actionable_edge_rate = float(validation.get("actionable_edge_rate", 0.0))
+    findings.append(
+        f"selector calibration は `selection_brier_score={selection_brier_score:.6f}` まで改善した一方、`actionable_edge_rate={actionable_edge_rate:.4f}` のため、cost 控除後に採用可能な edge は validation 上で未出現である。"
+    )
+
+    best_selection_lcb = float(validation.get("best_selection_lcb", 0.0))
+    support_at_best_lcb = int(round(float(validation.get("support_at_best_lcb", 0.0))))
+    precision_at_best_lcb = float(validation.get("precision_at_best_lcb", 0.0))
+    findings.append(
+        f"threshold search の研究進捗として `best_selection_lcb={best_selection_lcb:.4f}`、`support_at_best_lcb={support_at_best_lcb}`、`precision_at_best_lcb={precision_at_best_lcb:.4f}` を追跡する。feasible 未達でも threshold 面の改善度を比較できる。"
+    )
+
+    horizon_diagnostics = _build_horizon_diagnostics(validation)
+    if horizon_diagnostics:
+        densest = max(horizon_diagnostics, key=lambda row: float(row["nonflat_rate"]))
+        aligned = max(horizon_diagnostics, key=lambda row: float(row["alignment_rate"]))
+        findings.append(
+            f"ラベル密度は horizon {densest['horizon']} で最大 (`nonflat_rate={float(densest['nonflat_rate']):.4f}`)、符号整合は horizon {aligned['horizon']} が最大 (`alignment_rate={float(aligned['alignment_rate']):.4f}`) で、長短 horizon の学習難度が分かれている。"
+        )
+
+    return findings
+
+
+def _build_horizon_diagnostics(validation: dict[str, object]) -> list[dict[str, object]]:
+    raw = validation.get("horizon_diagnostics")
+    if not isinstance(raw, dict):
+        return []
+
+    rows: list[dict[str, object]] = []
+    for horizon_key, payload in raw.items():
+        if not isinstance(payload, dict):
+            continue
+        rows.append(
+            {
+                "horizon": int(horizon_key),
+                "nonflat_rate": float(payload.get("nonflat_rate", 0.0)),
+                "up_rate": float(payload.get("up_rate", 0.0)),
+                "down_rate": float(payload.get("down_rate", 0.0)),
+                "alignment_rate": float(payload.get("alignment_rate", 0.0)),
+                "actionable_edge_rate": float(payload.get("actionable_edge_rate", 0.0)),
+            }
+        )
+    rows.sort(key=lambda row: int(row["horizon"]))
+    return rows
+
+
 def _project_stage(validation: dict[str, object]) -> str:
     if not bool(validation.get("precision_feasible", False)):
         return "low-confidence"
@@ -357,12 +470,22 @@ def _project_value_summary(
             f" 選択 horizon は {int(selected_forecast['horizon_4h'])} 本先で、"
             f"期待収益率は {float(selected_forecast['expected_return_pct']) * 100:.2f}% と推定された。"
         )
+    research_progress = ""
+    if not precision_feasible:
+        research_progress = (
+            f" research progress として best_selection_lcb={float(validation.get('best_selection_lcb', 0.0)):.4f}、"
+            f" support_at_best_lcb={float(validation.get('support_at_best_lcb', 0.0)):.0f}、"
+            f" tau_at_best_lcb={_fmt(validation.get('tau_at_best_lcb'))}、"
+            f" selection_brier_score={float(validation.get('selection_brier_score', 0.0)):.6f}、"
+            f" actionable_edge_rate={float(validation.get('actionable_edge_rate', 0.0)):.4f} を併記する。"
+        )
     return (
         f"project_value_score={project_value_score:.4f}、utility_score={utility_score:.4f} により、"
         f"本 run の段階評価は `{project_stage}` である。"
         f" precision_feasible={precision_feasible}、selection_precision={selection_precision:.4f}、"
         f"value_capture_ratio={capture_ratio:.4f}、"
         f"signal_sortino={sortino:.4f} が価値面の中心指標となる。"
+        f"{research_progress}"
         f"{forecast_text}"
     )
 
@@ -397,6 +520,9 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
     selected_forecast = forecast.get("selected_forecast")
     comparison = analysis.get("comparison_to_previous")
     leaderboard_top = list(analysis.get("leaderboard_top", []))
+    learning_diagnostics = analysis.get("learning_diagnostics") or {}
+    learning_findings = list(analysis.get("learning_findings", []))
+    horizon_diagnostics = list(analysis.get("horizon_diagnostics", []))
     project_assessment = dict(analysis["project_assessment"])
     source = dataset.get("source") or {}
 
@@ -410,6 +536,8 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f" 採用モデルの `project_value_score` は {float(validation.get('project_value_score', 0.0)):.4f}、"
             f" `utility_score` は {float(validation.get('utility_score', 0.0)):.4f} であり、"
             f" 段階評価は `{project_assessment['stage']}` となった。"
+            f" `precision_feasible={validation.get('precision_feasible', False)}` で、"
+            f" research 進捗として `best_selection_lcb={float(validation.get('best_selection_lcb', 0.0)):.4f}` を得た。"
             f" 選択 horizon は {forecast['selected_horizon']} 本先、"
             f" overlay 判定は `{forecast['overlay_action']}`、"
             f" ポジションは {float(forecast['position']):.4f} である。"
@@ -441,8 +569,36 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             "- `profit_factor`: 利益総額と損失総額の比率。数値安定化のため `10.0` で上限 clip する。",
             "- `signal_sortino`: 下方リスクで調整した価値指標。数値安定化のため `10.0` で上限 clip する。",
             "- `selection_brier_score`: 採用確率の calibration 誤差。0 に近いほど良い。",
+            "- `best_selection_lcb`: feasible 未達 run の比較用に、threshold 候補群で最大の Wilson LCB を追う研究指標。",
+            "- `pre_threshold_capture`: selector threshold を適用する前の仮想 capture。シグナル原石の有無を確認する。",
+            "- `alignment_rate` / `actionable_edge_rate`: return head と direction head の整合、およびコスト控除後の実行可能 edge の発生率を監視する。",
             "",
-            "## 3. Validation Results",
+            "## 3. Learning Analysis",
+        ]
+    )
+
+    if learning_diagnostics:
+        lines.append(
+            _table(
+                headers=("Metric", "Value"),
+                rows=[
+                    ("best_epoch", _fmt(learning_diagnostics.get("best_epoch"))),
+                    ("epoch_count", _fmt(learning_diagnostics.get("epoch_count"))),
+                    ("best_epoch_ratio", _fmt(learning_diagnostics.get("best_epoch_ratio"))),
+                    ("generalization_gap_at_best", _fmt(learning_diagnostics.get("generalization_gap_at_best"))),
+                    (
+                        "validation_drift_from_best_to_last",
+                        _signed_fmt(learning_diagnostics.get("validation_drift_from_best_to_last")),
+                    ),
+                    ("early_peak", _fmt(learning_diagnostics.get("early_peak"))),
+                ],
+            )
+        )
+    lines.extend([f"- {item}" for item in learning_findings])
+    lines.extend(
+        [
+            "",
+            "## 4. Validation Results",
             _table(
                 headers=("Metric", "Value"),
                 rows=[
@@ -452,10 +608,18 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
                     ("threshold_calibration_feasible", _fmt(validation.get("threshold_calibration_feasible"))),
                     ("selection_precision", _fmt(validation.get("selection_precision"))),
                     ("selection_support", _fmt(validation.get("selection_support"))),
+                    ("best_selection_lcb", _fmt(validation.get("best_selection_lcb"))),
+                    ("support_at_best_lcb", _fmt(validation.get("support_at_best_lcb"))),
+                    ("precision_at_best_lcb", _fmt(validation.get("precision_at_best_lcb"))),
+                    ("tau_at_best_lcb", _fmt(validation.get("tau_at_best_lcb"))),
                     ("coverage_at_target_precision", _fmt(validation.get("coverage_at_target_precision"))),
                     ("value_capture_ratio", _fmt(validation.get("value_capture_ratio"))),
+                    ("pre_threshold_capture", _fmt(validation.get("pre_threshold_capture"))),
                     ("profit_factor", _fmt(validation.get("profit_factor"))),
                     ("signal_sortino", _fmt(validation.get("signal_sortino"))),
+                    ("alignment_rate", _fmt(validation.get("alignment_rate"))),
+                    ("actionable_edge_rate", _fmt(validation.get("actionable_edge_rate"))),
+                    ("nonflat_rate", _fmt(validation.get("nonflat_rate"))),
                     ("selection_brier_score", _fmt(validation.get("selection_brier_score"))),
                     ("max_drawdown", _fmt(validation.get("max_drawdown"))),
                 ],
@@ -476,7 +640,7 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
         lines.extend(
             [
                 "",
-                "## 4. Delta Vs Previous Current",
+                "## 5. Delta Vs Previous Current",
                 _table(
                     headers=("Metric", "Delta", "Previous", "Current"),
                     rows=comparison_rows,
@@ -491,6 +655,8 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
                 _fmt(row.get("project_value_score")),
                 _fmt(row.get("utility_score")),
                 _fmt(row.get("selection_precision")),
+                _fmt(row.get("best_selection_lcb")),
+                _fmt(row.get("alignment_rate")),
                 _fmt(row.get("value_capture_ratio")),
                 _fmt(row.get("profit_factor")),
             )
@@ -499,13 +665,15 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
         lines.extend(
             [
                 "",
-                "## 5. Hyperparameter Optimization",
+                "## 6. Hyperparameter Optimization",
                 _table(
                     headers=(
                         "Candidate",
                         "Project Value",
                         "Utility",
                         "Precision",
+                        "Best LCB",
+                        "Align",
                         "Capture",
                         "Profit Factor",
                     ),
@@ -515,10 +683,33 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             ]
         )
 
+    if horizon_diagnostics:
+        horizon_rows = [
+            (
+                str(row["horizon"]),
+                _fmt(row["nonflat_rate"]),
+                _fmt(row["up_rate"]),
+                _fmt(row["down_rate"]),
+                _fmt(row["alignment_rate"]),
+                _fmt(row["actionable_edge_rate"]),
+            )
+            for row in horizon_diagnostics
+        ]
+        lines.extend(
+            [
+                "",
+                "## 7. Horizon Diagnostics",
+                _table(
+                    headers=("H(4h)", "Nonflat", "Up", "Down", "Align", "Actionable Edge"),
+                    rows=horizon_rows,
+                ),
+            ]
+        )
+
     lines.extend(
         [
             "",
-            "## 6. Forecast Estimation",
+            "## 8. Forecast Estimation",
             f"- Anchor time JST: `{forecast['anchor_time_jst']}`",
             f"- Anchor close: `{float(forecast['anchor_close']):.4f}`",
             f"- Selected direction classifier: `{forecast['selected_direction_label']}`",
@@ -560,7 +751,7 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
                 rows=forecast_rows,
             ),
             "",
-            "## 7. Project Value Assessment",
+            "## 9. Project Value Assessment",
             str(project_assessment["summary"]),
             "",
             "### Limitations",
@@ -575,7 +766,8 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
                 f"現時点の `project_value_score={float(validation.get('project_value_score', 0.0)):.4f}` は、"
                 f"本プロジェクトが `{project_assessment['stage']}` の段階にあることを示す。"
                 " 価値指標の中心は `selection_precision`, `value_capture_ratio`, `profit_factor`, "
-                "`signal_sortino`, `selection_brier_score` であり、今後は validation の拡張と"
+                "`signal_sortino`, `selection_brier_score` である。現状の主なボトルネックは "
+                "`actionable_edge_rate` と `precision_feasible` であり、今後は validation の拡張と"
                 " forward simulation を通じて外部妥当性を詰めるのが次段階である。"
             ),
             "",

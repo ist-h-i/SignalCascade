@@ -3,12 +3,14 @@ from __future__ import annotations
 import torch
 from torch.nn import functional as functional
 
+from ...application.config import TrainingConfig
 from ...domain.timeframes import MAIN_TIMEFRAMES
 
 
 def total_loss(
     outputs: dict[str, object],
     batch: dict[str, object],
+    config: TrainingConfig,
 ) -> tuple[torch.Tensor, dict[str, float]]:
     return_loss = heteroscedastic_huber_loss(outputs["mu"], outputs["sigma"], batch["returns"])
     direction_loss = directional_focal_loss(
@@ -22,13 +24,14 @@ def total_loss(
         outputs["mu"],
         outputs["sigma"],
         outputs["direction_logits"],
+        batch["direction_band"],
     )
     total = (
         return_loss
-        + (0.35 * direction_loss)
-        + (0.25 * shape_loss)
-        + (0.15 * overlay_loss)
-        + (0.10 * consistency_loss)
+        + (config.direction_loss_weight * direction_loss)
+        + (config.shape_loss_weight * shape_loss)
+        + (config.overlay_loss_weight * overlay_loss)
+        + (config.consistency_loss_weight * consistency_loss)
     )
     return total, {
         "total": float(total.item()),
@@ -93,13 +96,17 @@ def direction_consistency_loss(
     mean: torch.Tensor,
     sigma: torch.Tensor,
     direction_logits: torch.Tensor,
-    flat_band: float = 0.01,
+    flat_band: torch.Tensor | float = 0.01,
 ) -> torch.Tensor:
     clamped_sigma = sigma.clamp_min(1e-4)
+    if isinstance(flat_band, torch.Tensor):
+        band = flat_band.to(device=mean.device, dtype=mean.dtype)
+    else:
+        band = torch.full_like(mean, float(flat_band))
     sqrt_two = torch.sqrt(torch.tensor(2.0, dtype=mean.dtype, device=mean.device))
 
-    z_up = (flat_band - mean) / clamped_sigma
-    z_down = (-flat_band - mean) / clamped_sigma
+    z_up = (band - mean) / clamped_sigma
+    z_down = (-band - mean) / clamped_sigma
     p_up = 1.0 - (0.5 * (1.0 + torch.erf(z_up / sqrt_two)))
     p_down = 0.5 * (1.0 + torch.erf(z_down / sqrt_two))
     p_flat = (1.0 - p_up - p_down).clamp_min(1e-6)

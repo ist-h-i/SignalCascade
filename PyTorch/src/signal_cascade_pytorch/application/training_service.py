@@ -35,7 +35,10 @@ class TorchExampleDataset(Dataset):
         return self._examples[index]
 
 
-def examples_to_batch(examples: Sequence[TrainingExample]) -> dict[str, object]:
+def examples_to_batch(
+    examples: Sequence[TrainingExample],
+    config: TrainingConfig,
+) -> dict[str, object]:
     main = {
         timeframe: torch.tensor(
             [example.main_sequences[timeframe] for example in examples],
@@ -57,14 +60,43 @@ def examples_to_batch(examples: Sequence[TrainingExample]) -> dict[str, object]:
         )
         for timeframe in MAIN_TIMEFRAMES
     }
+    raw_returns = torch.tensor(
+        [example.returns_target for example in examples],
+        dtype=torch.float32,
+    )
+    return_scales = torch.tensor(
+        [
+            [_return_scale(example.realized_volatility, horizon, config) for horizon in config.horizons]
+            for example in examples
+        ],
+        dtype=torch.float32,
+    )
+    standardized_returns = torch.clamp(
+        raw_returns / return_scales,
+        min=-config.standardized_return_clip,
+        max=config.standardized_return_clip,
+    )
+    direction_band = torch.tensor(
+        [
+            [
+                float(example.direction_thresholds[horizon_index]) / max(
+                    _return_scale(example.realized_volatility, horizon, config),
+                    1e-6,
+                )
+                for horizon_index, horizon in enumerate(config.horizons)
+            ]
+            for example in examples
+        ],
+        dtype=torch.float32,
+    )
     return {
         "main": main,
         "overlay": overlay,
         "shape_targets": shape_targets,
-        "returns": torch.tensor(
-            [example.returns_target for example in examples],
-            dtype=torch.float32,
-        ),
+        "returns": standardized_returns,
+        "returns_raw": raw_returns,
+        "return_scale": return_scales,
+        "direction_band": direction_band,
         "direction_target": torch.tensor(
             [[direction + 1 for direction in example.direction_targets] for example in examples],
             dtype=torch.long,
@@ -82,6 +114,14 @@ def examples_to_batch(examples: Sequence[TrainingExample]) -> dict[str, object]:
             dtype=torch.float32,
         ),
     }
+
+
+def restore_return_units(
+    mean: torch.Tensor,
+    sigma: torch.Tensor,
+    return_scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    return mean * return_scale, sigma * return_scale
 
 
 def train_model(
@@ -150,18 +190,34 @@ def evaluate_model(
     hold_probabilities: list[float] = []
     hold_labels: list[int] = []
     overlay_predictions: list[int] = []
+    pre_threshold_value_sum = 0.0
+    pre_threshold_abs_value_sum = 0.0
     horizon_counts = {str(horizon): 0 for horizon in config.horizons}
     horizon_to_index = {horizon: index for index, horizon in enumerate(config.horizons)}
+    horizon_audit = {
+        str(horizon): {
+            "samples": 0,
+            "nonflat": 0,
+            "up": 0,
+            "down": 0,
+            "alignment": 0,
+            "actionable_edge": 0,
+        }
+        for horizon in config.horizons
+    }
 
     with torch.no_grad():
         for chunk in _chunk_examples(examples, config.batch_size):
-            batch = examples_to_batch(chunk)
+            batch = examples_to_batch(chunk, config)
             outputs = model(batch["main"], batch["overlay"])
-            predicted_returns = outputs["mu"]
-            predicted_sigma = outputs["sigma"]
+            predicted_returns, predicted_sigma = restore_return_units(
+                outputs["mu"],
+                outputs["sigma"],
+                batch["return_scale"],
+            )
             direction_probabilities = torch.softmax(outputs["direction_logits"], dim=-1)
             overlay_probabilities = torch.sigmoid(outputs["overlay_logits"].squeeze(-1))
-            target_returns = batch["returns"]
+            target_returns = batch["returns_raw"]
             absolute_error = (predicted_returns - target_returns).abs()
             direction_targets = functional.one_hot(batch["direction_target"], num_classes=3).float()
 
@@ -190,6 +246,18 @@ def evaluate_model(
                     policy=selection_policy,
                     config=config,
                 )
+                for horizon_index, row in enumerate(decision["horizon_rows"]):
+                    audit = horizon_audit[str(row["horizon"])]
+                    audit["samples"] += 1
+                    direction_target = int(example.direction_targets[horizon_index])
+                    audit["nonflat"] += int(direction_target != 0)
+                    audit["up"] += int(direction_target > 0)
+                    audit["down"] += int(direction_target < 0)
+                    audit["alignment"] += int(
+                        int(row["actionable_sign"]) != 0
+                        and _sign_from_value(float(row["mean"])) == int(row["actionable_sign"])
+                    )
+                    audit["actionable_edge"] += int(float(row["actionable_edge"]) > 0.0)
 
                 if decision["accepted_signal"]:
                     accepted_signals += 1
@@ -208,8 +276,11 @@ def evaluate_model(
                 horizon_counts[str(decision["selected_horizon"])] += 1
                 realized_return = float(example.returns_target[selected_index])
                 realized_value = float(decision["position"]) * realized_return
+                pre_threshold_value = float(decision["pre_threshold_position"]) * realized_return
                 realized_value_sum += realized_value
                 realized_value_abs_sum += abs(realized_return)
+                pre_threshold_value_sum += pre_threshold_value
+                pre_threshold_abs_value_sum += abs(realized_return)
                 gross_profit += max(realized_value, 0.0)
                 gross_loss += min(realized_value, 0.0)
                 realized_values.append(realized_value)
@@ -241,12 +312,27 @@ def evaluate_model(
     sortino_score = _bounded_score(signal_sortino)
     drawdown_score = _drawdown_score(realized_value_sum, max_drawdown)
     calibration_score = _clamp(1.0 - selection_brier_score)
+    alignment_rate = (
+        sum(int(audit["alignment"]) for audit in horizon_audit.values())
+        / max(sum(int(audit["samples"]) for audit in horizon_audit.values()), 1)
+    )
+    actionable_edge_rate = (
+        sum(int(audit["actionable_edge"]) for audit in horizon_audit.values())
+        / max(sum(int(audit["samples"]) for audit in horizon_audit.values()), 1)
+    )
+    nonflat_rate = (
+        sum(int(audit["nonflat"]) for audit in horizon_audit.values())
+        / max(sum(int(audit["samples"]) for audit in horizon_audit.values()), 1)
+    )
+    hold_rate = sum(hold_labels) / total_examples
+    pre_threshold_capture = pre_threshold_value_sum / max(pre_threshold_abs_value_sum, 1e-6)
     threshold_calibration_feasible = _policy_has_feasible_threshold(selection_policy)
     precision_feasible = (
         accepted_signals >= config.selection_min_support
         and selection_precision >= config.precision_target
         and threshold_calibration_feasible
     )
+    threshold_meta = _selection_threshold_meta(selection_policy)
     utility_score = (
         (0.30 * selection_precision)
         + (0.20 * coverage)
@@ -293,6 +379,7 @@ def evaluate_model(
         "selection_brier_score": selection_brier_score,
         "selection_calibration_error": selection_calibration_error,
         "hold_brier_score": hold_brier_score,
+        "hold_rate": hold_rate,
         "turnover": turnover,
         "max_drawdown": max_drawdown,
         "capture_score": capture_score,
@@ -300,10 +387,28 @@ def evaluate_model(
         "sortino_score": sortino_score,
         "drawdown_score": drawdown_score,
         "calibration_score": calibration_score,
+        "alignment_rate": alignment_rate,
+        "actionable_edge_rate": actionable_edge_rate,
+        "nonflat_rate": nonflat_rate,
+        "pre_threshold_capture": pre_threshold_capture,
+        "best_selection_lcb": threshold_meta["best_selection_lcb"],
+        "support_at_best_lcb": threshold_meta["support_at_best_lcb"],
+        "precision_at_best_lcb": threshold_meta["precision_at_best_lcb"],
+        "tau_at_best_lcb": threshold_meta["tau_at_best_lcb"],
         "utility_score": utility_score,
         "project_value_score": project_value_score,
         "selected_horizon_distribution": {
             horizon: horizon_counts[horizon] / total_examples for horizon in sorted(horizon_counts)
+        },
+        "horizon_diagnostics": {
+            horizon: {
+                "nonflat_rate": int(audit["nonflat"]) / max(int(audit["samples"]), 1),
+                "up_rate": int(audit["up"]) / max(int(audit["samples"]), 1),
+                "down_rate": int(audit["down"]) / max(int(audit["samples"]), 1),
+                "alignment_rate": int(audit["alignment"]) / max(int(audit["samples"]), 1),
+                "actionable_edge_rate": int(audit["actionable_edge"]) / max(int(audit["samples"]), 1),
+            }
+            for horizon, audit in sorted(horizon_audit.items(), key=lambda item: int(item[0]))
         },
     }
 
@@ -329,13 +434,13 @@ def _fit_model(
         TorchExampleDataset(train_examples),
         batch_size=config.batch_size,
         shuffle=True,
-        collate_fn=examples_to_batch,
+        collate_fn=lambda batch_examples: examples_to_batch(batch_examples, config),
     )
     valid_loader = DataLoader(
         TorchExampleDataset(valid_examples),
         batch_size=config.batch_size,
         shuffle=False,
-        collate_fn=examples_to_batch,
+        collate_fn=lambda batch_examples: examples_to_batch(batch_examples, config),
     )
 
     best_validation_loss = float("inf")
@@ -344,8 +449,8 @@ def _fit_model(
     history: list[dict[str, float]] = []
 
     for epoch in range(1, config.epochs + 1):
-        train_metrics = _run_epoch(model, train_loader, optimizer)
-        valid_metrics = _run_epoch(model, valid_loader)
+        train_metrics = _run_epoch(model, train_loader, config, optimizer)
+        valid_metrics = _run_epoch(model, valid_loader, config)
         history.append(
             {
                 "epoch": float(epoch),
@@ -398,15 +503,20 @@ def _predict_snapshots(
     snapshots: list[dict[str, object]] = []
     with torch.no_grad():
         for chunk in _chunk_examples(examples, config.batch_size):
-            batch = examples_to_batch(chunk)
+            batch = examples_to_batch(chunk, config)
             outputs = model(batch["main"], batch["overlay"])
             direction_probabilities = torch.softmax(outputs["direction_logits"], dim=-1)
             overlay_probabilities = torch.sigmoid(outputs["overlay_logits"].squeeze(-1))
+            predicted_returns, predicted_sigma = restore_return_units(
+                outputs["mu"],
+                outputs["sigma"],
+                batch["return_scale"],
+            )
             snapshots.extend(
                 build_prediction_snapshots(
                     examples=chunk,
-                    mean=outputs["mu"],
-                    sigma=outputs["sigma"],
+                    mean=predicted_returns,
+                    sigma=predicted_sigma,
                     direction_probabilities=direction_probabilities,
                     overlay_probabilities=overlay_probabilities,
                     config=config,
@@ -473,6 +583,7 @@ def _chunk_examples(
 def _run_epoch(
     model: SignalCascadeModel,
     loader: DataLoader,
+    config: TrainingConfig,
     optimizer: torch.optim.Optimizer | None = None,
 ) -> dict[str, float]:
     training = optimizer is not None
@@ -486,7 +597,7 @@ def _run_epoch(
 
         with torch.set_grad_enabled(training):
             outputs = model(batch["main"], batch["overlay"])
-            loss, metrics = total_loss(outputs, batch)
+            loss, metrics = total_loss(outputs, batch, config)
             if training:
                 loss.backward()
                 torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -583,14 +694,49 @@ def _drawdown_score(total_value: float, max_drawdown: float) -> float:
     return total_value / max(total_value + max_drawdown, 1e-6)
 
 
+def _return_scale(
+    realized_volatility: float,
+    horizon: int,
+    config: TrainingConfig,
+) -> float:
+    return max((float(realized_volatility) * sqrt(horizon)) + config.return_scale_epsilon, 1e-6)
+
+
+def _selection_threshold_meta(policy: dict[str, object] | None) -> dict[str, float | None]:
+    if not policy:
+        return {
+            "best_selection_lcb": 0.0,
+            "support_at_best_lcb": 0.0,
+            "precision_at_best_lcb": 0.0,
+            "tau_at_best_lcb": None,
+        }
+
+    threshold_meta = dict(policy.get("selection_thresholds", {}).get("meta", {}))
+    global_meta = dict(threshold_meta.get("global", {}))
+    return {
+        "best_selection_lcb": float(global_meta.get("best_selection_lcb", 0.0)),
+        "support_at_best_lcb": float(global_meta.get("support_at_best_lcb", 0.0)),
+        "precision_at_best_lcb": float(global_meta.get("precision_at_best_lcb", 0.0)),
+        "tau_at_best_lcb": (
+            None
+            if global_meta.get("tau_at_best_lcb") is None
+            else float(global_meta.get("tau_at_best_lcb", 0.0))
+        ),
+    }
+
+
 def _policy_has_feasible_threshold(policy: dict[str, object] | None) -> bool:
     if not policy:
         return False
 
     threshold_meta = dict(policy.get("selection_thresholds", {}).get("meta", {}))
     global_meta = dict(threshold_meta.get("global", {}))
-    if bool(global_meta.get("feasible")):
-        return True
+    return bool(global_meta.get("feasible"))
 
-    by_horizon = dict(threshold_meta.get("by_horizon", {}))
-    return any(bool(meta.get("feasible")) for meta in by_horizon.values() if isinstance(meta, dict))
+
+def _sign_from_value(value: float) -> int:
+    if value > 0.0:
+        return 1
+    if value < 0.0:
+        return -1
+    return 0

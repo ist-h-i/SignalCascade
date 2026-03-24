@@ -1,0 +1,147 @@
+from __future__ import annotations
+
+import unittest
+from datetime import datetime, timezone
+
+import torch
+
+from signal_cascade_pytorch.application.config import TrainingConfig
+from signal_cascade_pytorch.application.policy_service import (
+    _augment_snapshot,
+    _calibrate_threshold,
+    _lookup_selection_threshold,
+    build_default_policy,
+)
+from signal_cascade_pytorch.application.training_service import examples_to_batch, restore_return_units
+from signal_cascade_pytorch.domain.entities import TrainingExample
+from signal_cascade_pytorch.domain.timeframes import MAIN_TIMEFRAMES, OVERLAY_TIMEFRAMES
+
+
+def _example(
+    *,
+    returns_target: tuple[float, ...],
+    direction_targets: tuple[int, ...],
+    direction_thresholds: tuple[float, ...],
+    realized_volatility: float = 0.02,
+) -> TrainingExample:
+    main_sequences = {timeframe: [(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)] for timeframe in MAIN_TIMEFRAMES}
+    overlay_sequences = {
+        timeframe: [(0.0, 0.0, 0.0, 0.0, 0.0, 0.0)] for timeframe in OVERLAY_TIMEFRAMES
+    }
+    main_shape_targets = {timeframe: (0.0, 0.0, 0.0) for timeframe in MAIN_TIMEFRAMES}
+    horizon_costs = tuple(0.001 for _ in returns_target)
+    direction_weights = tuple(1.0 for _ in returns_target)
+    return TrainingExample(
+        anchor_time=datetime(2026, 3, 24, 0, 0, tzinfo=timezone.utc),
+        main_sequences=main_sequences,
+        overlay_sequences=overlay_sequences,
+        main_shape_targets=main_shape_targets,
+        returns_target=returns_target,
+        direction_targets=direction_targets,
+        direction_weights=direction_weights,
+        direction_thresholds=direction_thresholds,
+        horizon_costs=horizon_costs,
+        overlay_target=0,
+        current_close=100.0,
+        regime_id="asia|low|range",
+        regime_features=(1.0, 0.0, 0.0, 0.0, 0.0),
+        realized_volatility=realized_volatility,
+        trend_strength=0.1,
+    )
+
+
+class PolicyAndTrainingTests(unittest.TestCase):
+    def test_sign_aware_score_rejects_misaligned_mean(self) -> None:
+        config = TrainingConfig(horizons=(1, 2))
+        policy = build_default_policy(config)
+        policy["selection_thresholds"]["global"] = 0.5
+        snapshot = {
+            "anchor_time": "2026-03-24T00:00:00+00:00",
+            "regime_id": "asia|low|range",
+            "regime_features": [1.0, 0.0, 0.0, 0.0, 0.0],
+            "realized_volatility": 0.02,
+            "trend_strength": 0.1,
+            "overlay_target": 0,
+            "overlay_probability": 0.4,
+            "horizons": [
+                {
+                    "horizon": 1,
+                    "mean": -0.03,
+                    "sigma": 0.01,
+                    "cost": 0.005,
+                    "predicted_sign": 1,
+                    "true_return": -0.01,
+                    "true_direction": -1,
+                    "direction_probabilities": [0.1, 0.1, 0.8],
+                },
+                {
+                    "horizon": 2,
+                    "mean": 0.02,
+                    "sigma": 0.01,
+                    "cost": 0.005,
+                    "predicted_sign": 1,
+                    "true_return": 0.01,
+                    "true_direction": 1,
+                    "direction_probabilities": [0.2, 0.1, 0.7],
+                },
+            ],
+        }
+
+        decision = _augment_snapshot(snapshot, policy, config)
+
+        self.assertEqual(decision["selected_horizon"], 2)
+        first_row = next(row for row in decision["horizon_rows"] if int(row["horizon"]) == 1)
+        self.assertEqual(float(first_row["actionable_edge"]), 0.0)
+        self.assertEqual(float(first_row["score"]), 0.0)
+
+    def test_lookup_selection_threshold_uses_global_scope(self) -> None:
+        config = TrainingConfig(horizons=(1, 2))
+        policy = build_default_policy(config)
+        policy["selection_thresholds"]["global"] = 0.61
+        policy["selection_thresholds"]["by_horizon"]["1"] = 0.95
+
+        threshold = _lookup_selection_threshold(policy, "asia|low|range", 1)
+
+        self.assertAlmostEqual(float(threshold), 0.61)
+
+    def test_calibrate_threshold_reports_best_lcb_metadata(self) -> None:
+        config = TrainingConfig(selection_min_support=2, precision_target=0.95)
+        records = [
+            {"score": 0.91, "target": 1, "horizon": 1, "regime_id": "r"},
+            {"score": 0.89, "target": 1, "horizon": 1, "regime_id": "r"},
+            {"score": 0.72, "target": 0, "horizon": 1, "regime_id": "r"},
+            {"score": 0.68, "target": 1, "horizon": 1, "regime_id": "r"},
+        ]
+
+        bundle = _calibrate_threshold(records, config)
+        meta = dict(bundle["meta"])
+
+        self.assertIn("best_selection_lcb", meta)
+        self.assertIn("support_at_best_lcb", meta)
+        self.assertIn("precision_at_best_lcb", meta)
+        self.assertIn("tau_at_best_lcb", meta)
+        self.assertGreaterEqual(float(meta["best_selection_lcb"]), 0.0)
+
+    def test_return_standardization_round_trips_to_raw_units(self) -> None:
+        config = TrainingConfig(horizons=(1, 4), standardized_return_clip=6.0)
+        example = _example(
+            returns_target=(0.01, 0.02),
+            direction_targets=(1, -1),
+            direction_thresholds=(0.015, 0.03),
+            realized_volatility=0.02,
+        )
+
+        batch = examples_to_batch([example], config)
+        restored_mean, restored_sigma = restore_return_units(
+            batch["returns"],
+            torch.ones_like(batch["returns"]),
+            batch["return_scale"],
+        )
+
+        self.assertAlmostEqual(float(restored_mean[0, 0]), 0.01, places=6)
+        self.assertAlmostEqual(float(restored_mean[0, 1]), 0.02, places=6)
+        self.assertGreater(float(restored_sigma[0, 0]), 0.0)
+
+
+if __name__ == "__main__":
+    unittest.main()

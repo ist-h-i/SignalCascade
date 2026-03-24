@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import math
 from bisect import bisect_right
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 
 from .config import TrainingConfig
 from .ports import MarketDataSource
@@ -71,6 +71,19 @@ def trim_base_bars_for_latest_inference(
         return True
 
     return _trim_base_bars(base_bars, is_valid)
+
+
+def limit_base_bars_to_lookback_days(
+    base_bars: list[OHLCVBar],
+    lookback_days: int | None,
+) -> list[OHLCVBar]:
+    if lookback_days is None or lookback_days <= 0 or not base_bars:
+        return list(base_bars)
+
+    ordered = sorted(base_bars, key=lambda bar: bar.timestamp)
+    cutoff = ordered[-1].timestamp - timedelta(days=int(lookback_days))
+    limited = [bar for bar in ordered if bar.timestamp >= cutoff]
+    return limited or ordered
 
 
 def _trim_base_bars(
@@ -171,6 +184,7 @@ def _build_examples(
         returns_target: list[float] = []
         direction_targets: list[int] = []
         direction_weights: list[float] = []
+        direction_thresholds: list[float] = []
         horizon_costs: list[float] = []
 
         for horizon in config.horizons:
@@ -212,6 +226,7 @@ def _build_examples(
             returns_target.append(target_return)
             direction_targets.append(direction_target)
             direction_weights.append(weight)
+            direction_thresholds.append(delta)
             horizon_costs.append(cost)
 
         if len(returns_target) != len(config.horizons):
@@ -235,6 +250,7 @@ def _build_examples(
                 returns_target=tuple(returns_target),
                 direction_targets=tuple(direction_targets),
                 direction_weights=tuple(direction_weights),
+                direction_thresholds=tuple(direction_thresholds),
                 horizon_costs=tuple(horizon_costs),
                 overlay_target=overlay_target,
                 current_close=anchor_row.close,
@@ -305,6 +321,10 @@ def _build_latest_example(
             returns_target=tuple(0.0 for _ in config.horizons),
             direction_targets=tuple(0 for _ in config.horizons),
             direction_weights=tuple(1.0 for _ in config.horizons),
+            direction_thresholds=tuple(
+                _main_move_threshold(config, horizon, realized_volatility, regime)
+                for horizon in config.horizons
+            ),
             horizon_costs=tuple(config.cost_for_horizon(horizon) for horizon in config.horizons),
             overlay_target=0,
             current_close=anchor_row.close,

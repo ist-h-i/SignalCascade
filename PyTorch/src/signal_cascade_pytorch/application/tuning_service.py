@@ -10,6 +10,7 @@ from .config import TrainingConfig
 from .dataset_service import (
     build_latest_inference_example_from_bars,
     build_training_examples_from_bars,
+    limit_base_bars_to_lookback_days,
     trim_base_bars_for_latest_inference,
 )
 from .inference_service import predict_from_example
@@ -33,6 +34,8 @@ def tune_latest_dataset(
     csv_path: Path,
     artifact_root: Path,
     seed: int = 7,
+    config_overrides: dict[str, object] | None = None,
+    lookback_days: int | None = None,
 ) -> dict[str, object]:
     csv_path = csv_path.expanduser().resolve()
     artifact_root = artifact_root.expanduser().resolve()
@@ -40,20 +43,27 @@ def tune_latest_dataset(
     current_dir = artifact_root / "current"
     source = CsvMarketDataSource(csv_path)
     base_bars = source.load_bars()
+    source_rows_original = len(base_bars)
+    base_bars = limit_base_bars_to_lookback_days(base_bars, lookback_days)
+    source_rows_used = len(base_bars)
+    static_overrides = dict(config_overrides or {})
 
-    baseline_config = TrainingConfig(seed=seed, output_dir=str(current_dir))
+    baseline_config = TrainingConfig(seed=seed, output_dir=str(current_dir), **static_overrides)
     examples = build_training_examples_from_bars(base_bars, baseline_config)
     inherited_parameters = _load_parameter_seed(artifact_root)
+    inherited_parameters.update(_extract_tunable_overrides(static_overrides))
     candidate_parameters = _build_candidate_parameters(inherited_parameters)
     session_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     session_dir = ensure_directory(archive_root / f"session_{session_id}")
     source_payload = {"kind": "csv", "path": str(csv_path)}
+    if lookback_days is not None:
+        source_payload["lookback_days"] = int(lookback_days)
     leaderboard: list[dict[str, object]] = []
 
     for index, parameters in enumerate(candidate_parameters, start=1):
         candidate_name = f"candidate_{index:02d}"
         candidate_dir = ensure_directory(session_dir / candidate_name)
-        config = TrainingConfig(seed=seed, output_dir=str(candidate_dir), **parameters)
+        config = TrainingConfig(seed=seed, output_dir=str(candidate_dir), **static_overrides, **parameters)
         model, summary = train_model(examples, config, candidate_dir)
         selection_policy = dict(summary.pop("selection_policy"))
         latest_example = _build_latest_example(base_bars, config)
@@ -66,7 +76,8 @@ def tune_latest_dataset(
             selection_policy=selection_policy,
             prediction=prediction,
             sample_count=len(examples),
-            source_rows=len(base_bars),
+            source_rows_original=source_rows_original,
+            source_rows_used=source_rows_used,
         )
         leaderboard.append(
             {
@@ -79,6 +90,12 @@ def tune_latest_dataset(
                 "coverage_at_target_precision": summary["validation_metrics"]["coverage_at_target_precision"],
                 "selection_brier_score": summary["validation_metrics"]["selection_brier_score"],
                 "value_capture_ratio": summary["validation_metrics"]["value_capture_ratio"],
+                "best_selection_lcb": summary["validation_metrics"]["best_selection_lcb"],
+                "support_at_best_lcb": summary["validation_metrics"]["support_at_best_lcb"],
+                "precision_at_best_lcb": summary["validation_metrics"]["precision_at_best_lcb"],
+                "tau_at_best_lcb": summary["validation_metrics"]["tau_at_best_lcb"],
+                "alignment_rate": summary["validation_metrics"]["alignment_rate"],
+                "pre_threshold_capture": summary["validation_metrics"]["pre_threshold_capture"],
                 "profit_factor": summary["validation_metrics"]["profit_factor"],
                 "signal_sortino": summary["validation_metrics"]["signal_sortino"],
                 "directional_accuracy": summary["validation_metrics"]["directional_accuracy"],
@@ -96,6 +113,10 @@ def tune_latest_dataset(
             -int(bool(row["precision_feasible"])),
             -float(row["selection_precision"]),
             -float(row["coverage_at_target_precision"]),
+            -float(row["best_selection_lcb"]),
+            -float(row["support_at_best_lcb"]),
+            -float(row["alignment_rate"]),
+            -float(row["pre_threshold_capture"]),
             float(row["selection_brier_score"]),
             -float(row["value_capture_ratio"]),
             -float(row["directional_accuracy"]),
@@ -121,8 +142,10 @@ def tune_latest_dataset(
         "archive_session_dir": str(session_dir),
         "leaderboard_path": str(session_dir / "leaderboard.json"),
         "source_path": str(csv_path),
+        "lookback_days": lookback_days,
         "sample_count": len(examples),
-        "source_rows": len(base_bars),
+        "source_rows_original": source_rows_original,
+        "source_rows_used": source_rows_used,
         "best_candidate": best_result,
         "archived_previous_current_dir": str(archived_current_dir) if archived_current_dir else None,
         "archived_legacy_root_dirs": [str(path) for path in archived_legacy_root_dirs],
@@ -166,13 +189,14 @@ def _write_run_artifacts(
     selection_policy: dict[str, object],
     prediction,
     sample_count: int,
-    source_rows: int,
+    source_rows_original: int,
+    source_rows_used: int,
 ) -> None:
     metrics_payload = dict(summary)
     metrics_payload["sample_count"] = sample_count
     metrics_payload["source"] = source_payload
-    metrics_payload["source_rows_original"] = source_rows
-    metrics_payload["source_rows_used"] = source_rows
+    metrics_payload["source_rows_original"] = source_rows_original
+    metrics_payload["source_rows_used"] = source_rows_used
     anchor_close = float(prediction.current_close)
     save_json(output_dir / "config.json", config.to_dict())
     save_json(output_dir / "source.json", source_payload)
@@ -280,6 +304,18 @@ def _coerce_parameter_payload(payload: dict[str, object]) -> dict[str, object]:
             payload.get("weight_decay", _FALLBACK_PARAMETERS["weight_decay"])
         ),
     }
+
+
+def _extract_tunable_overrides(payload: dict[str, object]) -> dict[str, object]:
+    tunable_keys = {
+        "epochs",
+        "batch_size",
+        "learning_rate",
+        "hidden_dim",
+        "dropout",
+        "weight_decay",
+    }
+    return {key: payload[key] for key in tunable_keys if key in payload}
 
 
 def _build_candidate_parameters(previous: dict[str, object]) -> list[dict[str, object]]:

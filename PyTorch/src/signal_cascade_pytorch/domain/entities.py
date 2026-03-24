@@ -35,6 +35,7 @@ class TrainingExample:
     returns_target: tuple[float, ...]
     direction_targets: tuple[int, ...]
     direction_weights: tuple[float, ...]
+    direction_thresholds: tuple[float, ...]
     horizon_costs: tuple[float, ...]
     overlay_target: int
     current_close: float
