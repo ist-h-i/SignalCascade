@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import csv
 from collections import defaultdict
+from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
@@ -14,6 +15,8 @@ from .training_service import examples_to_batch, restore_return_units, split_exa
 from ..domain.entities import OHLCVBar, TrainingExample
 from ..infrastructure.ml.model import SignalCascadeModel
 from ..infrastructure.persistence import save_json
+
+DIAGNOSTICS_SCHEMA_VERSION = 2
 
 
 def export_review_diagnostics(
@@ -46,6 +49,8 @@ def export_review_diagnostics(
     _write_csv(horizon_diag_path, diagnostics["horizon_diag"])
 
     summary = {
+        "diagnostics_schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "dataset": _build_dataset_summary(
             examples=examples,
             validation_examples=validation_examples,

@@ -1,12 +1,21 @@
 from __future__ import annotations
 
 from dataclasses import asdict
+import csv
+import json
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 import torch
 
 from signal_cascade_pytorch.application.config import TrainingConfig
+from signal_cascade_pytorch.application.diagnostics_service import (
+    DIAGNOSTICS_SCHEMA_VERSION,
+    export_review_diagnostics,
+)
 from signal_cascade_pytorch.application.policy_service import (
     _augment_snapshot,
     _calibrate_threshold,
@@ -352,6 +361,153 @@ class PolicyAndTrainingTests(unittest.TestCase):
 
         self.assertEqual(prediction.selected_horizon, 3)
         self.assertNotIn("selected_horizon", asdict(prediction))
+
+    def test_export_review_diagnostics_writes_current_schema_headers(self) -> None:
+        config = TrainingConfig(horizons=(1,))
+        example = _example(
+            returns_target=(0.01,),
+            direction_targets=(1,),
+            direction_thresholds=(0.015,),
+        )
+        diagnostics = {
+            "validation_rows": [
+                {
+                    "sample_id": 0,
+                    "horizon": 1,
+                    "proposed": 1,
+                    "accepted": 0,
+                }
+            ],
+            "threshold_scan": [
+                {
+                    "tau": 0.7,
+                    "accepted_count_at_tau": 3,
+                    "success_count_at_tau": 2,
+                    "precision_at_tau": 2 / 3,
+                    "lcb": 0.5,
+                    "feasible": False,
+                    "proposal_coverage": 0.3,
+                    "anchor_coverage": 0.2,
+                }
+            ],
+            "threshold_scan_source": "policy_calibration:validation_replay",
+            "horizon_diag": [
+                {
+                    "horizon": 1,
+                    "nonflat_rate": 1.0,
+                    "up_rate": 1.0,
+                    "down_rate": 0.0,
+                    "align_rate": 1.0,
+                    "candidate_rate": 1.0,
+                    "strict_candidate_rate": 1.0,
+                    "actionable_edge_rate": 1.0,
+                    "mean_mu": 0.01,
+                    "mean_sigma": 0.02,
+                    "median_abs_mu": 0.01,
+                    "proposed_rate": 1.0,
+                    "accepted_rate": 0.0,
+                }
+            ],
+            "proposed_row_count": 1,
+            "accepted_row_count": 0,
+            "no_candidate_count": 0,
+            "no_strict_candidate_count": 0,
+            "candidate_but_no_strict_count": 0,
+            "any_candidate_rate": 1.0,
+            "any_strict_candidate_rate": 1.0,
+            "candidate_count_per_anchor": 1.0,
+            "strict_candidate_count_per_anchor": 1.0,
+            "accept_reject_reason_counts": {"selection_threshold_missing": 1},
+            "reject_flag_counts": {"selection_threshold_missing": 1},
+            "threshold_status": "missing",
+            "threshold_origin": "validation_replay",
+            "stored_threshold_compatibility": "config_mismatch",
+            "threshold_score_source": "selector_probability",
+            "proposed_horizon_summary": {
+                "1": {
+                    "proposed_count": 1,
+                    "accepted_count": 0,
+                    "proposed_clean_count": 1,
+                    "accepted_clean_count": 0,
+                }
+            },
+        }
+
+        with TemporaryDirectory() as tmp_dir:
+            output_dir = Path(tmp_dir)
+            with (
+                patch(
+                    "signal_cascade_pytorch.application.diagnostics_service.build_validation_diagnostics",
+                    return_value=diagnostics,
+                ),
+                patch(
+                    "signal_cascade_pytorch.application.diagnostics_service._build_dataset_summary",
+                    return_value={"kind": "test"},
+                ),
+                patch(
+                    "signal_cascade_pytorch.application.diagnostics_service._build_label_summary",
+                    return_value={"count": 1},
+                ),
+            ):
+                summary = export_review_diagnostics(
+                    output_dir=output_dir,
+                    model=object(),
+                    examples=[example],
+                    config=config,
+                    selection_policy=None,
+                    threshold_resolution={
+                        "selection_threshold_mode_requested": "none",
+                        "selection_threshold_mode_resolved": "none",
+                        "stored_threshold_compatibility": "not_applicable",
+                    },
+                )
+
+            self.assertEqual(summary["diagnostics_schema_version"], DIAGNOSTICS_SCHEMA_VERSION)
+            self.assertIn("generated_at_utc", summary)
+            self.assertEqual(summary["validation"]["threshold_status"], "disabled")
+
+            with (output_dir / "threshold_scan.csv").open(newline="", encoding="utf-8") as handle:
+                threshold_header = next(csv.reader(handle))
+            self.assertEqual(
+                threshold_header,
+                [
+                    "tau",
+                    "accepted_count_at_tau",
+                    "success_count_at_tau",
+                    "precision_at_tau",
+                    "lcb",
+                    "feasible",
+                    "proposal_coverage",
+                    "anchor_coverage",
+                ],
+            )
+
+            with (output_dir / "horizon_diag.csv").open(newline="", encoding="utf-8") as handle:
+                horizon_header = next(csv.reader(handle))
+            self.assertEqual(
+                horizon_header,
+                [
+                    "horizon",
+                    "nonflat_rate",
+                    "up_rate",
+                    "down_rate",
+                    "align_rate",
+                    "candidate_rate",
+                    "strict_candidate_rate",
+                    "actionable_edge_rate",
+                    "mean_mu",
+                    "mean_sigma",
+                    "median_abs_mu",
+                    "proposed_rate",
+                    "accepted_rate",
+                ],
+            )
+
+            written_summary = json.loads((output_dir / "validation_summary.json").read_text())
+            self.assertEqual(
+                written_summary["diagnostics_schema_version"],
+                DIAGNOSTICS_SCHEMA_VERSION,
+            )
 
 
 if __name__ == "__main__":

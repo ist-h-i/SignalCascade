@@ -114,13 +114,33 @@ type DashboardData = {
       returnRmse: number | null
       returnMae: number | null
       directionalAccuracy: number | null
+      directionBrierScore: number | null
       uncertaintyCalibrationError: number | null
       coverageAt1Sigma: number | null
       overlayAccuracy: number | null
       overlayMacroF1: number | null
+      selectionPrecision: number | null
+      selectionSupport: number | null
+      precisionFeasible: boolean | null
+      thresholdCalibrationFeasible: boolean | null
+      selectionCalibrationError: number | null
+      holdRate: number | null
       valuePerSignal: number | null
+      acceptedValuePerSignal: number | null
       downsidePerSignal: number | null
       valueCaptureRatio: number | null
+      profitFactor: number | null
+      signalSharpe: number | null
+      signalSortino: number | null
+      projectValueScore: number | null
+      alignmentRate: number | null
+      actionableEdgeRate: number | null
+      nonflatRate: number | null
+      preThresholdCapture: number | null
+      bestSelectionLcb: number | null
+      supportAtBestLcb: number | null
+      precisionAtBestLcb: number | null
+      tauAtBestLcb: number | null
       utilityScore: number | null
     } | null
   }
@@ -190,6 +210,8 @@ function App() {
   const selectedForecast = data.horizons.find((row) => row.horizon === data.run.selectedHorizon) ?? data.horizons[0]
   const bestEpochMetric = data.metrics.history.find((row) => row.epoch === data.run.bestEpoch) ?? data.metrics.history[0]
   const latestMetric = data.metrics.history[data.metrics.history.length - 1]
+  const validation = data.metrics.validation
+  const bestParams = data.run.bestParams
   const chartYDomain = getVisiblePriceDomain(data.chart.rows)
   const anchorTs = new Date(data.run.anchorTime).getTime()
   const forecastRows = data.chart.rows.filter((row) => row.phase === 'forecast')
@@ -197,33 +219,34 @@ function App() {
     (row) => row.actualClose !== null && row.actualReturnPct !== null,
   )
   const directionalAccuracy =
-    data.metrics.validation?.directionalAccuracy ??
+    validation?.directionalAccuracy ??
     (availableHorizons.length > 0
       ? availableHorizons.filter((row) => Math.sign(row.expectedReturnPct) === Math.sign(row.actualReturnPct ?? 0)).length /
         availableHorizons.length
       : null)
   const rangeCoverage =
-    data.metrics.validation?.coverageAt1Sigma ??
+    validation?.coverageAt1Sigma ??
     (availableHorizons.length > 0
       ? availableHorizons.filter(
           (row) => (row.actualClose ?? Number.NaN) >= row.lowerClose && (row.actualClose ?? Number.NaN) <= row.upperClose,
         ).length / availableHorizons.length
       : null)
   const averagePriceErrorPct =
-    data.metrics.validation?.returnMae ??
+    validation?.returnMae ??
     (availableHorizons.length > 0
       ? availableHorizons.reduce((sum, row) => {
           const actualClose = row.actualClose ?? row.predictedClose
           return sum + Math.abs((actualClose - row.predictedClose) / actualClose)
         }, 0) / availableHorizons.length
       : null)
-  const utilityScore = data.metrics.validation?.utilityScore ?? null
-  const valueCaptureRatio = data.metrics.validation?.valueCaptureRatio ?? null
-  const valuePerSignal = data.metrics.validation?.valuePerSignal ?? null
-  const overlayMacroF1 = data.metrics.validation?.overlayMacroF1 ?? null
-  const overlayAccuracy = data.metrics.validation?.overlayAccuracy ?? null
-  const downsidePerSignal = data.metrics.validation?.downsidePerSignal ?? null
-  const uncertaintyCalibrationError = data.metrics.validation?.uncertaintyCalibrationError ?? null
+  const utilityScore = validation?.utilityScore ?? null
+  const valueCaptureRatio = validation?.valueCaptureRatio ?? null
+  const valuePerSignal = validation?.valuePerSignal ?? null
+  const overlayMacroF1 = validation?.overlayMacroF1 ?? null
+  const overlayAccuracy = validation?.overlayAccuracy ?? null
+  const downsidePerSignal = validation?.downsidePerSignal ?? null
+  const uncertaintyCalibrationError = validation?.uncertaintyCalibrationError ?? null
+  const validationLift = validation?.projectValueScore ?? null
   const normalizedUncertainty = getNormalizedUncertainty(selectedForecast.uncertainty, data.horizons)
   const normalizedGap = clamp01(1 - Math.min(Math.abs(data.run.generalizationGap), 1))
   const normalizedError = averagePriceErrorPct === null ? 0.5 : clamp01(1 - Math.min(averagePriceErrorPct / 0.05, 1))
@@ -254,6 +277,9 @@ function App() {
   const predictionBandWidthPct = ((selectedForecast.upperClose - selectedForecast.lowerClose) / data.run.anchorClose) * 100
   const selectedUncertaintyScore = getUncertaintyScore(selectedForecast.uncertainty, data.horizons)
   const selectedUncertaintyLabel = getUncertaintyLabel(selectedUncertaintyScore)
+  const bestParamsSummary = bestParams
+    ? `E${formatInteger(bestParams.epochs)} / B${formatInteger(bestParams.batchSize)} / H${formatInteger(bestParams.hiddenDim)}`
+    : '-'
   const positionGauge = [
     {
       name: 'position',
@@ -273,7 +299,8 @@ function App() {
         <div className="topbar__title">
           <p className="eyebrow">SignalCascade / Gold</p>
           <h1>XAU/USD</h1>
-          <span>{formatTimestamp(data.run.anchorTime)}</span>
+          <span>基準 {formatTimestamp(data.run.anchorTime)}</span>
+          <span>更新 {formatTimestamp(data.generatedAt)}</span>
         </div>
 
         <div className="topbar__stats">
@@ -491,6 +518,16 @@ function App() {
               </div>
               <p className="surface__hint">採用したエポックと最新の状態を比べます。</p>
             </div>
+            <div className="quality-strip quality-strip--compact tuning-strip">
+              <MiniStat label="セッション" value={data.run.tuningSessionId ?? '-'} />
+              <MiniStat label="更新" value={formatTimestamp(data.generatedAt)} />
+              <MiniStat label="候補" value={bestParamsSummary} />
+              <MiniStat label="Epoch" value={bestParams ? formatInteger(bestParams.epochs) : '-'} />
+              <MiniStat label="Batch" value={bestParams ? formatInteger(bestParams.batchSize) : '-'} />
+              <MiniStat label="Hidden" value={bestParams ? formatInteger(bestParams.hiddenDim) : '-'} />
+              <MiniStat label="Dropout" value={bestParams ? bestParams.dropout.toFixed(2) : '-'} />
+              <MiniStat label="Weight Decay" value={bestParams ? bestParams.weightDecay.toExponential(2) : '-'} />
+            </div>
             <div className="epoch-grid">
               <article className="epoch-card epoch-card--accent">
                 <span>採用</span>
@@ -510,6 +547,20 @@ function App() {
               <MiniStat label="検証件数" value={formatInteger(data.run.validationSamples)} />
               <MiniStat label="回収率" value={formatNullablePercent(valueCaptureRatio)} />
               <MiniStat label="Overlay F1" value={formatNullableScore(overlayMacroF1)} />
+            </div>
+            <div className="quality-strip quality-strip--compact metrics-strip">
+              <MiniStat label="RMSE" value={formatNullableSignedDecimal(validation?.returnRmse, 4)} />
+              <MiniStat label="MAE" value={formatNullableSignedDecimal(validation?.returnMae, 4)} />
+              <MiniStat label="方向一致" value={formatNullablePercent(directionalAccuracy)} />
+              <MiniStat label="方向Brier" value={formatNullableSignedDecimal(validation?.directionBrierScore, 4)} />
+              <MiniStat label="レンジ内" value={formatNullablePercent(rangeCoverage)} />
+              <MiniStat label="選択精度" value={formatNullablePercent(validation?.selectionPrecision)} />
+              <MiniStat label="選択Support" value={formatNullableCount(validation?.selectionSupport)} />
+              <MiniStat label="選択Cal誤差" value={formatNullableSignedDecimal(validation?.selectionCalibrationError, 4)} />
+              <MiniStat label="学習価値" value={formatNullableScore(utilityScore)} />
+              <MiniStat label="価値回収率" value={formatNullablePercent(valueCaptureRatio)} />
+              <MiniStat label="価値スコア" value={formatNullableScore(validationLift)} />
+              <MiniStat label="非フラット" value={formatNullablePercent(validation?.nonflatRate)} />
             </div>
             <div className="series-guide" aria-label="学習指標の凡例">
               <LegendChip label="訓練" tone="series-chip--ink" />
@@ -541,15 +592,15 @@ function App() {
                 </div>
                 <p className="surface__hint">実績がある時間軸で予測を見直します。</p>
               </div>
-              <div className="quality-strip">
-                <MiniStat label="方向一致" value={formatNullablePercent(directionalAccuracy)} />
-                <MiniStat label="レンジ内" value={formatNullablePercent(rangeCoverage)} />
-                <MiniStat label="価格誤差" value={formatNullableSignedDecimal(averagePriceErrorPct, 3)} />
-                <MiniStat label="汎化ギャップ" value={data.run.generalizationGap.toFixed(3)} />
-                <MiniStat label="Overlay 正答" value={formatNullablePercent(overlayAccuracy)} />
-                <MiniStat label="不確実性ずれ" value={formatNullableSignedDecimal(uncertaintyCalibrationError, 3)} />
-                <MiniStat label="下振れ価値" value={formatNullableSignedDecimal(downsidePerSignal, 3)} />
-              </div>
+            <div className="quality-strip">
+              <MiniStat label="方向一致" value={formatNullablePercent(directionalAccuracy)} />
+              <MiniStat label="レンジ内" value={formatNullablePercent(rangeCoverage)} />
+              <MiniStat label="価格誤差" value={formatNullableSignedDecimal(averagePriceErrorPct, 3)} />
+              <MiniStat label="汎化ギャップ" value={data.run.generalizationGap.toFixed(3)} />
+              <MiniStat label="Overlay 正答" value={formatNullablePercent(overlayAccuracy)} />
+              <MiniStat label="不確実性ずれ" value={formatNullableSignedDecimal(uncertaintyCalibrationError, 3)} />
+              <MiniStat label="下振れ価値" value={formatNullableSignedDecimal(downsidePerSignal, 3)} />
+            </div>
               <div className="decision-note decision-note--soft">
                 <strong>要点</strong>
                 <p>{reuseNarrative}</p>
@@ -816,24 +867,32 @@ function formatSignedPercent(value: number): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(2)}%`
 }
 
-function formatNullablePercent(value: number | null): string {
-  if (value === null) {
+function formatNullablePercent(value: number | null | undefined): string {
+  if (value === null || value === undefined) {
     return '-'
   }
 
   return `${(value * 100).toFixed(1)}%`
 }
 
-function formatNullableScore(value: number | null): string {
-  if (value === null) {
+function formatNullableScore(value: number | null | undefined): string {
+  if (value === null || value === undefined) {
     return '-'
   }
 
   return value.toFixed(3)
 }
 
-function formatNullableSignedDecimal(value: number | null, digits = 2): string {
-  if (value === null) {
+function formatNullableCount(value: number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return '-'
+  }
+
+  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value)
+}
+
+function formatNullableSignedDecimal(value: number | null | undefined, digits = 2): string {
+  if (value === null || value === undefined) {
     return '-'
   }
 
