@@ -1,8 +1,12 @@
 # Logic Multiframe Candlestick Model
 
-最終更新: 2026-03-24 JST
+最終更新: 2026-03-26 JST
 
-この文書は、`/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch` の現行実装を基準にした仕様書です。旧版にあった次の記述は、現在の実装では廃止または置換されています。
+この文書は、`/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch` の現行実装を基準にしたロジック説明です。
+
+2026-03-26 JST 以降の canonical target spec は `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/shape_aware_profit_maximization_model.md` です。この文書は target architecture ではなく、現時点の reference implementation がどう動くかを説明します。
+
+旧版にあった次の記述は、現在の実装では廃止または置換されています。
 
 - overlay の 4 クラス分類 (`hold / reduce / full_exit / hard_exit`)
 - regime x horizon ごとの selection threshold

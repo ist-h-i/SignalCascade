@@ -91,9 +91,13 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--csv-lookback-days", type=int, default=None)
     export_parser.add_argument(
         "--selection-threshold-mode",
+        "--acceptance-threshold-mode",
         choices=("auto", "stored", "replay", "none"),
         default="auto",
-        help="How export-diagnostics resolves selection thresholds. Defaults to auto replay on config mismatch.",
+        help=(
+            "How export-diagnostics resolves acceptance thresholds. "
+            "Defaults to auto replay on config mismatch."
+        ),
     )
     export_parser.add_argument(
         "--allow-no-candidate",

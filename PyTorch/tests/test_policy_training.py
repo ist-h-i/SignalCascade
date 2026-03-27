@@ -26,6 +26,7 @@ from signal_cascade_pytorch.application.policy_service import (
 from signal_cascade_pytorch.application.training_service import examples_to_batch, restore_return_units
 from signal_cascade_pytorch.domain.entities import PredictionResult, TrainingExample
 from signal_cascade_pytorch.domain.timeframes import MAIN_TIMEFRAMES, OVERLAY_TIMEFRAMES
+from signal_cascade_pytorch.interfaces.cli import build_parser
 
 
 def _example(
@@ -508,6 +509,21 @@ class PolicyAndTrainingTests(unittest.TestCase):
                 written_summary["diagnostics_schema_version"],
                 DIAGNOSTICS_SCHEMA_VERSION,
             )
+
+    def test_export_diagnostics_acceptance_threshold_mode_alias_maps_to_selection_threshold_mode(self) -> None:
+        parser = build_parser()
+
+        args = parser.parse_args(
+            [
+                "export-diagnostics",
+                "--output-dir",
+                "artifacts/demo",
+                "--acceptance-threshold-mode",
+                "none",
+            ]
+        )
+
+        self.assertEqual(args.selection_threshold_mode, "none")
 
 
 if __name__ == "__main__":

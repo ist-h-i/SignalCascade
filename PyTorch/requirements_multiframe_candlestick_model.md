@@ -3,6 +3,10 @@
 ### 4時間足主モデル + 1時間足 / 30分足離脱オーバーレイ  
 ### Path-Averaged Directional Balance と加算型 \(L_0\) を組み込んだ再構築版
 
+> 2026-03-26 JST 注記:
+> profit-maximization への仕様変更後の canonical target spec は `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/shape_aware_profit_maximization_model.md` です。
+> この文書は、Close Anchor / overlay / threshold-policy 中心だった旧要件を保持する historical requirements として扱います。
+
 ---
 
 ## 1. 文書情報

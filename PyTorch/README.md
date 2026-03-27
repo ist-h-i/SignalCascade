@@ -1,6 +1,17 @@
 # SignalCascade PyTorch Reference
 
-`PyTorch/` 配下に、仕様書 `requirements_multiframe_candlestick_model.md` / `logic_multiframe_candlestick_model.md` を土台にした、実際に `python` で動く参照実装を追加しました。
+`PyTorch/` 配下には、現在 4 種類の文書があります。
+
+- canonical target spec:
+  - `shape_aware_profit_maximization_model.md`
+- 移行ロードマップ:
+  - `profit_maximization_migration_roadmap.md`
+- 現行実装のロジック説明:
+  - `logic_multiframe_candlestick_model.md`
+- 旧来の要件定義:
+  - `requirements_multiframe_candlestick_model.md`
+
+現行コードはまだ `shape_aware_profit_maximization_model.md` へ完全移行していません。`profit_maximization_migration_roadmap.md` は完全移行までの実施順を、`logic_multiframe_candlestick_model.md` は移行前の reference implementation が現在どう動いているかを説明する文書です。
 
 この実装は、以下を最小構成でカバーします。
 
@@ -98,5 +109,5 @@ PyTorch/
 
 - ドメイン層は `torch` に依存しません。
 - 学習用データがなくても動作確認できるよう、synthetic data source を同梱しています。
-- 仕様書の full 実装ではなく、仕様の中核を安全に実験できる reference 実装です。
+- canonical spec の full 実装ではなく、移行前ロジックの中核を安全に実験できる reference 実装です。
 - `1h / 30m` overlay の教師ラベルは、次の 4h 区間における符号付き path return と実現ボラティリティから生成しています。
