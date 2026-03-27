@@ -64,13 +64,21 @@ type MetricPoint = {
   validationTotal: number
   trainReturn: number
   validationReturn: number
-  trainOverlay: number
-  validationOverlay: number
+  trainProfit: number
+  validationProfit: number
+  trainLogWealth: number | null
+  validationLogWealth: number | null
 }
 
 type DashboardData = {
+  schemaVersion: number
   generatedAt: string
   instrument: string
+  artifacts: {
+    metricsSchemaVersion: number | null
+    predictionSchemaVersion: number | null
+    forecastSchemaVersion: number | null
+  }
   provenance: {
     rawRows: number
     sourcePath: string
@@ -84,9 +92,12 @@ type DashboardData = {
     selectedHours: number
     position: number
     overlayAction: string
+    policyStatus: string
     trainSamples: number
     validationSamples: number
     sampleCount: number
+    effectiveSampleCount: number | null
+    purgedSamples: number | null
     bestValidationLoss: number
     bestEpoch: number
     convergenceGain: number
@@ -111,37 +122,25 @@ type DashboardData = {
   metrics: {
     history: MetricPoint[]
     validation: {
-      returnRmse: number | null
-      returnMae: number | null
+      averageLogWealth: number | null
+      realizedPnlPerAnchor: number | null
+      cvarTailLoss: number | null
+      noTradeBandHitRate: number | null
+      shapeGateUsage: number | null
+      expertEntropy: number | null
+      muCalibration: number | null
+      sigmaCalibration: number | null
       directionalAccuracy: number | null
-      directionBrierScore: number | null
-      uncertaintyCalibrationError: number | null
-      coverageAt1Sigma: number | null
-      overlayAccuracy: number | null
-      overlayMacroF1: number | null
-      selectionPrecision: number | null
-      selectionSupport: number | null
-      precisionFeasible: boolean | null
-      thresholdCalibrationFeasible: boolean | null
-      selectionCalibrationError: number | null
-      holdRate: number | null
-      valuePerSignal: number | null
-      acceptedValuePerSignal: number | null
-      downsidePerSignal: number | null
-      valueCaptureRatio: number | null
-      profitFactor: number | null
-      signalSharpe: number | null
-      signalSortino: number | null
       projectValueScore: number | null
-      alignmentRate: number | null
-      actionableEdgeRate: number | null
-      nonflatRate: number | null
-      preThresholdCapture: number | null
-      bestSelectionLcb: number | null
-      supportAtBestLcb: number | null
-      precisionAtBestLcb: number | null
-      tauAtBestLcb: number | null
       utilityScore: number | null
+      exactSmoothHorizonAgreement: number | null
+      exactSmoothNoTradeAgreement: number | null
+      exactSmoothPositionMae: number | null
+      exactSmoothUtilityRegret: number | null
+      logWealthClampHitRate: number | null
+      stateResetMode: string | null
+      turnover: number | null
+      maxDrawdown: number | null
     } | null
   }
   narrative: {
@@ -213,7 +212,8 @@ function App() {
   const validation = data.metrics.validation
   const bestParams = data.run.bestParams
   const chartYDomain = getVisiblePriceDomain(data.chart.rows)
-  const anchorTs = new Date(data.run.anchorTime).getTime()
+  const chartXDomain = getVisibleTimeDomain(data.chart.rows)
+  const anchorTs = data.chart.rows.find((row) => row.phase === 'forecast')?.ts ?? new Date(data.run.anchorTime).getTime()
   const forecastRows = data.chart.rows.filter((row) => row.phase === 'forecast')
   const availableHorizons = data.horizons.filter(
     (row) => row.actualClose !== null && row.actualReturnPct !== null,
@@ -225,14 +225,16 @@ function App() {
         availableHorizons.length
       : null)
   const rangeCoverage =
-    validation?.coverageAt1Sigma ??
+    validation?.noTradeBandHitRate !== null && validation?.noTradeBandHitRate !== undefined
+      ? 1 - validation.noTradeBandHitRate
+      :
     (availableHorizons.length > 0
       ? availableHorizons.filter(
           (row) => (row.actualClose ?? Number.NaN) >= row.lowerClose && (row.actualClose ?? Number.NaN) <= row.upperClose,
         ).length / availableHorizons.length
       : null)
   const averagePriceErrorPct =
-    validation?.returnMae ??
+    validation?.muCalibration ??
     (availableHorizons.length > 0
       ? availableHorizons.reduce((sum, row) => {
           const actualClose = row.actualClose ?? row.predictedClose
@@ -240,12 +242,12 @@ function App() {
         }, 0) / availableHorizons.length
       : null)
   const utilityScore = validation?.utilityScore ?? null
-  const valueCaptureRatio = validation?.valueCaptureRatio ?? null
-  const valuePerSignal = validation?.valuePerSignal ?? null
-  const overlayMacroF1 = validation?.overlayMacroF1 ?? null
-  const overlayAccuracy = validation?.overlayAccuracy ?? null
-  const downsidePerSignal = validation?.downsidePerSignal ?? null
-  const uncertaintyCalibrationError = validation?.uncertaintyCalibrationError ?? null
+  const averageLogWealth = validation?.averageLogWealth ?? null
+  const realizedPnlPerAnchor = validation?.realizedPnlPerAnchor ?? null
+  const shapeGateUsage = validation?.shapeGateUsage ?? null
+  const expertEntropy = validation?.expertEntropy ?? null
+  const cvarTailLoss = validation?.cvarTailLoss ?? null
+  const uncertaintyCalibrationError = validation?.sigmaCalibration ?? null
   const validationLift = validation?.projectValueScore ?? null
   const normalizedUncertainty = getNormalizedUncertainty(selectedForecast.uncertainty, data.horizons)
   const normalizedGap = clamp01(1 - Math.min(Math.abs(data.run.generalizationGap), 1))
@@ -307,9 +309,9 @@ function App() {
           <MetricTile label="基準価格" value={formatPrice(data.run.anchorClose)} />
           <MetricTile label={`${selectedForecast.hours}時間先の中心予測`} value={formatPrice(selectedForecast.predictedClose)} />
           <MetricTile label="学習価値スコア" value={formatNullableScore(utilityScore)} accent />
-          <MetricTile label="価値回収率" value={formatNullablePercent(valueCaptureRatio)} />
+          <MetricTile label="平均 Log Wealth" value={formatNullableSignedDecimal(averageLogWealth, 3)} />
           <MetricTile label="信頼度" value={`${trustScore} / 100`} accent={confidenceTone !== 'confidence-pill--caution'} />
-          <MetricTile label="アクション" value={translateOverlay(data.run.overlayAction)} accent />
+          <MetricTile label="ポリシー状態" value={translatePolicyState(data.run.policyStatus)} accent />
         </div>
       </motion.header>
 
@@ -347,7 +349,7 @@ function App() {
                 <XAxis
                   dataKey="ts"
                   type="number"
-                  domain={['dataMin', 'dataMax']}
+                  domain={chartXDomain}
                   tickFormatter={formatAxisDate}
                   stroke="rgba(255,255,255,0.45)"
                   tick={{ fontSize: 11 }}
@@ -373,10 +375,18 @@ function App() {
                   strokeDasharray="4 6"
                   label={{ value: 'Now', position: 'top', fill: '#ffca70', fontSize: 11 }}
                 />
-                <MicroCandleLayer rows={data.chart.microRows} />
                 <Area type="monotone" dataKey="forecastLower" stackId="forecastBand" stroke="transparent" fill="transparent" connectNulls isAnimationActive />
                 <Area type="monotone" dataKey="forecastSpread" stackId="forecastBand" stroke="transparent" fill="url(#forecastBand)" connectNulls isAnimationActive />
-                <Line type="monotone" dataKey="close" stroke="#f3ede3" strokeWidth={2.2} dot={false} connectNulls isAnimationActive={false} />
+                <Line
+                  type="monotone"
+                  dataKey="close"
+                  stroke="rgba(243,237,227,0.08)"
+                  strokeWidth={0.9}
+                  dot={false}
+                  connectNulls
+                  isAnimationActive={false}
+                />
+                <MicroCandleLayer rows={data.chart.microRows} />
                 <Line type="monotone" dataKey="forecastBase" stroke="#ffca70" strokeWidth={3} dot={false} connectNulls />
                 <Line type="linear" dataKey="actualClose" stroke="#9db0ff" strokeWidth={2} dot={false} connectNulls strokeDasharray="6 5" />
                 <defs>
@@ -436,7 +446,7 @@ function App() {
               <MiniStat label="予測幅" value={`${formatPrice(selectedForecast.lowerClose)} - ${formatPrice(selectedForecast.upperClose)}`} />
               <MiniStat label="変化率" value={formatSignedPercent(selectedForecast.expectedReturnPct)} />
               <MiniStat label="採用エポック" value={`${data.run.bestEpoch}回`} />
-              <MiniStat label="1シグナル価値" value={formatNullableSignedDecimal(valuePerSignal, 3)} />
+              <MiniStat label="PnL / anchor" value={formatNullableSignedDecimal(realizedPnlPerAnchor, 3)} />
               <MiniStat label="学習データ" value={`${formatInteger(data.run.sourceRows)} rows`} />
             </div>
 
@@ -543,24 +553,23 @@ function App() {
             <div className="quality-strip quality-strip--compact">
               <MiniStat label="改善幅" value={data.run.convergenceGain.toFixed(3)} />
               <MiniStat label="リターン損失" value={bestEpochMetric.validationReturn.toFixed(3)} />
-              <MiniStat label="判定損失" value={latestMetric.validationOverlay.toFixed(3)} />
+              <MiniStat label="profit 損失" value={latestMetric.validationProfit.toFixed(3)} />
               <MiniStat label="検証件数" value={formatInteger(data.run.validationSamples)} />
-              <MiniStat label="回収率" value={formatNullablePercent(valueCaptureRatio)} />
-              <MiniStat label="Overlay F1" value={formatNullableScore(overlayMacroF1)} />
+              <MiniStat label="平均 Log Wealth" value={formatNullableSignedDecimal(averageLogWealth, 3)} />
+              <MiniStat label="Shape Gate" value={formatNullablePercent(shapeGateUsage)} />
             </div>
             <div className="quality-strip quality-strip--compact metrics-strip">
-              <MiniStat label="RMSE" value={formatNullableSignedDecimal(validation?.returnRmse, 4)} />
-              <MiniStat label="MAE" value={formatNullableSignedDecimal(validation?.returnMae, 4)} />
+              <MiniStat label="mu calibration" value={formatNullableSignedDecimal(validation?.muCalibration, 4)} />
+              <MiniStat label="sigma calibration" value={formatNullableSignedDecimal(validation?.sigmaCalibration, 4)} />
               <MiniStat label="方向一致" value={formatNullablePercent(directionalAccuracy)} />
-              <MiniStat label="方向Brier" value={formatNullableSignedDecimal(validation?.directionBrierScore, 4)} />
+              <MiniStat label="ノートレード率" value={formatNullablePercent(validation?.noTradeBandHitRate)} />
               <MiniStat label="レンジ内" value={formatNullablePercent(rangeCoverage)} />
-              <MiniStat label="選択精度" value={formatNullablePercent(validation?.selectionPrecision)} />
-              <MiniStat label="選択Support" value={formatNullableCount(validation?.selectionSupport)} />
-              <MiniStat label="選択Cal誤差" value={formatNullableSignedDecimal(validation?.selectionCalibrationError, 4)} />
+              <MiniStat label="turnover" value={formatNullableSignedDecimal(validation?.turnover, 3)} />
+              <MiniStat label="max drawdown" value={formatNullableSignedDecimal(validation?.maxDrawdown, 3)} />
               <MiniStat label="学習価値" value={formatNullableScore(utilityScore)} />
-              <MiniStat label="価値回収率" value={formatNullablePercent(valueCaptureRatio)} />
+              <MiniStat label="PnL / anchor" value={formatNullableSignedDecimal(realizedPnlPerAnchor, 3)} />
               <MiniStat label="価値スコア" value={formatNullableScore(validationLift)} />
-              <MiniStat label="非フラット" value={formatNullablePercent(validation?.nonflatRate)} />
+              <MiniStat label="Expert entropy" value={formatNullableScore(expertEntropy)} />
             </div>
             <div className="series-guide" aria-label="学習指標の凡例">
               <LegendChip label="訓練" tone="series-chip--ink" />
@@ -597,9 +606,9 @@ function App() {
               <MiniStat label="レンジ内" value={formatNullablePercent(rangeCoverage)} />
               <MiniStat label="価格誤差" value={formatNullableSignedDecimal(averagePriceErrorPct, 3)} />
               <MiniStat label="汎化ギャップ" value={data.run.generalizationGap.toFixed(3)} />
-              <MiniStat label="Overlay 正答" value={formatNullablePercent(overlayAccuracy)} />
+              <MiniStat label="Shape gate" value={formatNullablePercent(shapeGateUsage)} />
               <MiniStat label="不確実性ずれ" value={formatNullableSignedDecimal(uncertaintyCalibrationError, 3)} />
-              <MiniStat label="下振れ価値" value={formatNullableSignedDecimal(downsidePerSignal, 3)} />
+              <MiniStat label="CVaR tail" value={formatNullableSignedDecimal(cvarTailLoss, 3)} />
             </div>
               <div className="decision-note decision-note--soft">
                 <strong>要点</strong>
@@ -637,14 +646,31 @@ function MicroCandleLayer({ rows }: { rows: MicroCandleRow[] }) {
     return null
   }
 
-  const gaps = rows
+  const targetCandles = 36
+  const bucketSize = Math.max(1, Math.ceil(rows.length / targetCandles))
+  const visibleRows =
+    bucketSize === 1
+      ? rows
+      : Array.from({ length: Math.ceil(rows.length / bucketSize) }, (_, bucketIndex) => {
+          const chunk = rows.slice(bucketIndex * bucketSize, (bucketIndex + 1) * bucketSize)
+          const first = chunk[0]
+          const last = chunk[chunk.length - 1]
+          return {
+            ts: last.ts,
+            open: first.open,
+            high: Math.max(...chunk.map((row) => row.high)),
+            low: Math.min(...chunk.map((row) => row.low)),
+            close: last.close,
+          }
+        })
+  const gaps = visibleRows
     .slice(0, 12)
     .map((row, index) => {
       if (index === 0) {
         return 0
       }
 
-      const prev = rows[index - 1]
+      const prev = visibleRows[index - 1]
       const currentX = xScale(row.ts)
       const previousX = xScale(prev.ts)
 
@@ -653,13 +679,12 @@ function MicroCandleLayer({ rows }: { rows: MicroCandleRow[] }) {
     .filter((gap) => gap > 0)
 
   const inferredGap = gaps.length > 0 ? Math.min(...gaps) : 0
-  const candleWidth = Math.max(1, Math.min(3.2, inferredGap * 0.42))
-  const wickOpacity = 0.22
-  const bodyOpacity = 0.12
+  const candleWidth = Math.max(4.2, Math.min(12, inferredGap * 0.78))
+  const wickWidth = Math.max(1.35, Math.min(2.2, candleWidth * 0.26))
 
   return (
     <g aria-hidden="true" pointerEvents="none">
-      {rows.map((row) => {
+      {visibleRows.map((row) => {
         const x = xScale(row.ts)
         const highY = yScale(row.high)
         const lowY = yScale(row.low)
@@ -678,8 +703,11 @@ function MicroCandleLayer({ rows }: { rows: MicroCandleRow[] }) {
 
         const bodyTop = Math.min(openY, closeY)
         const bodyBottom = Math.max(openY, closeY)
-        const bodyHeight = Math.max(bodyBottom - bodyTop, 1)
+        const bodyHeight = Math.max(bodyBottom - bodyTop, 3.2)
         const bullish = row.close >= row.open
+        const wickColor = bullish ? '#9db0ff' : '#ffca70'
+        const bodyFill = bullish ? '#9db0ff' : '#ffca70'
+        const bodyStroke = bullish ? '#9db0ff' : '#ffca70'
 
         return (
           <g key={row.ts}>
@@ -688,9 +716,8 @@ function MicroCandleLayer({ rows }: { rows: MicroCandleRow[] }) {
               y1={highY}
               x2={x}
               y2={lowY}
-              stroke={bullish ? 'rgba(157,176,255,0.55)' : 'rgba(243,237,227,0.45)'}
-              strokeWidth={1}
-              strokeOpacity={wickOpacity}
+              stroke={wickColor}
+              strokeWidth={wickWidth}
               strokeLinecap="round"
             />
             <rect
@@ -698,10 +725,10 @@ function MicroCandleLayer({ rows }: { rows: MicroCandleRow[] }) {
               y={bodyTop}
               width={candleWidth}
               height={bodyHeight}
-              fill={bullish ? 'rgba(157,176,255,0.38)' : 'rgba(243,237,227,0.22)'}
-              fillOpacity={bodyOpacity}
-              stroke={bullish ? 'rgba(157,176,255,0.5)' : 'rgba(243,237,227,0.32)'}
-              strokeOpacity={0.18}
+              rx={1.1}
+              fill={bodyFill}
+              stroke={bodyStroke}
+              strokeWidth={1.15}
             />
           </g>
         )
@@ -883,14 +910,6 @@ function formatNullableScore(value: number | null | undefined): string {
   return value.toFixed(3)
 }
 
-function formatNullableCount(value: number | null | undefined): string {
-  if (value === null || value === undefined) {
-    return '-'
-  }
-
-  return new Intl.NumberFormat('en-US', { maximumFractionDigits: 0 }).format(value)
-}
-
 function formatNullableSignedDecimal(value: number | null | undefined, digits = 2): string {
   if (value === null || value === undefined) {
     return '-'
@@ -936,6 +955,20 @@ function getVisiblePriceDomain(rows: ChartRow[]): [number, number] {
   return [Math.floor(min - pad), Math.ceil(max + pad)]
 }
 
+function getVisibleTimeDomain(rows: ChartRow[]): [number, number] {
+  if (rows.length === 0) {
+    const now = Date.now()
+    return [now, now]
+  }
+
+  const min = rows[0].ts
+  const max = rows[rows.length - 1].ts
+  const range = Math.max(max - min, 30 * 60 * 1000)
+  const pad = Math.max(range * 0.04, 30 * 60 * 1000)
+
+  return [min - pad, max + pad]
+}
+
 function translateOverlay(value: string): string {
   switch (value) {
     case 'hold':
@@ -951,6 +984,17 @@ function translateOverlay(value: string): string {
   }
 }
 
+function translatePolicyState(value: string): string {
+  switch (value) {
+    case 'active':
+      return '稼働中'
+    case 'no-trade':
+      return 'ノートレード'
+    default:
+      return value
+  }
+}
+
 function translateMetricName(value?: string): string {
   switch (value) {
     case 'trainTotal':
@@ -961,10 +1005,10 @@ function translateMetricName(value?: string): string {
       return '訓練リターン'
     case 'validationReturn':
       return '検証リターン'
-    case 'trainOverlay':
-      return '訓練判定'
-    case 'validationOverlay':
-      return '検証判定'
+    case 'trainProfit':
+      return '訓練profit'
+    case 'validationProfit':
+      return '検証profit'
     default:
       return value ?? ''
   }

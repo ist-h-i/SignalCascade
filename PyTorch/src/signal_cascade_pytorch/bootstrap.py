@@ -1,10 +1,10 @@
 from __future__ import annotations
 
-from dataclasses import asdict
+from datetime import datetime, timedelta
 from pathlib import Path
 
 from .application.config import TrainingConfig
-from .application.diagnostics_service import build_validation_snapshots, export_review_diagnostics
+from .application.diagnostics_service import export_review_diagnostics
 from .application.dataset_service import (
     build_latest_inference_example,
     build_latest_inference_example_from_bars,
@@ -13,10 +13,14 @@ from .application.dataset_service import (
     limit_base_bars_to_lookback_days,
     trim_base_bars_for_latest_inference,
 )
-from .application.inference_service import predict_from_example, predict_latest
-from .application.policy_service import build_replay_selection_policy, selection_thresholds_match_config
-from .application.report_service import generate_research_report
-from .application.training_service import split_examples, train_model
+from .application.inference_service import (
+    build_forecast_summary_payload,
+    predict_from_example,
+    predict_latest,
+    serialize_prediction_result,
+)
+from .application.report_service import METRICS_SCHEMA_VERSION, generate_research_report
+from .application.training_service import train_model
 from .application.tuning_service import tune_latest_dataset
 from .infrastructure.data.csv_source import CsvMarketDataSource
 from .infrastructure.data.synthetic_source import SyntheticMarketDataSource
@@ -31,6 +35,7 @@ def train_command(args) -> int:
     source = _create_data_source(source_payload)
     source_rows_original = None
     source_rows_used = None
+    base_bars = None
 
     if source_payload["kind"] == "csv":
         base_bars = source.load_bars()
@@ -42,25 +47,30 @@ def train_command(args) -> int:
         examples = build_training_examples(source, config)
 
     model, summary = train_model(examples, config, output_dir)
-    selection_policy = dict(summary.pop("selection_policy"))
-    prediction = predict_latest(model, examples, config, selection_policy)
+    prediction = predict_latest(
+        model=model,
+        examples=examples,
+        config=config,
+        previous_position=float(getattr(args, "previous_position", 0.0) or 0.0),
+    )
 
     summary["sample_count"] = len(examples)
+    summary["effective_sample_count"] = summary["train_samples"] + summary["validation_samples"]
     summary["source"] = source_payload
+    summary["schema_version"] = METRICS_SCHEMA_VERSION
     if source_rows_original is not None and source_rows_used is not None:
         summary["source_rows_original"] = source_rows_original
         summary["source_rows_used"] = source_rows_used
     save_json(output_dir / "config.json", config.to_dict())
     save_json(output_dir / "source.json", source_payload)
     save_json(output_dir / "metrics.json", summary)
-    save_json(output_dir / "selection_policy.json", selection_policy)
-    save_json(output_dir / "prediction.json", asdict(prediction))
+    save_json(output_dir / "prediction.json", serialize_prediction_result(prediction))
+    _save_forecast_summary(output_dir, prediction, config)
     export_review_diagnostics(
         output_dir=output_dir,
         model=model,
         examples=examples,
         config=config,
-        selection_policy=selection_policy,
         source_payload=source_payload,
         source_rows_original=source_rows_original,
         source_rows_used=source_rows_used,
@@ -71,13 +81,21 @@ def train_command(args) -> int:
     print(f"trained samples: {summary['train_samples']}")
     print(f"validation samples: {summary['validation_samples']}")
     print(f"best validation loss: {summary['best_validation_loss']:.6f}")
-    print(f"validation acceptance precision: {summary['validation_metrics']['acceptance_precision']:.4f}")
-    print(f"validation acceptance coverage: {summary['validation_metrics']['acceptance_coverage']:.4f}")
-    print(f"validation directional accuracy: {summary['validation_metrics']['directional_accuracy']:.4f}")
-    print(f"validation project value score: {summary['validation_metrics']['project_value_score']:.4f}")
-    print(f"latest accepted signal: {prediction.accepted_signal}")
-    print(f"latest selection probability: {prediction.selection_probability:.4f}")
-    print(f"latest overlay action: {prediction.overlay_action}")
+    print(
+        "validation average_log_wealth: "
+        f"{summary['validation_metrics']['average_log_wealth']:.4f}"
+    )
+    print(
+        "validation realized_pnl_per_anchor: "
+        f"{summary['validation_metrics']['realized_pnl_per_anchor']:.4f}"
+    )
+    print(
+        "validation cvar_tail_loss: "
+        f"{summary['validation_metrics']['cvar_tail_loss']:.4f}"
+    )
+    print(f"latest policy horizon: {prediction.policy_horizon}")
+    print(f"latest position: {prediction.position:.4f}")
+    print(f"latest no-trade-band hit: {prediction.no_trade_band_hit}")
     return 0
 
 
@@ -95,25 +113,22 @@ def predict_command(args) -> int:
     else:
         latest_example = build_latest_inference_example(source, config)
 
-    feature_dim = len(latest_example.main_sequences["4h"][0])
-    model = SignalCascadeModel(
-        feature_dim=feature_dim,
-        hidden_dim=config.hidden_dim,
-        num_horizons=len(config.horizons),
-        dropout=config.dropout,
-    )
+    model = _build_model_from_example(latest_example, config)
     load_checkpoint(output_dir / "model.pt", model)
-    selection_policy_path = output_dir / "selection_policy.json"
-    selection_policy = load_json(selection_policy_path) if selection_policy_path.exists() else None
-    prediction = predict_from_example(model, latest_example, config, selection_policy)
-    save_json(output_dir / "prediction.json", asdict(prediction))
+    prediction = predict_from_example(
+        model=model,
+        example=latest_example,
+        config=config,
+        previous_position=float(getattr(args, "previous_position", 0.0) or 0.0),
+    )
+    save_json(output_dir / "prediction.json", serialize_prediction_result(prediction))
+    _save_forecast_summary(output_dir, prediction, config)
 
-    print(f"proposed horizon: {prediction.proposed_horizon}")
-    print(f"accepted horizon: {prediction.accepted_horizon}")
-    print(f"accepted signal: {prediction.accepted_signal}")
-    print(f"selection probability: {prediction.selection_probability:.4f}")
+    print(f"policy horizon: {prediction.policy_horizon}")
+    print(f"executed horizon: {prediction.executed_horizon}")
     print(f"position: {prediction.position:.4f}")
-    print(f"overlay action: {prediction.overlay_action}")
+    print(f"trade delta: {prediction.trade_delta:.4f}")
+    print(f"no-trade-band hit: {prediction.no_trade_band_hit}")
     return 0
 
 
@@ -140,61 +155,13 @@ def export_diagnostics_command(args) -> int:
     else:
         examples = build_training_examples(source, config)
 
-    feature_dim = len(examples[0].main_sequences["4h"][0])
-    model = SignalCascadeModel(
-        feature_dim=feature_dim,
-        hidden_dim=config.hidden_dim,
-        num_horizons=len(config.horizons),
-        dropout=config.dropout,
-    )
+    model = _build_model_from_example(examples[0], config)
     load_checkpoint(artifact_dir / "model.pt", model)
-    selection_policy_path = artifact_dir / "selection_policy.json"
-    stored_selection_policy = load_json(selection_policy_path) if selection_policy_path.exists() else None
-    selection_policy = stored_selection_policy
-    threshold_mode = str(getattr(args, "selection_threshold_mode", "auto"))
-    stored_threshold_compatibility = (
-        "compatible"
-        if stored_selection_policy is not None
-        and selection_thresholds_match_config(stored_selection_policy, config)
-        else "config_mismatch"
-        if stored_selection_policy is not None
-        else "not_applicable"
-    )
-    resolved_threshold_mode = "none"
-    if threshold_mode == "none":
-        selection_policy = None
-        resolved_threshold_mode = "none"
-    elif stored_selection_policy is not None and threshold_mode == "stored":
-        resolved_threshold_mode = "stored"
-    elif selection_policy is not None and threshold_mode in {"auto", "replay"}:
-        should_replay = threshold_mode == "replay" or not selection_thresholds_match_config(
-            selection_policy,
-            config,
-        )
-        if should_replay:
-            _, validation_examples = split_examples(examples, config)
-            validation_snapshots = build_validation_snapshots(model, validation_examples, config)
-            selection_policy = build_replay_selection_policy(
-                selection_policy,
-                validation_snapshots,
-                config,
-            )
-            resolved_threshold_mode = "replay"
-        else:
-            resolved_threshold_mode = "stored"
-    elif selection_policy is not None:
-        resolved_threshold_mode = "stored"
     summary = export_review_diagnostics(
         output_dir=diagnostics_output_dir,
         model=model,
         examples=examples,
         config=config,
-        selection_policy=selection_policy,
-        threshold_resolution={
-            "selection_threshold_mode_requested": threshold_mode,
-            "selection_threshold_mode_resolved": resolved_threshold_mode,
-            "stored_threshold_compatibility": stored_threshold_compatibility,
-        },
         source_payload=source_payload,
         source_rows_original=source_rows_original,
         source_rows_used=source_rows_used,
@@ -204,10 +171,10 @@ def export_diagnostics_command(args) -> int:
     print(f"artifact dir: {artifact_dir}")
     print(f"diagnostics dir: {diagnostics_output_dir}")
     print(f"validation rows: {diagnostics_output_dir / 'validation_rows.csv'}")
-    print(f"threshold scan: {diagnostics_output_dir / 'threshold_scan.csv'}")
+    print(f"policy summary: {diagnostics_output_dir / 'policy_summary.csv'}")
     print(f"horizon diagnostics: {diagnostics_output_dir / 'horizon_diag.csv'}")
     print(f"summary: {diagnostics_output_dir / 'validation_summary.json'}")
-    print(f"validation proposed rows: {summary['validation']['proposed_row_count']}")
+    print(f"validation executed trades: {summary['validation']['executed_trade_count']}")
     return 0
 
 
@@ -231,10 +198,30 @@ def tune_latest_command(args) -> int:
     print(f"archive session dir: {manifest['archive_session_dir']}")
     print(f"best validation loss: {best_candidate['best_validation_loss']:.6f}")
     print(f"best project value score: {best_candidate['project_value_score']:.6f}")
-    print(f"best acceptance precision: {best_candidate['acceptance_precision']:.6f}")
-    print(f"best acceptance coverage: {best_candidate['acceptance_coverage']:.6f}")
-    print(f"best proposed horizon: {best_candidate['proposed_horizon']}")
+    print(f"best average_log_wealth: {best_candidate['average_log_wealth']:.6f}")
+    print(f"best cvar_tail_loss: {best_candidate['cvar_tail_loss']:.6f}")
+    print(f"best policy horizon: {best_candidate['policy_horizon']}")
     return 0
+
+
+def _build_model_from_example(example, config: TrainingConfig) -> SignalCascadeModel:
+    return SignalCascadeModel(
+        feature_dim=len(example.main_sequences["4h"][0]),
+        state_feature_dim=len(example.state_features),
+        hidden_dim=config.hidden_dim,
+        state_dim=config.state_dim,
+        num_horizons=len(config.horizons),
+        shape_classes=config.shape_classes,
+        branch_dilations=config.branch_dilations,
+        dropout=config.dropout,
+    )
+
+
+def _save_forecast_summary(output_dir: Path, prediction, config: TrainingConfig) -> None:
+    save_json(
+        output_dir / "forecast_summary.json",
+        build_forecast_summary_payload(prediction, config),
+    )
 
 
 def _build_config(args) -> TrainingConfig:
@@ -278,28 +265,47 @@ def _config_overrides_from_args(args) -> dict[str, object]:
 
     maybe("synthetic_bars", getattr(args, "synthetic_bars", None))
     maybe("epochs", getattr(args, "epochs", None))
+    maybe("warmup_epochs", getattr(args, "warmup_epochs", None))
     maybe("batch_size", getattr(args, "batch_size", None))
     maybe("learning_rate", getattr(args, "learning_rate", None))
     maybe("weight_decay", getattr(args, "weight_decay", None))
     maybe("hidden_dim", getattr(args, "hidden_dim", None))
+    maybe("state_dim", getattr(args, "state_dim", None))
+    maybe("shape_classes", getattr(args, "shape_classes", None))
     maybe("dropout", getattr(args, "dropout", None))
     maybe("walk_forward_folds", getattr(args, "walk_forward_folds", None))
-    maybe("precision_target", getattr(args, "precision_target", None))
-    maybe("selection_min_support", getattr(args, "selection_min_support", None))
-    maybe("precision_confidence_z", getattr(args, "precision_confidence_z", None))
     maybe("base_cost", getattr(args, "base_cost", None))
     maybe("delta_multiplier", getattr(args, "delta_multiplier", None))
     maybe("mae_multiplier", getattr(args, "mae_multiplier", None))
-    maybe("allow_no_candidate", getattr(args, "allow_no_candidate", None))
-    maybe("selection_score_source", getattr(args, "selection_score_source", None))
+    maybe("training_state_reset_mode", getattr(args, "training_state_reset_mode", None))
+    maybe("evaluation_state_reset_mode", getattr(args, "evaluation_state_reset_mode", None))
+    diagnostic_modes = _parse_str_list(getattr(args, "diagnostic_state_reset_modes", None))
+    if diagnostic_modes is not None:
+        overrides["diagnostic_state_reset_modes"] = diagnostic_modes
+    maybe("return_loss_weight", getattr(args, "return_loss_weight", None))
     maybe("shape_loss_weight", getattr(args, "shape_loss_weight", None))
-    maybe("overlay_loss_weight", getattr(args, "overlay_loss_weight", None))
-    maybe("direction_loss_weight", getattr(args, "direction_loss_weight", None))
-    maybe("consistency_loss_weight", getattr(args, "consistency_loss_weight", None))
+    maybe("profit_loss_weight", getattr(args, "profit_loss_weight", None))
+    maybe("cvar_weight", getattr(args, "cvar_weight", None))
+    maybe("cvar_alpha", getattr(args, "cvar_alpha", None))
+    maybe("risk_aversion_gamma", getattr(args, "risk_aversion_gamma", None))
+    maybe("q_max", getattr(args, "q_max", None))
+    maybe("allow_no_candidate", getattr(args, "allow_no_candidate", None))
 
     horizons = _parse_horizons(getattr(args, "horizons", None))
     if horizons is not None:
         overrides["horizons"] = horizons
+    cost_multipliers = _parse_float_list(getattr(args, "policy_sweep_cost_multipliers", None))
+    if cost_multipliers is not None:
+        overrides["policy_sweep_cost_multipliers"] = cost_multipliers
+    gamma_multipliers = _parse_float_list(getattr(args, "policy_sweep_gamma_multipliers", None))
+    if gamma_multipliers is not None:
+        overrides["policy_sweep_gamma_multipliers"] = gamma_multipliers
+    min_policy_sigmas = _parse_float_list(getattr(args, "policy_sweep_min_policy_sigmas", None))
+    if min_policy_sigmas is not None:
+        overrides["policy_sweep_min_policy_sigmas"] = min_policy_sigmas
+    sweep_state_reset_modes = _parse_str_list(getattr(args, "policy_sweep_state_reset_modes", None))
+    if sweep_state_reset_modes is not None:
+        overrides["policy_sweep_state_reset_modes"] = sweep_state_reset_modes
 
     return overrides
 
@@ -311,6 +317,24 @@ def _parse_horizons(raw_value: str | None) -> tuple[int, ...] | None:
     if not values:
         return None
     return tuple(int(value) for value in values)
+
+
+def _parse_float_list(raw_value: str | None) -> tuple[float, ...] | None:
+    if raw_value is None:
+        return None
+    values = [segment.strip() for segment in raw_value.split(",") if segment.strip()]
+    if not values:
+        return None
+    return tuple(float(value) for value in values)
+
+
+def _parse_str_list(raw_value: str | None) -> tuple[str, ...] | None:
+    if raw_value is None:
+        return None
+    values = [segment.strip() for segment in raw_value.split(",") if segment.strip()]
+    if not values:
+        return None
+    return tuple(values)
 
 
 def _create_data_source(source_payload: dict[str, object]):

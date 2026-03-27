@@ -49,48 +49,40 @@ def build_close_anchor_features(
     parameters: TimeframeParameters,
 ) -> list[TimeframeFeatureRow]:
     ranges = [bar.high - bar.low for bar in bars]
-    local_scales = [
-        value + parameters.epsilon for value in ema_series(ranges, parameters.ema_window)
-    ]
+    atr_series = [value + parameters.epsilon for value in ema_series(ranges, parameters.ema_window)]
     shapes = [candlestick_shape(bar, parameters.epsilon) for bar in bars]
-    directional_balance = [
-        path_averaged_directional_balance(bar, parameters.epsilon) for bar in bars
-    ]
     volume_ema = ema_series(
         [max(bar.volume, parameters.epsilon) for bar in bars],
         parameters.ema_window,
     )
-    gates = _build_feedback_gates(shapes, parameters)
-    l0_values = [
-        _build_l0_value(bar.close, local_scales[index], directional_balance[index], gates[index], parameters)
-        for index, bar in enumerate(bars)
-    ]
-    l0_ema = ema_series(l0_values, parameters.ema_window)
+    close_ema = ema_series([bar.close for bar in bars], parameters.ema_window)
 
     rows: list[TimeframeFeatureRow] = []
-    previous_z = 0.0
     for index, bar in enumerate(bars):
-        local_scale = local_scales[index]
-        z_value = (l0_values[index] - l0_ema[index]) / local_scale
-        delta_z = z_value - previous_z
-        rho = ranges[index] / local_scale if local_scale > 0 else 0.0
-        normalized_volume = (bar.volume / volume_ema[index]) - 1.0 if volume_ema[index] > 0 else 0.0
+        atr = atr_series[index]
+        previous_close = bars[index - 1].close if index > 0 else bar.close
+        log_return = math.log(bar.close / max(previous_close, parameters.epsilon))
+        body = (bar.close - bar.open) / atr
+        upper_shadow = (bar.high - max(bar.open, bar.close)) / atr
+        lower_shadow = (min(bar.open, bar.close) - bar.low) / atr
+        normalized_volume = max(bar.volume, parameters.epsilon) / max(volume_ema[index], parameters.epsilon)
+        volume_anomaly = math.log(max(normalized_volume, parameters.epsilon))
+        ema_deviation = (bar.close - close_ema[index]) / atr
         rows.append(
             TimeframeFeatureRow(
                 timestamp=bar.timestamp,
                 close=bar.close,
                 shape=shapes[index],
                 vector=(
-                    z_value,
-                    delta_z,
-                    directional_balance[index],
-                    gates[index],
-                    rho,
-                    normalized_volume,
+                    log_return,
+                    body,
+                    upper_shadow,
+                    lower_shadow,
+                    volume_anomaly,
+                    ema_deviation,
                 ),
             )
         )
-        previous_z = z_value
     return rows
 
 

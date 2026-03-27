@@ -11,6 +11,7 @@ const artifactRoot = path.resolve(repoRoot, 'PyTorch/artifacts/gold_xauusd_m30')
 const currentRunDir = path.join(artifactRoot, 'current')
 const predictionPath = path.join(currentRunDir, 'prediction.json')
 const metricsPath = path.join(currentRunDir, 'metrics.json')
+const forecastSummaryPath = path.join(currentRunDir, 'forecast_summary.json')
 const manifestPath = path.join(currentRunDir, 'manifest.json')
 const outputPath = path.resolve(frontendRoot, 'public/dashboard-data.json')
 const liveDataDir = path.join(artifactRoot, 'live')
@@ -22,6 +23,9 @@ const csvPath = resolveCsvPath(targetDateJst)
 ensureCurrentRun(csvPath)
 const metrics = JSON.parse(fs.readFileSync(metricsPath, 'utf8'))
 const prediction = JSON.parse(fs.readFileSync(predictionPath, 'utf8'))
+const forecastSummary = fs.existsSync(forecastSummaryPath)
+  ? JSON.parse(fs.readFileSync(forecastSummaryPath, 'utf8'))
+  : null
 const manifest = fs.existsSync(manifestPath)
   ? JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
   : null
@@ -38,26 +42,43 @@ if (anchorIndex < 0) {
 }
 
 const anchorBar = bars4h[anchorIndex]
-const horizons = [1, 2, 3, 6, 12, 18, 30]
+const horizons = Object.keys(prediction.expected_log_returns ?? {})
+  .map((value) => Number(value))
+  .filter((value) => Number.isFinite(value))
+  .sort((left, right) => left - right)
 const horizonRows = buildHorizonRows({ prediction, horizons, bars4h, anchorIndex, anchorClose: anchorBar.close })
 const chartRows = buildChartRows({ rawRows: csvRows, anchorTime, anchorBar, horizonRows, bars4h, anchorIndex })
-const selectedHorizon = prediction.accepted_horizon ?? prediction.proposed_horizon ?? prediction.selected_horizon ?? horizons[0]
+const selectedHorizon =
+  prediction.executed_horizon ??
+  prediction.policy_horizon ??
+  prediction.accepted_horizon ??
+  prediction.proposed_horizon ??
+  horizons[0]
 const history = metrics.history.map((row) => ({
   epoch: row.epoch,
   trainTotal: row.train_total,
   validationTotal: row.validation_total,
   trainReturn: row.train_return,
   validationReturn: row.validation_return,
-  trainOverlay: row.train_overlay,
-  validationOverlay: row.validation_overlay,
+  trainProfit: row.train_profit ?? row.train_total,
+  validationProfit: row.validation_profit ?? row.validation_total,
+  trainLogWealth: row.train_log_wealth ?? null,
+  validationLogWealth: row.validation_log_wealth ?? null,
 }))
 const bestEpochRow = history.reduce((best, row) => (row.validationTotal < best.validationTotal ? row : best))
 const convergenceGain = history[0].validationTotal - bestEpochRow.validationTotal
 const generalizationGap = bestEpochRow.validationTotal - bestEpochRow.trainTotal
 const validationMetrics = metrics.validation_metrics ?? null
+const overlayAction = prediction.no_trade_band_hit ? 'hold' : 'reduce'
 const payload = {
+  schemaVersion: 4,
   generatedAt: new Date().toISOString(),
   instrument: '金 / XAUUSD',
+  artifacts: {
+    metricsSchemaVersion: metrics.schema_version ?? null,
+    predictionSchemaVersion: prediction.schema_version ?? null,
+    forecastSchemaVersion: forecastSummary?.schema_version ?? null,
+  },
   provenance: {
     rawRows: csvRows.length,
     sourcePath: csvPath,
@@ -70,10 +91,13 @@ const payload = {
     selectedHorizon,
     selectedHours: selectedHorizon * 4,
     position: prediction.position,
-    overlayAction: prediction.overlay_action,
+    overlayAction,
+    policyStatus: prediction.no_trade_band_hit ? 'no-trade' : 'active',
     trainSamples: metrics.train_samples,
     validationSamples: metrics.validation_samples,
     sampleCount: metrics.sample_count,
+    effectiveSampleCount: metrics.effective_sample_count ?? null,
+    purgedSamples: metrics.purged_samples ?? null,
     bestValidationLoss: metrics.best_validation_loss,
     bestEpoch: bestEpochRow.epoch,
     convergenceGain,
@@ -102,40 +126,22 @@ const payload = {
     history,
     validation: validationMetrics
       ? {
-          returnRmse: validationMetrics.return_rmse ?? null,
-          returnMae: validationMetrics.return_mae ?? null,
+          averageLogWealth: validationMetrics.average_log_wealth ?? null,
+          realizedPnlPerAnchor: validationMetrics.realized_pnl_per_anchor ?? null,
+          cvarTailLoss: validationMetrics.cvar_tail_loss ?? null,
+          noTradeBandHitRate: validationMetrics.no_trade_band_hit_rate ?? null,
+          shapeGateUsage: validationMetrics.shape_gate_usage ?? null,
+          expertEntropy: validationMetrics.expert_entropy ?? null,
+          muCalibration: validationMetrics.mu_calibration ?? null,
+          sigmaCalibration: validationMetrics.sigma_calibration ?? null,
           directionalAccuracy: validationMetrics.directional_accuracy ?? null,
-          directionBrierScore: validationMetrics.direction_brier_score ?? null,
-          uncertaintyCalibrationError: validationMetrics.uncertainty_calibration_error ?? null,
-          coverageAt1Sigma: validationMetrics.coverage_at_1sigma ?? null,
-          overlayAccuracy: validationMetrics.overlay_accuracy ?? null,
-          overlayMacroF1: validationMetrics.overlay_macro_f1 ?? null,
-          selectionPrecision: validationMetrics.selection_precision ?? null,
-          selectionSupport: validationMetrics.selection_support ?? null,
-          precisionFeasible: validationMetrics.precision_feasible ?? null,
-          thresholdCalibrationFeasible: validationMetrics.threshold_calibration_feasible ?? null,
-          selectionCalibrationError: validationMetrics.selection_calibration_error ?? null,
-          holdRate: validationMetrics.hold_rate ?? null,
-          coverageAtTargetPrecision: validationMetrics.coverage_at_target_precision ?? null,
-          noTradeRate: validationMetrics.no_trade_rate ?? null,
-          valuePerSignal: validationMetrics.value_per_signal ?? null,
-          acceptedValuePerSignal: validationMetrics.accepted_value_per_signal ?? null,
-          downsidePerSignal: validationMetrics.downside_per_signal ?? null,
-          valueCaptureRatio: validationMetrics.value_capture_ratio ?? null,
-          profitFactor: validationMetrics.profit_factor ?? null,
-          signalSharpe: validationMetrics.signal_sharpe ?? null,
-          signalSortino: validationMetrics.signal_sortino ?? null,
           projectValueScore: validationMetrics.project_value_score ?? null,
-          alignmentRate: validationMetrics.alignment_rate ?? null,
-          actionableEdgeRate: validationMetrics.actionable_edge_rate ?? null,
-          nonflatRate: validationMetrics.nonflat_rate ?? null,
-          preThresholdCapture: validationMetrics.pre_threshold_capture ?? null,
-          bestSelectionLcb: validationMetrics.best_selection_lcb ?? null,
-          supportAtBestLcb: validationMetrics.support_at_best_lcb ?? null,
-          precisionAtBestLcb: validationMetrics.precision_at_best_lcb ?? null,
-          tauAtBestLcb: validationMetrics.tau_at_best_lcb ?? null,
-          selectionBrierScore: validationMetrics.selection_brier_score ?? null,
-          holdBrierScore: validationMetrics.hold_brier_score ?? null,
+          exactSmoothHorizonAgreement: validationMetrics.exact_smooth_horizon_agreement ?? null,
+          exactSmoothNoTradeAgreement: validationMetrics.exact_smooth_no_trade_agreement ?? null,
+          exactSmoothPositionMae: validationMetrics.exact_smooth_position_mae ?? null,
+          exactSmoothUtilityRegret: validationMetrics.exact_smooth_utility_regret ?? null,
+          logWealthClampHitRate: validationMetrics.log_wealth_clamp_hit_rate ?? null,
+          stateResetMode: validationMetrics.state_reset_mode ?? null,
           turnover: validationMetrics.turnover ?? null,
           maxDrawdown: validationMetrics.max_drawdown ?? null,
           utilityScore: validationMetrics.utility_score ?? null,
@@ -444,8 +450,9 @@ function mergeBucket(rows, bucketEnd) {
 }
 
 function buildHorizonRows({ prediction, horizons, bars4h, anchorIndex, anchorClose }) {
+  const predictedCloses = prediction.median_predicted_closes ?? prediction.predicted_closes ?? {}
   return horizons.map((horizon) => {
-    const predictedClose = prediction.predicted_closes[String(horizon)]
+    const predictedClose = predictedCloses[String(horizon)]
     const uncertainty = prediction.uncertainties[String(horizon)]
     const lowerClose = predictedClose * Math.exp(-uncertainty)
     const upperClose = predictedClose * Math.exp(uncertainty)
@@ -467,9 +474,11 @@ function buildHorizonRows({ prediction, horizons, bars4h, anchorIndex, anchorClo
 }
 
 function buildChartRows({ rawRows, anchorTime, anchorBar, horizonRows, bars4h, anchorIndex }) {
+  const maxHorizon = horizonRows.reduce((currentMax, row) => Math.max(currentMax, row.horizon), 1)
+  const historyWindowBars = Math.max(64, Math.min(160, maxHorizon * 16))
   const historyRows = rawRows
     .filter((row) => row.ts <= anchorTime.getTime())
-    .slice(-192)
+    .slice(-historyWindowBars)
     .map((row) => ({
       ts: row.ts,
       label: toIso(row.ts),
@@ -486,7 +495,14 @@ function buildChartRows({ rawRows, anchorTime, anchorBar, horizonRows, bars4h, a
       actualRangeEnd: null,
     }))
 
-  const interpolatedForecast = interpolateForecast({ anchorBar, horizonRows, bars4h, anchorIndex })
+  const historyEndTs = historyRows.at(-1)?.ts ?? anchorBar.lastTs ?? anchorBar.ts
+  const interpolatedForecast = interpolateForecast({
+    anchorBar,
+    horizonRows,
+    bars4h,
+    anchorIndex,
+    historyEndTs,
+  })
   const forecastRows = interpolatedForecast.map((row) => ({
     ts: row.ts,
     label: toIso(row.ts),
@@ -531,30 +547,32 @@ function buildMicroRows({ rawRows, startTs, endTs }) {
 
 function calculateVisiblePriceDomain(rows) {
   const values = rows
-    .flatMap((row) => [row.close, row.forecastBase, row.forecastLower, row.forecastUpper, row.actualClose])
+    .flatMap((row) => [row.close, row.forecastBase, row.actualClose])
     .filter((value) => value !== null)
 
   const min = Math.min(...values)
   const max = Math.max(...values)
   const range = max - min
-  const pad = range === 0 ? Math.max(min * 0.0025, 1) : Math.max(range * 0.035, max * 0.0025, 1)
+  const pad = range === 0 ? Math.max(min * 0.003, 1) : Math.max(range * 0.08, max * 0.003, 1)
 
   return [Math.floor(min - pad), Math.ceil(max + pad)]
 }
 
-function interpolateForecast({ anchorBar, horizonRows, bars4h, anchorIndex }) {
+function interpolateForecast({ anchorBar, horizonRows, bars4h, anchorIndex, historyEndTs }) {
   const horizonActuals = new Map(horizonRows.map((row) => [row.horizon, row.actualClose]))
   const points = [
     {
       step: 0,
-      ts: anchorBar.ts,
+      ts: historyEndTs,
       logBase: 0,
       sigma: 0,
       actual: anchorBar.close,
     },
     ...horizonRows.map((row) => ({
       step: row.horizon,
-      ts: bars4h[anchorIndex + row.horizon]?.ts ?? anchorBar.ts + row.horizon * 4 * 60 * 60 * 1000,
+      ts:
+        bars4h[anchorIndex + row.horizon]?.lastTs ??
+        historyEndTs + row.horizon * 4 * 60 * 60 * 1000,
       logBase: Math.log(row.predictedClose / anchorBar.close),
       sigma: row.uncertainty,
       actual: row.actualClose,
@@ -580,7 +598,9 @@ function interpolateForecast({ anchorBar, horizonRows, bars4h, anchorIndex }) {
     const actualPoint = horizonActuals.get(step) ?? actualBar?.close ?? null
 
     rows.push({
-      ts: bars4h[anchorIndex + step]?.ts ?? anchorBar.ts + step * 4 * 60 * 60 * 1000,
+      ts:
+        bars4h[anchorIndex + step]?.lastTs ??
+        historyEndTs + step * 4 * 60 * 60 * 1000,
       base,
       lower,
       upper,
@@ -594,17 +614,17 @@ function interpolateForecast({ anchorBar, horizonRows, bars4h, anchorIndex }) {
 }
 
 function buildNarrative({ prediction, horizonRows }) {
-  const selected = horizonRows.find((row) => row.horizon === prediction.selected_horizon) ?? horizonRows[0]
-  const directionalWord = prediction.accepted_signal === false
-    ? '見送りです。'
+  const selected = horizonRows.find((row) => row.horizon === (prediction.policy_horizon ?? prediction.selected_horizon)) ?? horizonRows[0]
+  const directionalWord = prediction.no_trade_band_hit === true
+    ? 'ノートレードです。'
     : prediction.position < -0.25
       ? '下向きです。'
       : prediction.position > 0.25
         ? '上向きです。'
         : '横ばいです。'
-  const overlayWord = prediction.overlay_action === 'hold'
+  const overlayWord = prediction.no_trade_band_hit === true
     ? '短期判断は維持です。'
-    : `短期判断は ${translateOverlay(prediction.overlay_action)} です。`
+    : '短期判断はポジション調整です。'
   const ordered = [...horizonRows].sort((left, right) => left.horizon - right.horizon)
   const segments = []
 
@@ -626,9 +646,9 @@ function buildNarrative({ prediction, horizonRows }) {
     bullets: [
       `変化率は ${selected.expectedReturnPct.toFixed(2)}%、不確実性は ${selected.uncertainty.toFixed(4)} です。`,
       `予測幅は ${Math.round(selected.lowerClose).toLocaleString('ja-JP')} - ${Math.round(selected.upperClose).toLocaleString('ja-JP')} です。`,
-      prediction.accepted_signal === false
-        ? `採用確率は ${(prediction.selection_probability * 100).toFixed(1)}%、閾値は ${(prediction.selection_threshold * 100).toFixed(1)}% です。`
-        : `判断は ${translateOverlay(prediction.overlay_action)}、強さは ${Math.abs(prediction.position).toFixed(2)} です。`,
+      prediction.no_trade_band_hit === true
+        ? `no-trade band に入りました。直前ポジションは ${Number(prediction.previous_position ?? 0).toFixed(2)} です。`
+        : `policy score は ${Number(prediction.policy_score ?? 0).toFixed(3)}、強さは ${Math.abs(prediction.position).toFixed(2)} です。`,
     ],
     segments,
   }

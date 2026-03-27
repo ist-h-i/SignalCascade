@@ -9,174 +9,21 @@ from torch.nn import functional as functional
 from .config import TrainingConfig
 from ..domain.entities import TrainingExample
 
-Q_FEATURE_NAMES = (
-    "edge",
-    "p_down",
-    "p_flat",
-    "p_up",
-    "prob_gap",
-    "sign_agreement",
-    "session_asia",
-    "session_london",
-    "session_ny",
-    "volatility_ratio",
-    "trend_strength",
-    "horizon_norm",
-)
-SELECTOR_FEATURE_NAMES = (
-    "edge",
-    "q",
-    "p_down",
-    "p_flat",
-    "p_up",
-    "prob_gap",
-    "top_gap",
-    "sign_agreement",
-    "session_asia",
-    "session_london",
-    "session_ny",
-    "volatility_ratio",
-    "trend_strength",
-    "horizon_norm",
-)
-SIGN_INDEX_TO_VALUE = (-1, 0, 1)
-SELECTION_SCORE_SOURCES = (
-    "selector_probability",
-    "correctness_probability",
-    "actionable_edge",
-    "edge_correctness_product",
-)
-
 
 def build_default_policy(config: TrainingConfig) -> dict[str, object]:
     return {
-        "precision_target": config.precision_target,
-        "selection_alpha": config.selection_alpha,
+        "mode": "profit_maximization",
+        "status": "retired_threshold_policy",
+        "selection_score_source": "profit_utility",
         "allow_no_candidate": bool(config.allow_no_candidate),
-        "selection_score_source": str(config.selection_score_source),
-        "correctness_model": _constant_model(0.5, Q_FEATURE_NAMES),
-        "selector_model": _constant_model(0.5, SELECTOR_FEATURE_NAMES),
-        "selection_thresholds": {
-            "scope": "global",
-            "origin": "stored_policy",
-            "global": None,
-            "by_horizon": {str(horizon): None for horizon in config.horizons},
-            "by_regime": {},
-            "scan": {
-                "global": [],
-                "by_horizon": {},
-            },
-            "meta": {
-                "global": _empty_threshold_meta(),
-                "by_horizon": {},
-            },
-        },
-        "overlay_thresholds": {
-            "global": 0.5,
-            "by_regime": {},
-        },
-        "metrics": {},
     }
-
-
-def build_prediction_snapshots(
-    examples: Sequence[TrainingExample],
-    mean: torch.Tensor,
-    sigma: torch.Tensor,
-    direction_probabilities: torch.Tensor,
-    overlay_probabilities: torch.Tensor,
-    config: TrainingConfig,
-) -> list[dict[str, object]]:
-    snapshots: list[dict[str, object]] = []
-    for batch_index, example in enumerate(examples):
-        horizon_rows: list[dict[str, object]] = []
-        for horizon_index, horizon in enumerate(config.horizons):
-            probability_vector = direction_probabilities[batch_index, horizon_index].tolist()
-            predicted_index = int(torch.argmax(direction_probabilities[batch_index, horizon_index]).item())
-            horizon_rows.append(
-                {
-                    "horizon": horizon,
-                    "mean": float(mean[batch_index, horizon_index].item()),
-                    "sigma": float(sigma[batch_index, horizon_index].item()),
-                    "cost": float(example.horizon_costs[horizon_index]),
-                    "predicted_sign": SIGN_INDEX_TO_VALUE[predicted_index],
-                    "true_return": float(example.returns_target[horizon_index]),
-                    "true_direction": int(example.direction_targets[horizon_index]),
-                    "direction_probabilities": [float(value) for value in probability_vector],
-                }
-            )
-
-        snapshots.append(
-            {
-                "anchor_time": example.anchor_time.isoformat(),
-                "regime_id": example.regime_id,
-                "regime_features": [float(value) for value in example.regime_features],
-                "realized_volatility": float(example.realized_volatility),
-                "trend_strength": float(example.trend_strength),
-                "overlay_target": int(example.overlay_target),
-                "overlay_probability": float(overlay_probabilities[batch_index].item()),
-                "horizons": horizon_rows,
-            }
-        )
-    return snapshots
 
 
 def build_selection_policy(
     snapshots: Sequence[dict[str, object]],
     config: TrainingConfig,
 ) -> dict[str, object]:
-    policy = build_default_policy(config)
-    if not snapshots:
-        return policy
-
-    q_rows: list[list[float]] = []
-    q_targets: list[int] = []
-    for snapshot in snapshots:
-        prepared_rows = _prepare_horizon_rows(snapshot, policy, config)
-        for row in prepared_rows:
-            q_rows.append(_q_feature_vector(row, snapshot, config))
-            q_targets.append(
-                int(
-                    row["predicted_sign"] != 0
-                    and row["predicted_sign"] == _sign_from_return(row["true_return"])
-                )
-            )
-    policy["correctness_model"] = _fit_binary_model(
-        feature_names=Q_FEATURE_NAMES,
-        feature_rows=q_rows,
-        targets=q_targets,
-        brier_weight=0.05,
-    )
-
-    selector_rows: list[list[float]] = []
-    selector_targets: list[int] = []
-    for snapshot in snapshots:
-        prepared_rows = _prepare_horizon_rows(snapshot, policy, config)
-        for row in prepared_rows:
-            selector_rows.append(_selector_feature_vector(row, snapshot, config))
-            selector_targets.append(
-                int(
-                    row["predicted_sign"] != 0
-                    and row["predicted_sign"] == row["true_direction"]
-                )
-            )
-    policy["selector_model"] = _fit_binary_model(
-        feature_names=SELECTOR_FEATURE_NAMES,
-        feature_rows=selector_rows,
-        targets=selector_targets,
-        brier_weight=config.selector_brier_weight,
-    )
-
-    selection_records = _build_selection_threshold_records(snapshots, policy, config)
-    policy["selection_thresholds"] = _build_selection_thresholds(
-        selection_records,
-        config,
-        anchor_count=len(snapshots),
-    )
-    overlay_records = _build_overlay_threshold_records(snapshots, policy, config)
-    policy["overlay_thresholds"] = _build_overlay_thresholds(overlay_records, config)
-    policy["metrics"] = evaluate_policy_snapshots(policy, snapshots, config)
-    return policy
+    return build_default_policy(config)
 
 
 def build_replay_selection_policy(
@@ -184,923 +31,359 @@ def build_replay_selection_policy(
     snapshots: Sequence[dict[str, object]],
     config: TrainingConfig,
 ) -> dict[str, object]:
-    replay_policy = dict(policy or build_default_policy(config))
-    replay_policy["allow_no_candidate"] = bool(config.allow_no_candidate)
-    replay_policy["selection_score_source"] = str(config.selection_score_source)
-    selection_records = _build_selection_threshold_records(snapshots, replay_policy, config)
-    replay_policy["selection_thresholds"] = _build_selection_thresholds(
-        selection_records,
-        config,
-        anchor_count=len(snapshots),
-        origin="validation_replay",
-    )
-    return replay_policy
+    replay = dict(policy or build_default_policy(config))
+    replay["status"] = "profit_policy_replay"
+    return replay
 
 
 def selection_thresholds_match_config(
     policy: dict[str, object],
     config: TrainingConfig,
 ) -> bool:
-    return _selection_thresholds_match_config(policy, config)
+    return True
 
 
 def apply_selection_policy(
     example: TrainingExample,
     mean: Sequence[float],
     sigma: Sequence[float],
-    direction_probabilities: Sequence[Sequence[float]],
-    overlay_probability: float,
-    policy: dict[str, object] | None,
-    config: TrainingConfig,
+    policy: dict[str, object] | None = None,
+    config: TrainingConfig | None = None,
+    previous_position: float = 0.0,
+    tradeability_gate: float = 1.0,
+    shape_probs: Sequence[float] | None = None,
+    cost_multiplier: float = 1.0,
+    gamma_multiplier: float = 1.0,
+    **_: object,
 ) -> dict[str, object]:
-    active_policy = policy or build_default_policy(config)
-    snapshot = {
-        "anchor_time": example.anchor_time.isoformat(),
-        "regime_id": example.regime_id,
-        "regime_features": [float(value) for value in example.regime_features],
-        "realized_volatility": float(example.realized_volatility),
-        "trend_strength": float(example.trend_strength),
-        "overlay_target": int(example.overlay_target),
-        "overlay_probability": float(overlay_probability),
-        "horizons": [
-            {
-                "horizon": horizon,
-                "mean": float(mean[horizon_index]),
-                "sigma": float(sigma[horizon_index]),
-                "cost": float(example.horizon_costs[horizon_index]),
-                "predicted_sign": SIGN_INDEX_TO_VALUE[int(_argmax(direction_probabilities[horizon_index]))],
-                "true_return": float(example.returns_target[horizon_index]),
-                "true_direction": int(example.direction_targets[horizon_index]),
-                "direction_probabilities": [float(value) for value in direction_probabilities[horizon_index]],
-            }
-            for horizon_index, horizon in enumerate(config.horizons)
-        ],
-    }
-    return _augment_snapshot(snapshot, active_policy, config)
+    if config is None:
+        raise ValueError("TrainingConfig is required.")
+    rows = build_exact_policy_rows(
+        mean=mean,
+        sigma=sigma,
+        costs=example.horizon_costs,
+        tradeability_gate=tradeability_gate,
+        previous_position=previous_position,
+        config=config,
+        cost_multiplier=cost_multiplier,
+        gamma_multiplier=gamma_multiplier,
+    )
+    selected_row = max(
+        rows,
+        key=lambda row: (
+            float(row["policy_utility"]),
+            abs(float(row["gated_mean"])),
+            -int(row["horizon"]),
+        ),
+    )
+    position = float(selected_row["position"])
+    trade_delta = position - float(previous_position)
+    no_trade = bool(selected_row["no_trade_band"])
+    executed_horizon = int(selected_row["horizon"]) if abs(position) > 1e-9 else None
+    shape_vector = list(shape_probs or [])
+    shape_entropy = _shape_entropy(shape_vector)
+    selected_direction = _sign_from_value(float(selected_row["mean"]))
 
-
-def evaluate_policy_snapshots(
-    policy: dict[str, object],
-    snapshots: Sequence[dict[str, object]],
-    config: TrainingConfig,
-) -> dict[str, float]:
-    accepted = 0
-    accepted_clean = 0
-    hold_predictions = 0
-    hold_correct = 0
-    overlay_correct = 0
-    cumulative_value = 0.0
-    cumulative_abs_value = 0.0
-    turnover = 0.0
-    equity = 0.0
-    peak_equity = 0.0
-    max_drawdown = 0.0
-    previous_position = 0.0
-
-    for snapshot in snapshots:
-        augmented = _augment_snapshot(snapshot, policy, config)
-        if augmented["accepted_signal"]:
-            accepted += 1
-            accepted_clean += int(augmented["meta_label"])
-
-        overlay_is_hold = augmented["overlay_action"] == "hold"
-        overlay_target = int(snapshot["overlay_target"])
-        overlay_correct += int(overlay_is_hold == bool(overlay_target))
-        if overlay_is_hold:
-            hold_predictions += 1
-            hold_correct += overlay_target
-
-        selected_row = augmented["selected_row"]
-        realized_return = (
-            float(selected_row["true_return"])
-            if isinstance(selected_row, dict)
-            else 0.0
-        )
-        realized_value = float(augmented["position"]) * realized_return
-        cumulative_value += realized_value
-        cumulative_abs_value += abs(realized_return)
-        turnover += abs(float(augmented["position"]) - previous_position)
-        previous_position = float(augmented["position"])
-        equity += realized_value
-        peak_equity = max(peak_equity, equity)
-        max_drawdown = max(max_drawdown, peak_equity - equity)
-
-    total = max(len(snapshots), 1)
-    coverage = accepted / total
-    threshold_meta = dict(policy.get("selection_thresholds", {}).get("meta", {}))
-    global_meta = dict(threshold_meta.get("global", {}))
     return {
-        "selection_precision": accepted_clean / max(accepted, 1),
-        "coverage_at_target_precision": coverage,
-        "no_trade_rate": 1.0 - coverage,
-        "overlay_accuracy": overlay_correct / total,
-        "overlay_precision": hold_correct / max(hold_predictions, 1),
-        "value_capture_ratio": cumulative_value / max(cumulative_abs_value, 1e-6),
-        "turnover": turnover,
-        "max_drawdown": max_drawdown,
-        "precision_feasible": float(bool(global_meta.get("feasible"))),
-        "feasible_horizon_count": 0.0,
+        "policy_horizon": int(selected_row["horizon"]),
+        "proposed_horizon": int(selected_row["horizon"]),
+        "executed_horizon": executed_horizon,
+        "accepted_horizon": executed_horizon,
+        "selected_horizon": int(selected_row["horizon"]),
+        "selected_direction": selected_direction,
+        "position": position,
+        "previous_position": float(previous_position),
+        "trade_delta": trade_delta,
+        "raw_position": position,
+        "pre_threshold_position": position,
+        "pre_threshold_eligible": not no_trade,
+        "accepted_signal": executed_horizon is not None,
+        "no_trade_band_hit": no_trade,
+        "selection_probability": float(tradeability_gate),
+        "selection_score": float(selected_row["policy_utility"]),
+        "selection_score_source": "profit_utility",
+        "selection_threshold": None,
+        "threshold_status": "retired",
+        "threshold_origin": "profit_policy",
+        "stored_threshold_compatibility": "retired",
+        "threshold_score_source": "profit_utility",
+        "precision_infeasible": False,
+        "correctness_probability": float(tradeability_gate),
+        "hold_probability": max(0.0, 1.0 - min(abs(position), 1.0)),
+        "hold_threshold": 0.0,
+        "overlay_action": "hold" if no_trade else "reduce",
+        "expected_direction": selected_direction,
+        "direction_alignment": True,
+        "accept_reject_reason": "no_trade_band" if no_trade else "executed",
+        "reject_flags": {
+            "no_trade_band": no_trade,
+            "retired_threshold_policy": True,
+        },
+        "meta_label": int(
+            executed_horizon is not None
+            and selected_direction != 0
+            and selected_direction == int(example.direction_targets[config.horizons.index(int(selected_row["horizon"]))])
+        ),
+        "direction_correct": int(
+            selected_direction != 0
+            and selected_direction == _sign_from_value(
+                float(example.returns_target[config.horizons.index(int(selected_row["horizon"]))])
+            )
+        ),
+        "candidate_count": len(rows),
+        "strict_candidate_count": len(rows),
+        "any_candidate": bool(rows),
+        "any_strict_candidate": bool(rows),
+        "tradeability_gate": float(tradeability_gate),
+        "shape_entropy": shape_entropy,
+        "horizon_rows": rows,
+        "selected_row": selected_row,
     }
 
 
-def _prepare_horizon_rows(
-    snapshot: dict[str, object],
-    policy: dict[str, object],
+def build_prediction_snapshots(
+    examples: Sequence[TrainingExample],
+    mean: torch.Tensor,
+    sigma: torch.Tensor,
+    tradeability_gate: torch.Tensor,
     config: TrainingConfig,
+    previous_position: float = 0.0,
 ) -> list[dict[str, object]]:
-    rows = [dict(row) for row in snapshot["horizons"]]
-    predicted_signs = [int(row["predicted_sign"]) for row in rows]
-    scores: list[float] = []
-
-    for row in rows:
-        probabilities = list(row["direction_probabilities"])
-        sorted_probabilities = sorted(probabilities, reverse=True)
-        probability_gap = sorted_probabilities[0] - sorted_probabilities[1]
-        agreement = _sign_agreement(predicted_signs, int(row["predicted_sign"]))
-        actionable_sign = _actionable_sign(probabilities, int(row["predicted_sign"]))
-        row["edge"] = abs(float(row["mean"])) / max(float(row["sigma"]), 1e-6)
-        row["prob_gap"] = probability_gap
-        row["sign_agreement"] = agreement
-        row["actionable_sign"] = actionable_sign
-        row["q"] = _predict_binary_model(policy["correctness_model"], _q_feature_vector(row, snapshot, config))
-        direction_alignment = (
-            int(row["predicted_sign"]) != 0
-            and int(row["predicted_sign"]) == _sign_from_return(float(row["mean"]))
+    snapshots: list[dict[str, object]] = []
+    running_position = float(previous_position)
+    for index, example in enumerate(examples):
+        decision = apply_selection_policy(
+            example=example,
+            mean=mean[index].tolist(),
+            sigma=sigma[index].tolist(),
+            config=config,
+            previous_position=running_position,
+            tradeability_gate=float(tradeability_gate[index].item()),
         )
-        actionable_edge = (
-            max((float(actionable_sign) * float(row["mean"])) - float(row["cost"]), 0.0)
-            if actionable_sign != 0
-            else 0.0
+        running_position = float(decision["position"])
+        snapshots.append(
+            {
+                "anchor_time": example.anchor_time.isoformat(),
+                "regime_id": example.regime_id,
+                "state_features": [float(value) for value in example.state_features],
+                "decision": decision,
+                "horizons": [dict(row) for row in decision["horizon_rows"]],
+            }
         )
-        row["actionable_edge"] = actionable_edge
-        row["direction_alignment"] = direction_alignment
-        row["candidate"] = bool(actionable_sign != 0 and actionable_edge > 0.0)
-        row["strict_candidate"] = bool(row["candidate"] and direction_alignment)
-        if actionable_sign == 0 or actionable_edge <= 0.0:
-            score = 0.0
-        else:
-            score = (row["q"] ** config.selection_alpha) * (
-                actionable_edge ** (1.0 - config.selection_alpha)
-            )
-        row["score"] = score
-        scores.append(score)
+    return snapshots
 
-    best_score = max(scores, default=0.0)
-    second_score = _second_largest(scores)
-    for row in rows:
-        row["top_gap"] = float(row["score"]) - (second_score if float(row["score"]) >= best_score else best_score)
+
+def build_exact_policy_rows(
+    mean: Sequence[float],
+    sigma: Sequence[float],
+    costs: Sequence[float],
+    tradeability_gate: float,
+    previous_position: float,
+    config: TrainingConfig,
+    cost_multiplier: float = 1.0,
+    gamma_multiplier: float = 1.0,
+) -> list[dict[str, object]]:
+    rows: list[dict[str, object]] = []
+    for horizon_index, horizon in enumerate(config.horizons):
+        mean_value = float(mean[horizon_index])
+        sigma_value = max(float(sigma[horizon_index]), config.min_policy_sigma)
+        cost_value = float(costs[horizon_index]) * float(cost_multiplier)
+        gated_mean = float(tradeability_gate) * mean_value
+        position, no_trade = solve_exact_policy_position(
+            gated_mean=gated_mean,
+            sigma=sigma_value,
+            previous_position=previous_position,
+            cost=cost_value,
+            config=config,
+            gamma_multiplier=gamma_multiplier,
+        )
+        utility = policy_utility(
+            position=position,
+            previous_position=previous_position,
+            gated_mean=gated_mean,
+            sigma=sigma_value,
+            cost=cost_value,
+            config=config,
+            gamma_multiplier=gamma_multiplier,
+        )
+        effective_gamma = float(config.risk_aversion_gamma) * float(gamma_multiplier)
+        rows.append(
+            {
+                "horizon": int(horizon),
+                "mean": mean_value,
+                "sigma": sigma_value,
+                "cost": cost_value,
+                "gated_mean": gated_mean,
+                "margin": gated_mean
+                - (effective_gamma * (sigma_value**2) * float(previous_position)),
+                "position": position,
+                "predicted_sign": _sign_from_value(mean_value),
+                "policy_utility": utility,
+                "no_trade_band": no_trade,
+            }
+        )
     return rows
 
 
-def _augment_snapshot(
-    snapshot: dict[str, object],
-    policy: dict[str, object],
+def solve_exact_policy_position(
+    gated_mean: float,
+    sigma: float,
+    previous_position: float,
+    cost: float,
     config: TrainingConfig,
-) -> dict[str, object]:
-    rows = _prepare_horizon_rows(snapshot, policy, config)
-    if not rows:
-        raise ValueError("Prediction snapshot does not contain any horizon rows.")
+    gamma_multiplier: float = 1.0,
+) -> tuple[float, bool]:
+    sigma_sq = max(float(sigma) ** 2, config.min_policy_sigma**2)
+    effective_gamma = float(config.risk_aversion_gamma) * float(gamma_multiplier)
+    margin = float(gated_mean) - (effective_gamma * sigma_sq * float(previous_position))
+    if abs(margin) <= float(cost):
+        position = float(previous_position)
+        no_trade = True
+    elif margin > 0.0:
+        position = (float(gated_mean) - float(cost)) / (effective_gamma * sigma_sq)
+        no_trade = False
+    else:
+        position = (float(gated_mean) + float(cost)) / (effective_gamma * sigma_sq)
+        no_trade = False
+    position = max(-config.q_max, min(config.q_max, position))
+    return position, no_trade
 
-    for row in rows:
-        row["selector_probability"] = _predict_binary_model(
-            policy["selector_model"],
-            _selector_feature_vector(row, snapshot, config),
-        )
-        row["selection_score"] = _selection_score_value(row, config.selection_score_source)
 
-    candidate_rows = [row for row in rows if bool(row["candidate"])]
-    strict_candidate_rows = [row for row in rows if bool(row["strict_candidate"])]
-    selection_pool = candidate_rows if config.allow_no_candidate else rows
-    threshold_context = _selection_threshold_context(policy, config)
-    selected_row = (
-        max(
-            selection_pool,
-            key=lambda row: (
-                float(row["score"]),
-                float(row["actionable_edge"]),
-                abs(float(row["mean"])),
-            ),
-        )
-        if selection_pool
-        else None
+def smooth_policy_distribution(
+    mean: torch.Tensor,
+    sigma: torch.Tensor,
+    costs: torch.Tensor,
+    tradeability_gate: torch.Tensor,
+    previous_position: torch.Tensor,
+    config: TrainingConfig,
+    cost_multiplier: float = 1.0,
+    gamma_multiplier: float = 1.0,
+) -> dict[str, torch.Tensor]:
+    effective_gamma = float(config.risk_aversion_gamma) * float(gamma_multiplier)
+    sigma_sq = sigma.pow(2).clamp_min(config.min_policy_sigma**2)
+    gated_mean = tradeability_gate.unsqueeze(-1) * mean
+    scaled_costs = costs * float(cost_multiplier)
+    margin = gated_mean - (
+        effective_gamma * sigma_sq * previous_position.unsqueeze(-1)
     )
-    hold_threshold = _lookup_overlay_threshold(policy, str(snapshot["regime_id"]))
-    if selected_row is None:
-        overlay_probability = float(snapshot["overlay_probability"])
-        overlay_action = "hold" if overlay_probability >= hold_threshold else "reduce"
-        reject_flags = {
-            "no_candidate": True,
-            "actionable_sign_zero": False,
-            "actionable_edge_non_positive": False,
-            "direction_alignment_false": False,
-            "selection_threshold_missing": False,
-            "selection_score_below_threshold": False,
-            "selector_probability_below_threshold": False,
-        }
-        return {
-            "selected_row": None,
-            "proposed_horizon": None,
-            "accepted_horizon": None,
-            "selected_horizon": None,
-            "selected_direction": 0,
-            "position": 0.0,
-            "raw_position": 0.0,
-            "pre_threshold_eligible": False,
-            "pre_threshold_position": 0.0,
-            "accepted_signal": False,
-            "selection_probability": 0.0,
-            "selection_score": 0.0,
-            "selection_score_source": str(config.selection_score_source),
-            "selection_threshold": None,
-            "threshold_status": str(threshold_context["status"]),
-            "threshold_origin": str(threshold_context["origin"]),
-            "stored_threshold_compatibility": str(
-                threshold_context["stored_threshold_compatibility"]
-            ),
-            "threshold_score_source": str(threshold_context["score_source"]),
-            "precision_infeasible": str(threshold_context["status"]) == "infeasible",
-            "correctness_probability": 0.0,
-            "hold_probability": overlay_probability,
-            "hold_threshold": hold_threshold,
-            "overlay_action": overlay_action,
-            "expected_direction": 0,
-            "direction_alignment": False,
-            "accept_reject_reason": _accept_reject_reason(False, reject_flags),
-            "reject_flags": reject_flags,
-            "meta_label": 0,
-            "direction_correct": 0,
-            "candidate_count": len(candidate_rows),
-            "strict_candidate_count": len(strict_candidate_rows),
-            "any_candidate": bool(candidate_rows),
-            "any_strict_candidate": bool(strict_candidate_rows),
-            "horizon_rows": rows,
-        }
-
-    proposed_horizon = int(selected_row["horizon"])
-    selection_threshold = (
-        float(threshold_context["threshold"])
-        if threshold_context["threshold"] is not None
-        else None
+    abs_margin = torch.abs(margin)
+    smooth_excess = functional.softplus(
+        abs_margin - scaled_costs,
+        beta=config.policy_smoothing_beta,
+    ) / max(config.policy_smoothing_beta, 1e-6)
+    direction = torch.tanh(margin / max(config.policy_abs_epsilon, 1e-6))
+    delta_position = direction * smooth_excess / (
+        effective_gamma * sigma_sq
     )
-    expected_direction = _sign_from_return(float(selected_row["mean"]))
-    direction_alignment = bool(selected_row["direction_alignment"])
-    pre_threshold_eligible = bool(selected_row["strict_candidate"])
-    pre_threshold_position = (
-        math.tanh(config.position_scale * (float(selected_row["mean"]) / max(float(selected_row["sigma"]), 1e-6)))
-        if pre_threshold_eligible
-        else 0.0
+    raw_position = previous_position.unsqueeze(-1) + delta_position
+    horizon_positions = config.q_max * torch.tanh(raw_position / max(config.q_max, 1e-6))
+    turnover = torch.sqrt(
+        (horizon_positions - previous_position.unsqueeze(-1)).pow(2)
+        + config.policy_abs_epsilon
     )
-    accepted_signal = (
-        pre_threshold_eligible
-        and selection_threshold is not None
-        and float(selected_row["selection_score"]) >= float(selection_threshold)
+    utilities = (
+        gated_mean * horizon_positions
+        - (0.5 * effective_gamma * sigma_sq * horizon_positions.pow(2))
+        - (scaled_costs * turnover)
     )
-    reject_flags = {
-        "no_candidate": False,
-        "actionable_sign_zero": int(selected_row["actionable_sign"]) == 0,
-        "actionable_edge_non_positive": float(selected_row["actionable_edge"]) <= 0.0,
-        "direction_alignment_false": not direction_alignment,
-        "selection_threshold_missing": selection_threshold is None,
-        "selection_score_below_threshold": (
-            selection_threshold is not None
-            and float(selected_row["selection_score"]) < float(selection_threshold)
-        ),
-        "selector_probability_below_threshold": (
-            config.selection_score_source == "selector_probability"
-            and selection_threshold is not None
-            and float(selected_row["selector_probability"]) < float(selection_threshold)
-        ),
-    }
-    raw_position = pre_threshold_position if accepted_signal else 0.0
-    accepted_horizon = proposed_horizon if accepted_signal else None
-    overlay_probability = float(snapshot["overlay_probability"])
-    overlay_action = "hold" if overlay_probability >= hold_threshold else "reduce"
-    position = raw_position * overlay_probability
-
+    horizon_weights = functional.softmax(utilities * config.policy_smoothing_beta, dim=-1)
+    combined_position = torch.sum(horizon_weights * horizon_positions, dim=-1)
+    combined_utility = torch.sum(horizon_weights * utilities, dim=-1)
+    selected_horizon_index = torch.argmax(utilities, dim=-1)
+    selected_position = torch.gather(
+        horizon_positions,
+        dim=-1,
+        index=selected_horizon_index.unsqueeze(-1),
+    ).squeeze(-1)
+    selected_utility = torch.gather(
+        utilities,
+        dim=-1,
+        index=selected_horizon_index.unsqueeze(-1),
+    ).squeeze(-1)
+    selected_no_trade = torch.gather(
+        (abs_margin <= scaled_costs),
+        dim=-1,
+        index=selected_horizon_index.unsqueeze(-1),
+    ).squeeze(-1)
     return {
-        "selected_row": selected_row,
-        "proposed_horizon": proposed_horizon,
-        "accepted_horizon": accepted_horizon,
-        "selected_horizon": proposed_horizon,
-        "selected_direction": int(selected_row["predicted_sign"]),
-        "position": position,
-        "raw_position": raw_position,
-        "pre_threshold_eligible": pre_threshold_eligible,
-        "pre_threshold_position": pre_threshold_position * overlay_probability,
-        "accepted_signal": accepted_signal,
-        "selection_probability": float(selected_row["selector_probability"]),
-        "selection_score": float(selected_row["selection_score"]),
-        "selection_score_source": str(config.selection_score_source),
-        "selection_threshold": selection_threshold,
-        "threshold_status": str(threshold_context["status"]),
-        "threshold_origin": str(threshold_context["origin"]),
-        "stored_threshold_compatibility": str(
-            threshold_context["stored_threshold_compatibility"]
-        ),
-        "threshold_score_source": str(threshold_context["score_source"]),
-        "precision_infeasible": str(threshold_context["status"]) == "infeasible",
-        "correctness_probability": float(selected_row["q"]),
-        "hold_probability": overlay_probability,
-        "hold_threshold": hold_threshold,
-        "overlay_action": overlay_action,
-        "expected_direction": expected_direction,
-        "direction_alignment": direction_alignment,
-        "accept_reject_reason": _accept_reject_reason(accepted_signal, reject_flags),
-        "reject_flags": reject_flags,
-        "meta_label": int(
-            int(selected_row["predicted_sign"]) != 0
-            and int(selected_row["predicted_sign"]) == int(selected_row["true_direction"])
-        ),
-        "direction_correct": int(
-            int(selected_row["predicted_sign"]) != 0
-            and int(selected_row["predicted_sign"]) == _sign_from_return(float(selected_row["true_return"]))
-        ),
-        "candidate_count": len(candidate_rows),
-        "strict_candidate_count": len(strict_candidate_rows),
-        "any_candidate": bool(candidate_rows),
-        "any_strict_candidate": bool(strict_candidate_rows),
-        "horizon_rows": rows,
+        "gated_mean": gated_mean,
+        "sigma_sq": sigma_sq,
+        "margin": margin,
+        "horizon_positions": horizon_positions,
+        "turnover": turnover,
+        "utilities": utilities,
+        "horizon_weights": horizon_weights,
+        "combined_position": combined_position,
+        "combined_utility": combined_utility,
+        "selected_horizon_index": selected_horizon_index,
+        "selected_position": selected_position,
+        "selected_utility": selected_utility,
+        "selected_no_trade": selected_no_trade,
     }
 
 
-def _q_feature_vector(
-    row: dict[str, object],
-    snapshot: dict[str, object] | None = None,
-    config: TrainingConfig | None = None,
-) -> list[float]:
-    current_snapshot = snapshot or {"regime_features": [0.0, 0.0, 0.0, 0.0, 0.0]}
-    max_horizon = max(config.horizons) if config is not None else max(int(row["horizon"]), 1)
-    return [
-        float(row["edge"]),
-        float(row["direction_probabilities"][0]),
-        float(row["direction_probabilities"][1]),
-        float(row["direction_probabilities"][2]),
-        float(row["prob_gap"]),
-        float(row["sign_agreement"]),
-        float(current_snapshot["regime_features"][0]),
-        float(current_snapshot["regime_features"][1]),
-        float(current_snapshot["regime_features"][2]),
-        float(current_snapshot["regime_features"][3]),
-        float(current_snapshot["regime_features"][4]),
-        float(row["horizon"]) / max(max_horizon, 1),
-    ]
-
-
-def _selector_feature_vector(
-    row: dict[str, object],
-    snapshot: dict[str, object] | None = None,
-    config: TrainingConfig | None = None,
-) -> list[float]:
-    current_snapshot = snapshot or {"regime_features": [0.0, 0.0, 0.0, 0.0, 0.0]}
-    max_horizon = max(config.horizons) if config is not None else max(int(row["horizon"]), 1)
-    return [
-        float(row["edge"]),
-        float(row["q"]),
-        float(row["direction_probabilities"][0]),
-        float(row["direction_probabilities"][1]),
-        float(row["direction_probabilities"][2]),
-        float(row["prob_gap"]),
-        float(row["top_gap"]),
-        float(row["sign_agreement"]),
-        float(current_snapshot["regime_features"][0]),
-        float(current_snapshot["regime_features"][1]),
-        float(current_snapshot["regime_features"][2]),
-        float(current_snapshot["regime_features"][3]),
-        float(current_snapshot["regime_features"][4]),
-        float(row["horizon"]) / max(max_horizon, 1),
-    ]
-
-
-def _build_selection_threshold_records(
-    snapshots: Sequence[dict[str, object]],
-    policy: dict[str, object],
+def policy_utility(
+    position: float,
+    previous_position: float,
+    gated_mean: float,
+    sigma: float,
+    cost: float,
     config: TrainingConfig,
-) -> list[dict[str, object]]:
-    records: list[dict[str, object]] = []
-    for snapshot in snapshots:
-        augmented = _augment_snapshot(snapshot, policy, config)
-        if not bool(augmented["pre_threshold_eligible"]):
-            continue
-        records.append(
-            {
-                "regime_id": str(snapshot["regime_id"]),
-                "horizon": int(augmented["proposed_horizon"]),
-                "score": float(augmented["selection_score"]),
-                "target": int(augmented["meta_label"]),
-            }
-        )
-    return records
-
-
-def _build_overlay_threshold_records(
-    snapshots: Sequence[dict[str, object]],
-    policy: dict[str, object],
-    config: TrainingConfig,
-) -> list[dict[str, object]]:
-    return [
-        {
-            "regime_id": str(snapshot["regime_id"]),
-            "score": float(snapshot["overlay_probability"]),
-            "target": int(snapshot["overlay_target"]),
-        }
-        for snapshot in snapshots
-    ]
-
-
-def _build_selection_thresholds(
-    records: Sequence[dict[str, object]],
-    config: TrainingConfig,
-    anchor_count: int,
-    origin: str = "stored_policy",
-) -> dict[str, object]:
-    global_bundle = _calibrate_threshold(records, config, anchor_count=anchor_count)
-    return {
-        "scope": "global",
-        "origin": str(origin),
-        "score_source": str(config.selection_score_source),
-        "allow_no_candidate": bool(config.allow_no_candidate),
-        "global": global_bundle["threshold"],
-        "by_horizon": {str(horizon): None for horizon in config.horizons},
-        "by_regime": {},
-        "scan": {
-            "global": global_bundle["scan"],
-            "by_horizon": {},
-        },
-        "meta": {
-            "global": global_bundle["meta"],
-            "by_horizon": {},
-        },
-    }
-
-
-def _build_overlay_thresholds(
-    records: Sequence[dict[str, object]],
-    config: TrainingConfig,
-) -> dict[str, object]:
-    return {
-        "global": _calibrate_overlay_threshold(records, config),
-        "by_regime": {},
-    }
-
-
-def _lookup_selection_threshold(
-    policy: dict[str, object],
-    regime_id: str,
-    horizon: int,
-    config: TrainingConfig,
-) -> float | None:
-    context = _selection_threshold_context(policy, config)
-    if context["threshold"] is None:
-        return None
-    return float(context["threshold"])
-
-
-def _lookup_overlay_threshold(
-    policy: dict[str, object],
-    regime_id: str,
+    gamma_multiplier: float = 1.0,
 ) -> float:
-    by_regime = dict(policy.get("overlay_thresholds", {}).get("by_regime", {}))
-    if regime_id in by_regime:
-        return float(by_regime[regime_id])
-    return float(policy.get("overlay_thresholds", {}).get("global", 0.5))
-
-
-def _fit_binary_model(
-    feature_names: Sequence[str],
-    feature_rows: Sequence[Sequence[float]],
-    targets: Sequence[int],
-    brier_weight: float,
-) -> dict[str, object]:
-    if not feature_rows:
-        return _constant_model(0.5, feature_names)
-
-    target_tensor = torch.tensor(list(targets), dtype=torch.float32)
-    positive_rate = float(target_tensor.mean().item()) if len(targets) else 0.5
-    if positive_rate <= 0.0 or positive_rate >= 1.0:
-        return _constant_model(positive_rate, feature_names)
-
-    inputs = torch.tensor(feature_rows, dtype=torch.float32)
-    mean = inputs.mean(dim=0)
-    std = inputs.std(dim=0, unbiased=False).clamp_min(1e-4)
-    normalized_inputs = (inputs - mean) / std
-
-    linear = torch.nn.Linear(normalized_inputs.size(1), 1)
-    with torch.no_grad():
-        linear.weight.zero_()
-        linear.bias.zero_()
-
-    positive_count = float(target_tensor.sum().item())
-    negative_count = float(len(targets) - positive_count)
-    pos_weight = torch.tensor([negative_count / max(positive_count, 1.0)], dtype=torch.float32)
-    optimizer = torch.optim.AdamW(linear.parameters(), lr=0.05, weight_decay=1e-3)
-
-    for _ in range(300):
-        optimizer.zero_grad(set_to_none=True)
-        logits = linear(normalized_inputs).squeeze(1)
-        probabilities = torch.sigmoid(logits)
-        loss = functional.binary_cross_entropy_with_logits(
-            logits,
-            target_tensor,
-            pos_weight=pos_weight,
-        )
-        if brier_weight > 0.0:
-            loss = loss + (brier_weight * torch.square(probabilities - target_tensor).mean())
-        loss.backward()
-        optimizer.step()
-
-    return {
-        "kind": "linear",
-        "feature_names": list(feature_names),
-        "mean": mean.tolist(),
-        "std": std.tolist(),
-        "weights": linear.weight.detach().reshape(-1).tolist(),
-        "bias": float(linear.bias.detach().item()),
-        "constant_probability": positive_rate,
-    }
-
-
-def _predict_binary_model(
-    model: dict[str, object],
-    feature_row: Sequence[float],
-) -> float:
-    if model.get("kind") != "linear":
-        return float(model.get("constant_probability", 0.5))
-
-    total = float(model["bias"])
-    for value, mean, std, weight in zip(
-        feature_row,
-        model["mean"],
-        model["std"],
-        model["weights"],
-    ):
-        total += ((float(value) - float(mean)) / max(float(std), 1e-4)) * float(weight)
-    return 1.0 / (1.0 + math.exp(-max(min(total, 20.0), -20.0)))
-
-
-def _constant_model(
-    probability: float,
-    feature_names: Sequence[str],
-) -> dict[str, object]:
-    return {
-        "kind": "constant",
-        "feature_names": list(feature_names),
-        "mean": [],
-        "std": [],
-        "weights": [],
-        "bias": 0.0,
-        "constant_probability": float(max(0.0, min(1.0, probability))),
-    }
-
-
-def _calibrate_threshold(
-    records: Sequence[dict[str, object]],
-    config: TrainingConfig,
-    anchor_count: int,
-) -> dict[str, object]:
-    if not records:
-        return {"threshold": None, "meta": _empty_threshold_meta(), "scan": []}
-
-    candidates = sorted({float(record["score"]) for record in records})
-    best_candidate: dict[str, object] | None = None
-    best_lcb_candidate = {
-        "threshold": None,
-        "selected_count": 0,
-        "success_count": 0,
-        "precision": 0.0,
-        "precision_lcb": 0.0,
-        "coverage": 0.0,
-    }
-    scan_rows: list[dict[str, object]] = []
-
-    for threshold in candidates:
-        selected = [record for record in records if float(record["score"]) >= threshold]
-        selected_count = len(selected)
-        success_count = sum(int(record["target"]) for record in selected)
-        precision = success_count / selected_count if selected_count > 0 else 0.0
-        precision_lcb = (
-            _precision_lower_bound(
-                success_count,
-                selected_count,
-                config.precision_confidence_z,
-            )
-            if selected_count > 0
-            else 0.0
-        )
-        proposal_coverage = selected_count / len(records) if records else 0.0
-        anchor_coverage = selected_count / max(anchor_count, 1)
-        feasible = (
-            selected_count >= config.selection_min_support
-            and precision_lcb >= config.precision_target
-        )
-        scan_rows.append(
-            {
-                "tau": threshold,
-                "accepted_count_at_tau": selected_count,
-                "success_count_at_tau": success_count,
-                "precision_at_tau": precision,
-                "proposal_coverage": proposal_coverage,
-                "anchor_coverage": anchor_coverage,
-                "selected_count": selected_count,
-                "success_count": success_count,
-                "precision": precision,
-                "lcb": precision_lcb,
-                "feasible": feasible,
-                "coverage": proposal_coverage,
-            }
-        )
-        if selected_count < config.selection_min_support:
-            continue
-
-        if (
-            precision_lcb > float(best_lcb_candidate["precision_lcb"])
-            or (
-                math.isclose(precision_lcb, float(best_lcb_candidate["precision_lcb"]))
-                and selected_count > int(best_lcb_candidate["selected_count"])
-            )
-        ):
-            best_lcb_candidate = {
-                "threshold": threshold,
-                "selected_count": selected_count,
-                "success_count": success_count,
-                "precision": precision,
-                "precision_lcb": precision_lcb,
-                "coverage": proposal_coverage,
-            }
-
-        if precision_lcb >= config.precision_target:
-            if (
-                best_candidate is None
-                or coverage > float(best_candidate["coverage"])
-                or (
-                    math.isclose(coverage, float(best_candidate["coverage"]))
-                    and threshold < float(best_candidate["threshold"])
-                )
-            ):
-                best_candidate = {
-                    "threshold": threshold,
-                    "selected_count": selected_count,
-                    "success_count": success_count,
-                    "precision": precision,
-                    "precision_lcb": precision_lcb,
-                    "coverage": proposal_coverage,
-                }
-
-    if best_candidate is None:
-        return {
-            "threshold": None,
-            "meta": {
-                "feasible": False,
-                "records": len(records),
-                "selected_count": int(best_lcb_candidate["selected_count"]),
-                "success_count": int(best_lcb_candidate["success_count"]),
-                "precision": float(best_lcb_candidate["precision"]),
-                "precision_lcb": float(best_lcb_candidate["precision_lcb"]),
-                "coverage": float(best_lcb_candidate["coverage"]),
-                "accepted_count": int(best_lcb_candidate["selected_count"]),
-                "best_selection_lcb": float(best_lcb_candidate["precision_lcb"]),
-                "support_at_best_lcb": int(best_lcb_candidate["selected_count"]),
-                "precision_at_best_lcb": float(best_lcb_candidate["precision"]),
-                "tau_at_best_lcb": (
-                    None
-                    if best_lcb_candidate["threshold"] is None
-                    else float(best_lcb_candidate["threshold"])
-                ),
-            },
-            "scan": scan_rows,
-        }
-
-    return {
-        "threshold": _normalize_selection_threshold(float(best_candidate["threshold"]), config),
-        "meta": {
-            "feasible": True,
-            "records": len(records),
-            "selected_count": int(best_candidate["selected_count"]),
-            "success_count": int(best_candidate["success_count"]),
-            "precision": float(best_candidate["precision"]),
-            "precision_lcb": float(best_candidate["precision_lcb"]),
-            "coverage": float(best_candidate["coverage"]),
-            "accepted_count": int(best_candidate["selected_count"]),
-            "best_selection_lcb": float(best_lcb_candidate["precision_lcb"]),
-            "support_at_best_lcb": int(best_lcb_candidate["selected_count"]),
-            "precision_at_best_lcb": float(best_lcb_candidate["precision"]),
-            "tau_at_best_lcb": (
-                None if best_lcb_candidate["threshold"] is None else float(best_lcb_candidate["threshold"])
-            ),
-        },
-        "scan": scan_rows,
-    }
-
-
-def _calibrate_overlay_threshold(
-    records: Sequence[dict[str, object]],
-    config: TrainingConfig,
-) -> float:
-    if not records:
-        return 0.5
-
-    candidates = sorted({float(record["score"]) for record in records})
-    best_threshold = 0.5
-    best_precision_lcb = -1.0
-    best_support = 0
-
-    for threshold in candidates:
-        selected = [record for record in records if float(record["score"]) >= threshold]
-        selected_count = len(selected)
-        if selected_count < config.selection_min_support:
-            continue
-        success_count = sum(int(record["target"]) for record in selected)
-        precision_lcb = _precision_lower_bound(
-            success_count,
-            selected_count,
-            config.precision_confidence_z,
-        )
-        if (
-            precision_lcb > best_precision_lcb
-            or (
-                math.isclose(precision_lcb, best_precision_lcb)
-                and selected_count > best_support
-            )
-        ):
-            best_threshold = threshold
-            best_precision_lcb = precision_lcb
-            best_support = selected_count
-
-    return float(max(0.05, min(0.95, best_threshold)))
-
-
-def _empty_threshold_meta() -> dict[str, object]:
-    return {
-        "feasible": False,
-        "records": 0,
-        "selected_count": 0,
-        "accepted_count": 0,
-        "success_count": 0,
-        "precision": 0.0,
-        "precision_lcb": 0.0,
-        "coverage": 0.0,
-        "best_selection_lcb": 0.0,
-        "support_at_best_lcb": 0,
-        "precision_at_best_lcb": 0.0,
-        "tau_at_best_lcb": None,
-    }
-
-
-def _precision_lower_bound(success_count: int, total_count: int, z_score: float) -> float:
-    if total_count <= 0:
-        return 0.0
-    proportion = success_count / total_count
-    z2 = z_score**2
-    denominator = 1.0 + (z2 / total_count)
-    centre = proportion + (z2 / (2.0 * total_count))
-    margin = z_score * math.sqrt(
-        ((proportion * (1.0 - proportion)) / total_count)
-        + (z2 / (4.0 * (total_count**2)))
-    )
-    return max(0.0, (centre - margin) / denominator)
-
-
-def _accept_reject_reason(
-    accepted_signal: bool,
-    reject_flags: dict[str, bool],
-) -> str:
-    if accepted_signal:
-        return "accepted"
-    if reject_flags["no_candidate"]:
-        return "no_candidate"
-    if reject_flags["actionable_sign_zero"]:
-        return "actionable_sign_zero"
-    if reject_flags["actionable_edge_non_positive"]:
-        return "actionable_edge_non_positive"
-    if reject_flags["direction_alignment_false"]:
-        return "direction_alignment_false"
-    if reject_flags["selection_threshold_missing"]:
-        return "selection_threshold_missing"
-    if reject_flags["selection_score_below_threshold"]:
-        return "selection_score_below_threshold"
-    return "rejected"
-
-
-def _selection_score_value(row: dict[str, object], score_source: str) -> float:
-    if score_source == "selector_probability":
-        return float(row["selector_probability"])
-    if score_source == "correctness_probability":
-        return float(row["q"])
-    if score_source == "actionable_edge":
-        return float(row["actionable_edge"])
-    if score_source == "edge_correctness_product":
-        return float(row["actionable_edge"]) * float(row["q"])
-    raise ValueError(f"Unsupported selection_score_source: {score_source}")
-
-
-def _selection_thresholds_match_config(
-    policy: dict[str, object],
-    config: TrainingConfig,
-) -> bool:
-    thresholds = dict(policy.get("selection_thresholds", {}))
-    stored_score_source = str(
-        thresholds.get("score_source", policy.get("selection_score_source", "selector_probability"))
-    )
-    stored_allow_no_candidate = bool(
-        thresholds.get("allow_no_candidate", policy.get("allow_no_candidate", False))
-    )
+    sigma_sq = max(float(sigma) ** 2, config.min_policy_sigma**2)
+    effective_gamma = float(config.risk_aversion_gamma) * float(gamma_multiplier)
     return (
-        stored_score_source == str(config.selection_score_source)
-        and stored_allow_no_candidate == bool(config.allow_no_candidate)
+        (float(gated_mean) * float(position))
+        - (0.5 * effective_gamma * sigma_sq * (float(position) ** 2))
+        - (float(cost) * abs(float(position) - float(previous_position)))
     )
 
 
-def _selection_threshold_context(
-    policy: dict[str, object] | None,
-    config: TrainingConfig,
-) -> dict[str, object]:
-    if policy is None:
-        return {
-            "threshold": None,
-            "status": "missing",
-            "origin": "none",
-            "stored_threshold_compatibility": "not_applicable",
-            "score_source": str(config.selection_score_source),
-        }
-
-    thresholds = dict(policy.get("selection_thresholds", {}))
-    stored_score_source = str(
-        thresholds.get("score_source", policy.get("selection_score_source", config.selection_score_source))
-    )
-    if not _selection_thresholds_match_config(policy, config):
-        return {
-            "threshold": None,
-            "status": "missing",
-            "origin": "none",
-            "stored_threshold_compatibility": "config_mismatch",
-            "score_source": stored_score_source,
-        }
-
-    origin = str(thresholds.get("origin", "stored_policy"))
-    threshold = thresholds.get("global")
-    if threshold is not None:
-        return {
-            "threshold": float(threshold),
-            "status": "ready",
-            "origin": origin,
-            "stored_threshold_compatibility": "compatible",
-            "score_source": stored_score_source,
-        }
-
-    global_meta = dict(thresholds.get("meta", {}).get("global", {}))
-    has_calibration_attempt = bool(global_meta.get("records", 0)) or (
-        global_meta.get("tau_at_best_lcb") is not None
-    )
-    return {
-        "threshold": None,
-        "status": "infeasible" if has_calibration_attempt else "missing",
-        "origin": origin,
-        "stored_threshold_compatibility": "compatible",
-        "score_source": stored_score_source,
-    }
+def implied_direction_probabilities(
+    mean: torch.Tensor,
+    sigma: torch.Tensor,
+    band: torch.Tensor,
+) -> torch.Tensor:
+    clamped_sigma = sigma.clamp_min(1e-6)
+    sqrt_two = torch.sqrt(torch.tensor(2.0, dtype=mean.dtype, device=mean.device))
+    z_up = (band - mean) / clamped_sigma
+    z_down = (-band - mean) / clamped_sigma
+    p_up = 1.0 - (0.5 * (1.0 + torch.erf(z_up / sqrt_two)))
+    p_down = 0.5 * (1.0 + torch.erf(z_down / sqrt_two))
+    p_flat = (1.0 - p_up - p_down).clamp_min(1e-6)
+    probabilities = torch.stack([p_down, p_flat, p_up], dim=-1)
+    return probabilities / probabilities.sum(dim=-1, keepdim=True)
 
 
-def _normalize_selection_threshold(threshold: float, config: TrainingConfig) -> float:
-    if config.selection_score_source in {"selector_probability", "correctness_probability"}:
-        return float(max(0.05, min(0.99, threshold)))
-    return float(threshold)
-
-
-def _sign_agreement(predicted_signs: Sequence[int], current_sign: int) -> float:
-    actionable = [sign for sign in predicted_signs if sign != 0]
-    if current_sign == 0 or not actionable:
-        return 0.0
-    agreeing = sum(1 for sign in actionable if sign == current_sign)
-    return agreeing / len(actionable)
-
-
-def _actionable_sign(probabilities: Sequence[float], predicted_sign: int) -> int:
-    if predicted_sign == 0:
-        return 0
-    p_down = float(probabilities[0])
-    p_up = float(probabilities[2])
-    return -1 if p_down > p_up else 1
-
-
-def _second_largest(values: Sequence[float]) -> float:
-    if len(values) < 2:
-        return 0.0
-    ordered = sorted(values, reverse=True)
-    return ordered[1]
-
-
-def _sign_from_return(value: float) -> int:
-    if value > 0:
+def _sign_from_value(value: float) -> int:
+    if value > 0.0:
         return 1
-    if value < 0:
+    if value < 0.0:
         return -1
     return 0
 
 
-def _argmax(values: Sequence[float]) -> int:
-    best_index = 0
-    best_value = float(values[0])
-    for index, value in enumerate(values[1:], start=1):
-        if float(value) > best_value:
-            best_index = index
-            best_value = float(value)
-    return best_index
+def _shape_entropy(shape_probs: Sequence[float]) -> float:
+    if not shape_probs:
+        return 0.0
+    clipped = [max(float(value), 1e-6) for value in shape_probs]
+    entropy = -sum(value * math.log(value) for value in clipped)
+    return entropy / math.log(max(len(clipped), 2))
+
+
+def _precision_lower_bound(
+    retrieved_true: int,
+    retrieved_total: int,
+    z_value: float,
+) -> float:
+    if retrieved_total <= 0:
+        return 0.0
+    phat = retrieved_true / retrieved_total
+    z_sq = z_value**2
+    denominator = 1.0 + (z_sq / retrieved_total)
+    center = phat + (z_sq / (2.0 * retrieved_total))
+    margin = z_value * math.sqrt(
+        ((phat * (1.0 - phat)) / retrieved_total) + (z_sq / (4.0 * (retrieved_total**2)))
+    )
+    return max(0.0, (center - margin) / denominator)

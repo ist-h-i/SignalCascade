@@ -178,8 +178,16 @@ def _build_examples(
 
         realized_volatility = _realized_volatility(rows_30m, idx_30m, lookback=48)
         baseline_volatility = _realized_volatility(rows_30m, idx_30m, lookback=192)
-        trend_strength = abs(anchor_row.vector[2]) + (0.5 * abs(anchor_row.vector[1]))
+        trend_strength = abs(anchor_row.vector[5]) + (0.5 * abs(anchor_row.vector[1]))
         regime = _build_regime(anchor_row.timestamp, realized_volatility, baseline_volatility, trend_strength)
+        state_features = _build_state_features(
+            rows_30m=rows_30m,
+            index_30m=idx_30m,
+            realized_volatility=realized_volatility,
+            baseline_volatility=baseline_volatility,
+            trend_strength=trend_strength,
+            regime=regime,
+        )
 
         returns_target: list[float] = []
         long_mae_values: list[float] = []
@@ -257,6 +265,7 @@ def _build_examples(
                 main_sequences=main_sequences,
                 overlay_sequences=overlay_sequences,
                 main_shape_targets=main_shape_targets,
+                state_features=state_features,
                 returns_target=tuple(returns_target),
                 long_mae=tuple(long_mae_values),
                 short_mae=tuple(short_mae_values),
@@ -325,14 +334,23 @@ def _build_latest_example(
 
         realized_volatility = _realized_volatility(rows_30m, idx_30m, lookback=48)
         baseline_volatility = _realized_volatility(rows_30m, idx_30m, lookback=192)
-        trend_strength = abs(anchor_row.vector[2]) + (0.5 * abs(anchor_row.vector[1]))
+        trend_strength = abs(anchor_row.vector[5]) + (0.5 * abs(anchor_row.vector[1]))
         regime = _build_regime(anchor_row.timestamp, realized_volatility, baseline_volatility, trend_strength)
+        state_features = _build_state_features(
+            rows_30m=rows_30m,
+            index_30m=idx_30m,
+            realized_volatility=realized_volatility,
+            baseline_volatility=baseline_volatility,
+            trend_strength=trend_strength,
+            regime=regime,
+        )
 
         return TrainingExample(
             anchor_time=anchor_row.timestamp,
             main_sequences=main_sequences,
             overlay_sequences=overlay_sequences,
             main_shape_targets=main_shape_targets,
+            state_features=state_features,
             returns_target=tuple(0.0 for _ in config.horizons),
             long_mae=tuple(0.0 for _ in config.horizons),
             short_mae=tuple(0.0 for _ in config.horizons),
@@ -452,6 +470,28 @@ def _build_regime(
             trend_strength,
         ),
     }
+
+
+def _build_state_features(
+    rows_30m: list[TimeframeFeatureRow],
+    index_30m: int,
+    realized_volatility: float,
+    baseline_volatility: float,
+    trend_strength: float,
+    regime: dict[str, object],
+) -> tuple[float, ...]:
+    anchor_vector = rows_30m[index_30m].vector
+    volatility_ratio = realized_volatility / max(baseline_volatility, 1e-6)
+    clipped_volatility_ratio = max(-2.0, min(2.0, volatility_ratio - 1.0))
+    return (
+        *tuple(float(value) for value in regime["features"]),
+        float(realized_volatility),
+        float(baseline_volatility),
+        float(clipped_volatility_ratio),
+        float(trend_strength),
+        float(anchor_vector[4]),
+        float(anchor_vector[5]),
+    )
 
 
 def _session_name(anchor_time: datetime) -> str:

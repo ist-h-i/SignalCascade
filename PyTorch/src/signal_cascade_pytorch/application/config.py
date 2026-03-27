@@ -24,22 +24,41 @@ def _default_timeframe_parameters() -> dict[str, TimeframeParameters]:
     }
 
 
+def _default_diagnostic_state_reset_modes() -> tuple[str, ...]:
+    return ("reset_each_session_or_window", "carry_on", "reset_each_example")
+
+
+def _default_policy_sweep_cost_multipliers() -> tuple[float, ...]:
+    return (0.5, 1.0, 2.0, 4.0)
+
+
+def _default_policy_sweep_gamma_multipliers() -> tuple[float, ...]:
+    return (0.5, 1.0, 2.0)
+
+
+def _default_policy_sweep_min_policy_sigmas() -> tuple[float, ...]:
+    return (5e-5, 1e-4, 2e-4)
+
+
+def _default_policy_sweep_state_reset_modes() -> tuple[str, ...]:
+    return ("carry_on", "reset_each_session_or_window")
+
+
 @dataclass(frozen=True)
 class TrainingConfig:
     seed: int = 7
     synthetic_bars: int = 10_080
-    epochs: int = 5
+    epochs: int = 8
+    warmup_epochs: int = 2
     oof_epochs: int = 3
-    batch_size: int = 32
-    learning_rate: float = 1e-3
+    batch_size: int = 16
+    learning_rate: float = 8e-4
     weight_decay: float = 1e-4
-    hidden_dim: int = 32
+    hidden_dim: int = 48
+    state_dim: int = 24
+    shape_classes: int = 6
     dropout: float = 0.1
     train_ratio: float = 0.8
-    precision_target: float = 0.8
-    selection_min_support: int = 5
-    precision_confidence_z: float = 1.96
-    selection_alpha: float = 0.7
     base_cost: float = 6e-4
     delta_multiplier: float = 1.35
     mae_multiplier: float = 0.95
@@ -48,17 +67,38 @@ class TrainingConfig:
     clean_weight_return_scale: float = 0.75
     clean_weight_bonus: float = 0.65
     clean_weight_ratio_scale: float = 0.35
-    selector_brier_weight: float = 0.2
-    direction_loss_weight: float = 0.35
-    shape_loss_weight: float = 0.25
-    overlay_loss_weight: float = 0.10
-    consistency_loss_weight: float = 0.20
+    return_loss_weight: float = 0.15
+    shape_loss_weight: float = 0.05
+    profit_loss_weight: float = 1.0
+    cvar_weight: float = 0.20
+    cvar_alpha: float = 0.10
+    risk_aversion_gamma: float = 3.0
+    q_max: float = 1.0
+    policy_abs_epsilon: float = 1e-4
+    policy_smoothing_beta: float = 15.0
+    min_policy_sigma: float = 1e-4
+    branch_dilations: tuple[int, ...] = (1, 2, 4)
     walk_forward_folds: int = 3
     position_scale: float = 1.0
-    standardized_return_clip: float = 6.0
-    return_scale_epsilon: float = 1e-4
     allow_no_candidate: bool = False
-    selection_score_source: str = "selector_probability"
+    selection_score_source: str = "profit_utility"
+    training_state_reset_mode: str = "reset_each_session_or_window"
+    evaluation_state_reset_mode: str = "reset_each_session_or_window"
+    diagnostic_state_reset_modes: tuple[str, ...] = field(
+        default_factory=_default_diagnostic_state_reset_modes
+    )
+    policy_sweep_cost_multipliers: tuple[float, ...] = field(
+        default_factory=_default_policy_sweep_cost_multipliers
+    )
+    policy_sweep_gamma_multipliers: tuple[float, ...] = field(
+        default_factory=_default_policy_sweep_gamma_multipliers
+    )
+    policy_sweep_min_policy_sigmas: tuple[float, ...] = field(
+        default_factory=_default_policy_sweep_min_policy_sigmas
+    )
+    policy_sweep_state_reset_modes: tuple[str, ...] = field(
+        default_factory=_default_policy_sweep_state_reset_modes
+    )
     output_dir: str = "artifacts/demo"
     horizons: tuple[int, ...] = HORIZONS
     main_windows: dict[str, int] = field(default_factory=_default_main_windows)
@@ -83,17 +123,16 @@ class TrainingConfig:
             "seed": self.seed,
             "synthetic_bars": self.synthetic_bars,
             "epochs": self.epochs,
+            "warmup_epochs": self.warmup_epochs,
             "oof_epochs": self.oof_epochs,
             "batch_size": self.batch_size,
             "learning_rate": self.learning_rate,
             "weight_decay": self.weight_decay,
             "hidden_dim": self.hidden_dim,
+            "state_dim": self.state_dim,
+            "shape_classes": self.shape_classes,
             "dropout": self.dropout,
             "train_ratio": self.train_ratio,
-            "precision_target": self.precision_target,
-            "selection_min_support": self.selection_min_support,
-            "precision_confidence_z": self.precision_confidence_z,
-            "selection_alpha": self.selection_alpha,
             "base_cost": self.base_cost,
             "delta_multiplier": self.delta_multiplier,
             "mae_multiplier": self.mae_multiplier,
@@ -102,17 +141,28 @@ class TrainingConfig:
             "clean_weight_return_scale": self.clean_weight_return_scale,
             "clean_weight_bonus": self.clean_weight_bonus,
             "clean_weight_ratio_scale": self.clean_weight_ratio_scale,
-            "selector_brier_weight": self.selector_brier_weight,
-            "direction_loss_weight": self.direction_loss_weight,
+            "return_loss_weight": self.return_loss_weight,
             "shape_loss_weight": self.shape_loss_weight,
-            "overlay_loss_weight": self.overlay_loss_weight,
-            "consistency_loss_weight": self.consistency_loss_weight,
+            "profit_loss_weight": self.profit_loss_weight,
+            "cvar_weight": self.cvar_weight,
+            "cvar_alpha": self.cvar_alpha,
+            "risk_aversion_gamma": self.risk_aversion_gamma,
+            "q_max": self.q_max,
+            "policy_abs_epsilon": self.policy_abs_epsilon,
+            "policy_smoothing_beta": self.policy_smoothing_beta,
+            "min_policy_sigma": self.min_policy_sigma,
+            "branch_dilations": list(self.branch_dilations),
             "walk_forward_folds": self.walk_forward_folds,
             "position_scale": self.position_scale,
-            "standardized_return_clip": self.standardized_return_clip,
-            "return_scale_epsilon": self.return_scale_epsilon,
             "allow_no_candidate": self.allow_no_candidate,
             "selection_score_source": self.selection_score_source,
+            "training_state_reset_mode": self.training_state_reset_mode,
+            "evaluation_state_reset_mode": self.evaluation_state_reset_mode,
+            "diagnostic_state_reset_modes": list(self.diagnostic_state_reset_modes),
+            "policy_sweep_cost_multipliers": list(self.policy_sweep_cost_multipliers),
+            "policy_sweep_gamma_multipliers": list(self.policy_sweep_gamma_multipliers),
+            "policy_sweep_min_policy_sigmas": list(self.policy_sweep_min_policy_sigmas),
+            "policy_sweep_state_reset_modes": list(self.policy_sweep_state_reset_modes),
             "output_dir": self.output_dir,
             "horizons": list(self.horizons),
             "main_windows": dict(self.main_windows),
@@ -132,17 +182,16 @@ class TrainingConfig:
             seed=int(payload["seed"]),
             synthetic_bars=int(payload["synthetic_bars"]),
             epochs=int(payload["epochs"]),
+            warmup_epochs=int(payload.get("warmup_epochs", 2)),
             oof_epochs=int(payload.get("oof_epochs", 3)),
             batch_size=int(payload["batch_size"]),
             learning_rate=float(payload["learning_rate"]),
             weight_decay=float(payload["weight_decay"]),
             hidden_dim=int(payload["hidden_dim"]),
+            state_dim=int(payload.get("state_dim", 24)),
+            shape_classes=int(payload.get("shape_classes", 6)),
             dropout=float(payload["dropout"]),
             train_ratio=float(payload["train_ratio"]),
-            precision_target=float(payload.get("precision_target", 0.8)),
-            selection_min_support=int(payload.get("selection_min_support", 5)),
-            precision_confidence_z=float(payload.get("precision_confidence_z", 1.96)),
-            selection_alpha=float(payload.get("selection_alpha", 0.7)),
             base_cost=float(payload.get("base_cost", 6e-4)),
             delta_multiplier=float(payload.get("delta_multiplier", 1.35)),
             mae_multiplier=float(payload.get("mae_multiplier", 0.95)),
@@ -151,18 +200,57 @@ class TrainingConfig:
             clean_weight_return_scale=float(payload.get("clean_weight_return_scale", 0.75)),
             clean_weight_bonus=float(payload.get("clean_weight_bonus", 0.65)),
             clean_weight_ratio_scale=float(payload.get("clean_weight_ratio_scale", 0.35)),
-            selector_brier_weight=float(payload.get("selector_brier_weight", 0.2)),
-            direction_loss_weight=float(payload.get("direction_loss_weight", 0.35)),
-            shape_loss_weight=float(payload.get("shape_loss_weight", 0.25)),
-            overlay_loss_weight=float(payload.get("overlay_loss_weight", 0.10)),
-            consistency_loss_weight=float(payload.get("consistency_loss_weight", 0.20)),
+            return_loss_weight=float(payload.get("return_loss_weight", 0.15)),
+            shape_loss_weight=float(payload.get("shape_loss_weight", 0.05)),
+            profit_loss_weight=float(payload.get("profit_loss_weight", 1.0)),
+            cvar_weight=float(payload.get("cvar_weight", 0.20)),
+            cvar_alpha=float(payload.get("cvar_alpha", 0.10)),
+            risk_aversion_gamma=float(payload.get("risk_aversion_gamma", 3.0)),
+            q_max=float(payload.get("q_max", 1.0)),
+            policy_abs_epsilon=float(payload.get("policy_abs_epsilon", 1e-4)),
+            policy_smoothing_beta=float(payload.get("policy_smoothing_beta", 15.0)),
+            min_policy_sigma=float(payload.get("min_policy_sigma", 1e-4)),
+            branch_dilations=tuple(int(value) for value in payload.get("branch_dilations", [1, 2, 4])),
             walk_forward_folds=int(payload.get("walk_forward_folds", 3)),
             position_scale=float(payload.get("position_scale", 1.0)),
-            standardized_return_clip=float(payload.get("standardized_return_clip", 6.0)),
-            return_scale_epsilon=float(payload.get("return_scale_epsilon", 1e-4)),
             allow_no_candidate=bool(payload.get("allow_no_candidate", False)),
-            selection_score_source=str(
-                payload.get("selection_score_source", "selector_probability")
+            selection_score_source=str(payload.get("selection_score_source", "profit_utility")),
+            training_state_reset_mode=str(payload.get("training_state_reset_mode", "carry_on")),
+            evaluation_state_reset_mode=str(payload.get("evaluation_state_reset_mode", "carry_on")),
+            diagnostic_state_reset_modes=tuple(
+                str(value)
+                for value in payload.get(
+                    "diagnostic_state_reset_modes",
+                    list(_default_diagnostic_state_reset_modes()),
+                )
+            ),
+            policy_sweep_cost_multipliers=tuple(
+                float(value)
+                for value in payload.get(
+                    "policy_sweep_cost_multipliers",
+                    list(_default_policy_sweep_cost_multipliers()),
+                )
+            ),
+            policy_sweep_gamma_multipliers=tuple(
+                float(value)
+                for value in payload.get(
+                    "policy_sweep_gamma_multipliers",
+                    list(_default_policy_sweep_gamma_multipliers()),
+                )
+            ),
+            policy_sweep_min_policy_sigmas=tuple(
+                float(value)
+                for value in payload.get(
+                    "policy_sweep_min_policy_sigmas",
+                    list(_default_policy_sweep_min_policy_sigmas()),
+                )
+            ),
+            policy_sweep_state_reset_modes=tuple(
+                str(value)
+                for value in payload.get(
+                    "policy_sweep_state_reset_modes",
+                    list(_default_policy_sweep_state_reset_modes()),
+                )
             ),
             output_dir=str(payload["output_dir"]),
             horizons=tuple(int(value) for value in payload["horizons"]),

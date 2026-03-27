@@ -4,6 +4,7 @@ import torch
 from torch.nn import functional as functional
 
 from ...application.config import TrainingConfig
+from ...application.policy_service import smooth_policy_distribution
 from ...domain.timeframes import MAIN_TIMEFRAMES
 
 
@@ -11,36 +12,89 @@ def total_loss(
     outputs: dict[str, object],
     batch: dict[str, object],
     config: TrainingConfig,
-) -> tuple[torch.Tensor, dict[str, float]]:
-    return_loss = heteroscedastic_huber_loss(outputs["mu"], outputs["sigma"], batch["returns"])
-    direction_loss = directional_focal_loss(
-        outputs["direction_logits"],
-        batch["direction_target"],
-        batch["direction_weight"],
-    )
-    shape_loss = main_shape_loss(outputs["shape_predictions"], batch["shape_targets"])
-    overlay_loss = overlay_binary_loss(outputs["overlay_logits"], batch["overlay_target"])
-    consistency_loss = direction_consistency_loss(
+    previous_position: torch.Tensor,
+    warmup_phase: bool = False,
+) -> tuple[torch.Tensor, dict[str, float], dict[str, torch.Tensor]]:
+    return_loss = heteroscedastic_huber_loss(
         outputs["mu"],
         outputs["sigma"],
-        outputs["direction_logits"],
-        batch["direction_band"],
+        batch["returns"],
     )
+    shape_loss = main_shape_loss(outputs["shape_predictions"], batch["shape_targets"])
+    profit_loss, policy_metrics = profit_objective_loss(
+        outputs=outputs,
+        batch=batch,
+        config=config,
+        previous_position=previous_position,
+    )
+    profit_weight = config.profit_loss_weight * (0.35 if warmup_phase else 1.0)
     total = (
-        return_loss
-        + (config.direction_loss_weight * direction_loss)
+        (config.return_loss_weight * return_loss)
         + (config.shape_loss_weight * shape_loss)
-        + (config.overlay_loss_weight * overlay_loss)
-        + (config.consistency_loss_weight * consistency_loss)
+        + (profit_weight * profit_loss)
     )
-    return total, {
+    metrics = {
         "total": float(total.item()),
+        "profit_loss": float(profit_loss.item()),
         "return_loss": float(return_loss.item()),
-        "direction_loss": float(direction_loss.item()),
         "shape_loss": float(shape_loss.item()),
-        "overlay_loss": float(overlay_loss.item()),
-        "consistency_loss": float(consistency_loss.item()),
+        "average_log_wealth": float(policy_metrics["average_log_wealth"].item()),
+        "mean_pnl": float(policy_metrics["mean_pnl"].item()),
+        "cvar_tail_loss": float(policy_metrics["cvar_tail_loss"].item()),
+        "mean_position": float(policy_metrics["mean_position"].item()),
+        "log_wealth_clamp_hit_rate": float(policy_metrics["log_wealth_clamp_hit_rate"].item()),
+        "shape_entropy": float(outputs["shape_entropy"].mean().item()),
     }
+    return total, metrics, policy_metrics
+
+
+def profit_objective_loss(
+    outputs: dict[str, object],
+    batch: dict[str, object],
+    config: TrainingConfig,
+    previous_position: torch.Tensor,
+) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    policy = smooth_policy_distribution(
+        mean=outputs["mu"],
+        sigma=outputs["sigma"],
+        costs=batch["horizon_costs"],
+        tradeability_gate=outputs["tradeability_gate"],
+        previous_position=previous_position,
+        config=config,
+    )
+    pnl_by_horizon = (
+        policy["horizon_positions"] * batch["returns"]
+    ) - (batch["horizon_costs"] * policy["turnover"])
+    combined_pnl = torch.sum(policy["horizon_weights"] * pnl_by_horizon, dim=-1)
+    clamp_hits = (combined_pnl <= -0.95).float()
+    clamped_pnl = torch.clamp(combined_pnl, min=-0.95)
+    log_wealth = torch.log1p(clamped_pnl)
+    cvar_tail = cvar_tail_loss(-combined_pnl, config.cvar_alpha)
+    profit_loss = -log_wealth.mean() + (config.cvar_weight * cvar_tail)
+    return profit_loss, {
+        "combined_pnl": combined_pnl,
+        "average_log_wealth": log_wealth.mean(),
+        "mean_pnl": combined_pnl.mean(),
+        "cvar_tail_loss": cvar_tail,
+        "combined_position": policy["combined_position"],
+        "mean_position": policy["combined_position"].mean(),
+        "combined_utility": policy["combined_utility"],
+        "selected_position": policy["selected_position"],
+        "selected_horizon_index": policy["selected_horizon_index"],
+        "log_wealth_clamp_hit_rate": clamp_hits.mean(),
+        "horizon_positions": policy["horizon_positions"],
+        "horizon_weights": policy["horizon_weights"],
+    }
+
+
+def cvar_tail_loss(losses: torch.Tensor, alpha: float) -> torch.Tensor:
+    flattened = losses.reshape(-1)
+    if flattened.numel() == 0:
+        return torch.tensor(0.0, dtype=losses.dtype, device=losses.device)
+    tail_fraction = max(min(alpha, 1.0), 1e-3)
+    tail_count = max(int(torch.ceil(torch.tensor(flattened.numel() * tail_fraction)).item()), 1)
+    tail_values, _ = torch.topk(flattened, k=tail_count)
+    return tail_values.mean()
 
 
 def heteroscedastic_huber_loss(
@@ -58,21 +112,6 @@ def heteroscedastic_huber_loss(
     return ((huber / variance) + torch.log(sigma)).mean()
 
 
-def directional_focal_loss(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-    weights: torch.Tensor,
-    gamma: float = 1.5,
-) -> torch.Tensor:
-    probabilities = functional.softmax(logits, dim=-1)
-    selected_probabilities = probabilities.gather(-1, targets.unsqueeze(-1)).squeeze(-1).clamp_min(1e-6)
-    alpha = torch.tensor([1.2, 0.7, 1.2], dtype=logits.dtype, device=logits.device)
-    alpha_weight = alpha.gather(0, targets.reshape(-1)).reshape_as(targets)
-    focal_factor = torch.pow(1.0 - selected_probabilities, gamma)
-    per_target_loss = -torch.log(selected_probabilities) * alpha_weight * focal_factor * weights
-    return per_target_loss.mean()
-
-
 def main_shape_loss(
     shape_predictions: dict[str, torch.Tensor],
     shape_targets: dict[str, torch.Tensor],
@@ -82,40 +121,3 @@ def main_shape_loss(
         for timeframe in MAIN_TIMEFRAMES
     ]
     return torch.stack(losses).mean()
-
-
-def overlay_binary_loss(
-    logits: torch.Tensor,
-    targets: torch.Tensor,
-) -> torch.Tensor:
-    squeezed_logits = logits.squeeze(-1)
-    return functional.binary_cross_entropy_with_logits(squeezed_logits, targets)
-
-
-def direction_consistency_loss(
-    mean: torch.Tensor,
-    sigma: torch.Tensor,
-    direction_logits: torch.Tensor,
-    flat_band: torch.Tensor | float = 0.01,
-) -> torch.Tensor:
-    clamped_sigma = sigma.clamp_min(1e-4)
-    if isinstance(flat_band, torch.Tensor):
-        band = flat_band.to(device=mean.device, dtype=mean.dtype)
-    else:
-        band = torch.full_like(mean, float(flat_band))
-    sqrt_two = torch.sqrt(torch.tensor(2.0, dtype=mean.dtype, device=mean.device))
-
-    z_up = (band - mean) / clamped_sigma
-    z_down = (-band - mean) / clamped_sigma
-    p_up = 1.0 - (0.5 * (1.0 + torch.erf(z_up / sqrt_two)))
-    p_down = 0.5 * (1.0 + torch.erf(z_down / sqrt_two))
-    p_flat = (1.0 - p_up - p_down).clamp_min(1e-6)
-    implied_probabilities = torch.stack([p_down, p_flat, p_up], dim=-1)
-    implied_probabilities = implied_probabilities / implied_probabilities.sum(dim=-1, keepdim=True)
-
-    predicted_log_probabilities = functional.log_softmax(direction_logits, dim=-1)
-    return functional.kl_div(
-        predicted_log_probabilities,
-        implied_probabilities.detach(),
-        reduction="batchmean",
-    )

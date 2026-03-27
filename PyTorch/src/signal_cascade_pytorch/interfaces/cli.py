@@ -7,10 +7,16 @@ from ..bootstrap import export_diagnostics_command, predict_command, train_comma
 
 def build_parser() -> argparse.ArgumentParser:
     selection_score_sources = (
+        "profit_utility",
         "selector_probability",
         "correctness_probability",
         "actionable_edge",
         "edge_correctness_product",
+    )
+    state_reset_modes = (
+        "carry_on",
+        "reset_each_example",
+        "reset_each_session_or_window",
     )
     parser = argparse.ArgumentParser(
         prog="signal-cascade",
@@ -23,19 +29,26 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--csv-lookback-days", type=int, default=None)
     train_parser.add_argument("--output-dir", default="artifacts/demo")
     train_parser.add_argument("--epochs", type=int, default=5)
+    train_parser.add_argument("--warmup-epochs", type=int, default=None)
     train_parser.add_argument("--batch-size", type=int, default=32)
     train_parser.add_argument("--learning-rate", type=float, default=1e-3)
     train_parser.add_argument("--weight-decay", type=float, default=1e-4)
     train_parser.add_argument("--hidden-dim", type=int, default=32)
+    train_parser.add_argument("--state-dim", type=int, default=None)
+    train_parser.add_argument("--shape-classes", type=int, default=None)
     train_parser.add_argument("--dropout", type=float, default=0.1)
     train_parser.add_argument("--horizons", default=None, help="Comma-separated 4h horizons, e.g. 1,3,6")
     train_parser.add_argument("--walk-forward-folds", type=int, default=None)
-    train_parser.add_argument("--precision-target", type=float, default=None)
-    train_parser.add_argument("--selection-min-support", type=int, default=None)
-    train_parser.add_argument("--precision-confidence-z", type=float, default=None)
     train_parser.add_argument("--base-cost", type=float, default=None)
     train_parser.add_argument("--delta-multiplier", type=float, default=None)
     train_parser.add_argument("--mae-multiplier", type=float, default=None)
+    train_parser.add_argument("--training-state-reset-mode", choices=state_reset_modes, default=None)
+    train_parser.add_argument("--evaluation-state-reset-mode", choices=state_reset_modes, default=None)
+    train_parser.add_argument("--diagnostic-state-reset-modes", default=None)
+    train_parser.add_argument("--policy-sweep-cost-multipliers", default=None)
+    train_parser.add_argument("--policy-sweep-gamma-multipliers", default=None)
+    train_parser.add_argument("--policy-sweep-min-policy-sigmas", default=None)
+    train_parser.add_argument("--policy-sweep-state-reset-modes", default=None)
     train_parser.add_argument(
         "--allow-no-candidate",
         action=argparse.BooleanOptionalAction,
@@ -46,12 +59,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--selection-score-source",
         choices=selection_score_sources,
         default=None,
-        help="Score source used for threshold calibration and acceptance.",
+        help="Legacy compatibility option. New policy path always uses profit utility.",
     )
+    train_parser.add_argument("--return-loss-weight", type=float, default=None)
     train_parser.add_argument("--shape-loss-weight", type=float, default=None)
-    train_parser.add_argument("--overlay-loss-weight", type=float, default=None)
-    train_parser.add_argument("--direction-loss-weight", type=float, default=None)
-    train_parser.add_argument("--consistency-loss-weight", type=float, default=None)
+    train_parser.add_argument("--profit-loss-weight", type=float, default=None)
+    train_parser.add_argument("--cvar-weight", type=float, default=None)
+    train_parser.add_argument("--cvar-alpha", type=float, default=None)
+    train_parser.add_argument("--risk-aversion-gamma", type=float, default=None)
+    train_parser.add_argument("--q-max", type=float, default=None)
+    train_parser.add_argument("--previous-position", type=float, default=0.0)
     train_parser.add_argument("--synthetic-bars", type=int, default=10_080)
     train_parser.add_argument("--seed", type=int, default=7)
     train_parser.set_defaults(handler=train_command)
@@ -63,6 +80,7 @@ def build_parser() -> argparse.ArgumentParser:
     predict_parser.add_argument("--output-dir", default="artifacts/demo")
     predict_parser.add_argument("--csv", default=None, help="Override the data source with a CSV file.")
     predict_parser.add_argument("--csv-lookback-days", type=int, default=None)
+    predict_parser.add_argument("--previous-position", type=float, default=0.0)
     predict_parser.add_argument(
         "--allow-no-candidate",
         action=argparse.BooleanOptionalAction,
@@ -89,14 +107,19 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument("--csv", default=None, help="Override the data source with a CSV file.")
     export_parser.add_argument("--csv-lookback-days", type=int, default=None)
+    export_parser.add_argument("--evaluation-state-reset-mode", choices=state_reset_modes, default=None)
+    export_parser.add_argument("--diagnostic-state-reset-modes", default=None)
+    export_parser.add_argument("--policy-sweep-cost-multipliers", default=None)
+    export_parser.add_argument("--policy-sweep-gamma-multipliers", default=None)
+    export_parser.add_argument("--policy-sweep-min-policy-sigmas", default=None)
+    export_parser.add_argument("--policy-sweep-state-reset-modes", default=None)
     export_parser.add_argument(
         "--selection-threshold-mode",
         "--acceptance-threshold-mode",
         choices=("auto", "stored", "replay", "none"),
         default="auto",
         help=(
-            "How export-diagnostics resolves acceptance thresholds. "
-            "Defaults to auto replay on config mismatch."
+            "Legacy compatibility option. New policy diagnostics ignore threshold replay."
         ),
     )
     export_parser.add_argument(
@@ -125,15 +148,21 @@ def build_parser() -> argparse.ArgumentParser:
     tune_parser.add_argument("--learning-rate", type=float, default=None)
     tune_parser.add_argument("--weight-decay", type=float, default=None)
     tune_parser.add_argument("--hidden-dim", type=int, default=None)
+    tune_parser.add_argument("--state-dim", type=int, default=None)
+    tune_parser.add_argument("--shape-classes", type=int, default=None)
     tune_parser.add_argument("--dropout", type=float, default=None)
     tune_parser.add_argument("--horizons", default=None, help="Comma-separated 4h horizons, e.g. 1,3,6")
     tune_parser.add_argument("--walk-forward-folds", type=int, default=None)
-    tune_parser.add_argument("--precision-target", type=float, default=None)
-    tune_parser.add_argument("--selection-min-support", type=int, default=None)
-    tune_parser.add_argument("--precision-confidence-z", type=float, default=None)
     tune_parser.add_argument("--base-cost", type=float, default=None)
     tune_parser.add_argument("--delta-multiplier", type=float, default=None)
     tune_parser.add_argument("--mae-multiplier", type=float, default=None)
+    tune_parser.add_argument("--training-state-reset-mode", choices=state_reset_modes, default=None)
+    tune_parser.add_argument("--evaluation-state-reset-mode", choices=state_reset_modes, default=None)
+    tune_parser.add_argument("--diagnostic-state-reset-modes", default=None)
+    tune_parser.add_argument("--policy-sweep-cost-multipliers", default=None)
+    tune_parser.add_argument("--policy-sweep-gamma-multipliers", default=None)
+    tune_parser.add_argument("--policy-sweep-min-policy-sigmas", default=None)
+    tune_parser.add_argument("--policy-sweep-state-reset-modes", default=None)
     tune_parser.add_argument(
         "--allow-no-candidate",
         action=argparse.BooleanOptionalAction,
@@ -144,12 +173,16 @@ def build_parser() -> argparse.ArgumentParser:
         "--selection-score-source",
         choices=selection_score_sources,
         default=None,
-        help="Score source used for threshold calibration during tuning.",
+        help="Legacy compatibility option. New policy path always uses profit utility.",
     )
+    tune_parser.add_argument("--warmup-epochs", type=int, default=None)
+    tune_parser.add_argument("--return-loss-weight", type=float, default=None)
     tune_parser.add_argument("--shape-loss-weight", type=float, default=None)
-    tune_parser.add_argument("--overlay-loss-weight", type=float, default=None)
-    tune_parser.add_argument("--direction-loss-weight", type=float, default=None)
-    tune_parser.add_argument("--consistency-loss-weight", type=float, default=None)
+    tune_parser.add_argument("--profit-loss-weight", type=float, default=None)
+    tune_parser.add_argument("--cvar-weight", type=float, default=None)
+    tune_parser.add_argument("--cvar-alpha", type=float, default=None)
+    tune_parser.add_argument("--risk-aversion-gamma", type=float, default=None)
+    tune_parser.add_argument("--q-max", type=float, default=None)
     tune_parser.add_argument("--seed", type=int, default=7)
     tune_parser.set_defaults(handler=tune_latest_command)
 

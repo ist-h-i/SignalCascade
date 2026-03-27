@@ -1,7 +1,6 @@
 from __future__ import annotations
 
 import csv
-from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
@@ -9,14 +8,18 @@ from typing import Sequence
 import torch
 
 from .config import TrainingConfig
-from .dataset_service import _main_mae_threshold, _main_move_threshold
-from .policy_service import apply_selection_policy, build_prediction_snapshots
-from .training_service import examples_to_batch, restore_return_units, split_examples
+from .policy_service import apply_selection_policy, policy_utility, smooth_policy_distribution
+from .training_service import (
+    _should_reset_recurrent_context,
+    evaluate_model,
+    examples_to_batch,
+    split_examples,
+)
 from ..domain.entities import OHLCVBar, TrainingExample
 from ..infrastructure.ml.model import SignalCascadeModel
 from ..infrastructure.persistence import save_json
 
-DIAGNOSTICS_SCHEMA_VERSION = 2
+DIAGNOSTICS_SCHEMA_VERSION = 4
 
 
 def export_review_diagnostics(
@@ -24,7 +27,7 @@ def export_review_diagnostics(
     model: SignalCascadeModel,
     examples: Sequence[TrainingExample],
     config: TrainingConfig,
-    selection_policy: dict[str, object] | None,
+    selection_policy: dict[str, object] | None = None,
     threshold_resolution: dict[str, object] | None = None,
     source_payload: dict[str, object] | None = None,
     source_rows_original: int | None = None,
@@ -36,82 +39,60 @@ def export_review_diagnostics(
         model=model,
         validation_examples=validation_examples,
         config=config,
-        selection_policy=selection_policy,
+    )
+    stateful_evaluation = (
+        {
+            mode: evaluate_model(
+                model=model,
+                examples=validation_examples,
+                config=config,
+                state_reset_mode=mode,
+            )
+            for mode in config.diagnostic_state_reset_modes
+        }
+        if model is not None
+        else {}
+    )
+    policy_calibration_sweep = (
+        _build_policy_calibration_sweep(
+            model=model,
+            validation_examples=validation_examples,
+            config=config,
+        )
+        if model is not None
+        else []
     )
 
     validation_rows_path = output_dir / "validation_rows.csv"
-    threshold_scan_path = output_dir / "threshold_scan.csv"
+    policy_summary_path = output_dir / "policy_summary.csv"
     horizon_diag_path = output_dir / "horizon_diag.csv"
     summary_path = output_dir / "validation_summary.json"
 
     _write_csv(validation_rows_path, diagnostics["validation_rows"])
-    _write_csv(threshold_scan_path, diagnostics["threshold_scan"])
+    _write_csv(policy_summary_path, diagnostics["policy_summary"])
     _write_csv(horizon_diag_path, diagnostics["horizon_diag"])
 
     summary = {
+        "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
         "diagnostics_schema_version": DIAGNOSTICS_SCHEMA_VERSION,
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
-        "dataset": _build_dataset_summary(
-            examples=examples,
-            validation_examples=validation_examples,
-            source_payload=source_payload,
-            source_rows_original=source_rows_original,
-            source_rows_used=source_rows_used,
-            base_bars=base_bars,
-        ),
-        "labels": {
-            "all_examples": _build_label_summary(examples, config),
-            "validation_examples": _build_label_summary(validation_examples, config),
+        "policy_mode": "shape_aware_profit_maximization",
+        "primary_state_reset_mode": config.evaluation_state_reset_mode,
+        "dataset": {
+            "sample_count": len(examples),
+            "validation_sample_count": len(validation_examples),
+            "source": source_payload,
+            "source_rows_original": source_rows_original,
+            "source_rows_used": source_rows_used,
+            "base_bar_count": None if base_bars is None else len(base_bars),
         },
-        "validation": {
-            "anchor_sample_count": len(validation_examples),
-            "proposed_row_count": diagnostics["proposed_row_count"],
-            "accepted_row_count": diagnostics["accepted_row_count"],
-            "no_candidate_count": diagnostics["no_candidate_count"],
-            "no_strict_candidate_count": diagnostics["no_strict_candidate_count"],
-            "candidate_but_no_strict_count": diagnostics["candidate_but_no_strict_count"],
-            "any_candidate_rate": diagnostics["any_candidate_rate"],
-            "any_strict_candidate_rate": diagnostics["any_strict_candidate_rate"],
-            "candidate_count_per_anchor": diagnostics["candidate_count_per_anchor"],
-            "strict_candidate_count_per_anchor": diagnostics["strict_candidate_count_per_anchor"],
-            "accept_reject_reason_counts": diagnostics["accept_reject_reason_counts"],
-            "reject_flag_counts": diagnostics["reject_flag_counts"],
-            "threshold_status": (
-                "disabled"
-                if threshold_resolution is not None
-                and threshold_resolution.get("selection_threshold_mode_requested") == "none"
-                else diagnostics["threshold_status"]
-            ),
-            "threshold_origin": diagnostics["threshold_origin"],
-            "stored_threshold_compatibility": (
-                diagnostics["stored_threshold_compatibility"]
-                if threshold_resolution is None
-                else threshold_resolution.get(
-                    "stored_threshold_compatibility",
-                    diagnostics["stored_threshold_compatibility"],
-                )
-            ),
-            "threshold_score_source": diagnostics["threshold_score_source"],
-            "selection_threshold_mode_requested": (
-                None
-                if threshold_resolution is None
-                else threshold_resolution.get("selection_threshold_mode_requested")
-            ),
-            "selection_threshold_mode_resolved": (
-                None
-                if threshold_resolution is None
-                else threshold_resolution.get("selection_threshold_mode_resolved")
-            ),
-            "threshold_calibration_anchor_count": len(validation_examples),
-            "threshold_calibration_proposed_count": diagnostics["proposed_row_count"],
-            "proposed_horizon_summary": diagnostics["proposed_horizon_summary"],
-            "threshold_scan_source": diagnostics["threshold_scan_source"],
-            "acceptance_score_source": str(config.selection_score_source),
-            "allow_no_candidate": bool(config.allow_no_candidate),
-        },
+        "validation": diagnostics["summary"],
+        "stateful_evaluation": stateful_evaluation,
+        "policy_calibration_sweep": policy_calibration_sweep,
+        "policy_calibration_summary": _summarize_policy_calibration_sweep(policy_calibration_sweep),
         "paths": {
             "validation_rows_csv": str(validation_rows_path),
-            "threshold_scan_csv": str(threshold_scan_path),
+            "policy_summary_csv": str(policy_summary_path),
             "horizon_diag_csv": str(horizon_diag_path),
         },
     }
@@ -123,204 +104,176 @@ def build_validation_diagnostics(
     model: SignalCascadeModel,
     validation_examples: Sequence[TrainingExample],
     config: TrainingConfig,
-    selection_policy: dict[str, object] | None,
 ) -> dict[str, object]:
     model.eval()
+    state_reset_mode = config.evaluation_state_reset_mode
+    summary = evaluate_model(
+        model=model,
+        examples=validation_examples,
+        config=config,
+        state_reset_mode=state_reset_mode,
+    )
     validation_rows: list[dict[str, object]] = []
-    accept_reject_reason_counts = defaultdict(int)
-    reject_flag_counts = defaultdict(int)
-    proposed_row_count = 0
-    accepted_row_count = 0
-    no_candidate_count = 0
-    no_strict_candidate_count = 0
-    candidate_but_no_strict_count = 0
-    any_candidate_count = 0
-    any_strict_candidate_count = 0
-    total_candidate_count = 0
-    total_strict_candidate_count = 0
-    proposed_horizon_summary = {
+    policy_summary: list[dict[str, object]] = []
+    previous_state = None
+    previous_position = 0.0
+    previous_example: TrainingExample | None = None
+    horizon_stats = {
         str(horizon): {
-            "proposed_count": 0,
-            "accepted_count": 0,
-            "proposed_clean_count": 0,
-            "accepted_clean_count": 0,
+            "count": 0,
+            "selected": 0,
+            "utility_sum": 0.0,
+            "position_sum": 0.0,
+            "abs_error_sum": 0.0,
         }
         for horizon in config.horizons
     }
     sample_id = 0
-    threshold_status = "missing"
-    threshold_origin = "none"
-    stored_threshold_compatibility = "not_applicable"
-    threshold_score_source = str(config.selection_score_source)
 
     with torch.no_grad():
-        for chunk in _chunk_examples(validation_examples, config.batch_size):
-            batch = examples_to_batch(chunk, config)
-            outputs = model(batch["main"], batch["overlay"])
-            mu_std = outputs["mu"]
-            sigma_std = outputs["sigma"]
-            mu_raw, sigma_raw = restore_return_units(
-                mu_std,
-                sigma_std,
-                batch["return_scale"],
+        for example in validation_examples:
+            if _should_reset_recurrent_context(
+                state_reset_mode=state_reset_mode,
+                current_example=example,
+                previous_example=previous_example,
+            ):
+                previous_state = None
+                previous_position = 0.0
+            batch = examples_to_batch([example], config)
+            outputs = model(
+                batch["main"],
+                batch["overlay"],
+                batch["state_features"],
+                previous_state=previous_state,
             )
-            direction_probabilities = torch.softmax(outputs["direction_logits"], dim=-1)
-            overlay_probabilities = torch.sigmoid(outputs["overlay_logits"].squeeze(-1))
+            mean = outputs["mu"][0]
+            sigma = outputs["sigma"][0]
+            gate = float(outputs["tradeability_gate"][0].item())
+            entropy = float(outputs["shape_entropy"][0].item())
+            smooth_policy = smooth_policy_distribution(
+                mean=outputs["mu"],
+                sigma=outputs["sigma"],
+                costs=batch["horizon_costs"],
+                tradeability_gate=outputs["tradeability_gate"],
+                previous_position=torch.tensor([previous_position], dtype=mean.dtype),
+                config=config,
+            )
+            decision = apply_selection_policy(
+                example=example,
+                mean=mean.tolist(),
+                sigma=sigma.tolist(),
+                config=config,
+                previous_position=previous_position,
+                tradeability_gate=gate,
+                shape_probs=outputs["shape_probs"][0].tolist(),
+            )
+            selected_row = dict(decision["selected_row"])
+            selected_horizon = int(selected_row["horizon"])
+            selected_index = config.horizons.index(selected_horizon)
+            realized_return = float(example.returns_target[selected_index])
+            trade_cost = float(selected_row["cost"]) * abs(float(decision["trade_delta"]))
+            pnl = (float(decision["position"]) * realized_return) - trade_cost
+            smooth_selected_index = int(smooth_policy["selected_horizon_index"][0].item())
+            smooth_selected_horizon = int(config.horizons[smooth_selected_index])
+            smooth_selected_position = float(smooth_policy["selected_position"][0].item())
+            smooth_selected_no_trade = bool(smooth_policy["selected_no_trade"][0].item())
+            smooth_reference_row = dict(decision["horizon_rows"][smooth_selected_index])
+            smooth_reference_utility = policy_utility(
+                position=smooth_selected_position,
+                previous_position=previous_position,
+                gated_mean=float(smooth_reference_row["gated_mean"]),
+                sigma=float(smooth_reference_row["sigma"]),
+                cost=float(smooth_reference_row["cost"]),
+                config=config,
+            )
 
-            for example_index, example in enumerate(chunk):
-                decision = apply_selection_policy(
-                    example=example,
-                    mean=mu_raw[example_index].tolist(),
-                    sigma=sigma_raw[example_index].tolist(),
-                    direction_probabilities=direction_probabilities[example_index].tolist(),
-                    overlay_probability=float(overlay_probabilities[example_index].item()),
-                    policy=selection_policy,
-                    config=config,
+            for row in decision["horizon_rows"]:
+                horizon_key = str(row["horizon"])
+                horizon_index = config.horizons.index(int(row["horizon"]))
+                actual_return = float(example.returns_target[horizon_index])
+                horizon_stats[horizon_key]["count"] += 1
+                horizon_stats[horizon_key]["selected"] += int(int(row["horizon"]) == selected_horizon)
+                horizon_stats[horizon_key]["utility_sum"] += float(row["policy_utility"])
+                horizon_stats[horizon_key]["position_sum"] += float(row["position"])
+                horizon_stats[horizon_key]["abs_error_sum"] += abs(actual_return - float(row["mean"]))
+                validation_rows.append(
+                    {
+                        "sample_id": sample_id,
+                        "timestamp": example.anchor_time.isoformat(),
+                        "regime_id": example.regime_id,
+                        "horizon": int(row["horizon"]),
+                        "y_raw": actual_return,
+                        "mu_raw": float(row["mean"]),
+                        "sigma_raw": float(row["sigma"]),
+                        "gated_mean": float(row["gated_mean"]),
+                        "cost": float(row["cost"]),
+                        "policy_utility": float(row["policy_utility"]),
+                        "position_if_chosen": float(row["position"]),
+                        "tradeability_gate": gate,
+                        "shape_entropy": entropy,
+                        "selected_horizon": selected_horizon,
+                        "executed_horizon": decision["executed_horizon"],
+                        "smooth_policy_horizon": smooth_selected_horizon,
+                        "smooth_position": smooth_selected_position,
+                        "smooth_no_trade_band": int(smooth_selected_no_trade),
+                        "selected": int(int(row["horizon"]) == selected_horizon),
+                        "no_trade_band": int(bool(row["no_trade_band"])),
+                    }
                 )
-                proposed_horizon_value = decision["proposed_horizon"]
-                proposed_horizon = (
-                    int(proposed_horizon_value) if proposed_horizon_value is not None else None
-                )
-                proposed_row_count += int(proposed_horizon is not None)
-                accepted_row_count += int(bool(decision["accepted_signal"]))
-                no_candidate_count += int(proposed_horizon is None)
-                no_strict_candidate_count += int(not bool(decision["any_strict_candidate"]))
-                candidate_but_no_strict_count += int(
-                    bool(decision["any_candidate"]) and not bool(decision["any_strict_candidate"])
-                )
-                any_candidate_count += int(bool(decision["any_candidate"]))
-                any_strict_candidate_count += int(bool(decision["any_strict_candidate"]))
-                total_candidate_count += int(decision["candidate_count"])
-                total_strict_candidate_count += int(decision["strict_candidate_count"])
-                threshold_status = str(decision["threshold_status"])
-                threshold_origin = str(decision["threshold_origin"])
-                stored_threshold_compatibility = str(
-                    decision["stored_threshold_compatibility"]
-                )
-                threshold_score_source = str(decision["threshold_score_source"])
-                if proposed_horizon is not None:
-                    proposed_summary = proposed_horizon_summary[str(proposed_horizon)]
-                    proposed_summary["proposed_count"] += 1
-                    proposed_summary["proposed_clean_count"] += int(decision["meta_label"])
-                    proposed_summary["accepted_count"] += int(decision["accepted_signal"])
-                    proposed_summary["accepted_clean_count"] += int(
-                        decision["accepted_signal"] and decision["meta_label"]
-                    )
 
-                accept_reject_reason_counts[str(decision["accept_reject_reason"])] += 1
-                for flag_name, enabled in dict(decision["reject_flags"]).items():
-                    reject_flag_counts[str(flag_name)] += int(bool(enabled))
+            policy_summary.append(
+                {
+                    "sample_id": sample_id,
+                    "timestamp": example.anchor_time.isoformat(),
+                    "regime_id": example.regime_id,
+                    "policy_horizon": decision["policy_horizon"],
+                    "executed_horizon": decision["executed_horizon"],
+                    "previous_position": float(decision["previous_position"]),
+                    "position": float(decision["position"]),
+                    "trade_delta": float(decision["trade_delta"]),
+                    "no_trade_band_hit": int(bool(decision["no_trade_band_hit"])),
+                    "smooth_policy_horizon": smooth_selected_horizon,
+                    "smooth_position": smooth_selected_position,
+                    "smooth_no_trade_band_hit": int(smooth_selected_no_trade),
+                    "exact_smooth_horizon_agreement": int(selected_horizon == smooth_selected_horizon),
+                    "exact_smooth_no_trade_agreement": int(
+                        bool(decision["no_trade_band_hit"]) == smooth_selected_no_trade
+                    ),
+                    "exact_smooth_position_abs_error": abs(
+                        float(decision["position"]) - smooth_selected_position
+                    ),
+                    "exact_smooth_utility_regret": max(
+                        float(selected_row["policy_utility"]) - float(smooth_reference_utility),
+                        0.0,
+                    ),
+                    "policy_score": float(decision["selection_score"]),
+                    "tradeability_gate": gate,
+                    "shape_entropy": entropy,
+                    "realized_return": realized_return,
+                    "realized_pnl": pnl,
+                }
+            )
+            previous_position = float(decision["position"])
+            previous_state = outputs["next_state"].detach()
+            previous_example = example
+            sample_id += 1
 
-                for horizon_index, row in enumerate(decision["horizon_rows"]):
-                    horizon = int(row["horizon"])
-                    row_proposed = proposed_horizon is not None and horizon == proposed_horizon
-                    row_accepted = row_proposed and bool(decision["accepted_signal"])
-                    row_alignment = bool(row["direction_alignment"])
-                    row_meta_label = int(
-                        int(row["predicted_sign"]) != 0
-                        and int(row["predicted_sign"]) == int(row["true_direction"])
-                    )
-                    validation_rows.append(
-                        {
-                            "sample_id": sample_id,
-                            "timestamp": example.anchor_time.isoformat(),
-                            "regime_id": example.regime_id,
-                            "horizon": horizon,
-                            "y_raw": float(example.returns_target[horizon_index]),
-                            "y_std": float(batch["returns"][example_index, horizon_index].item()),
-                            "mu_std": float(mu_std[example_index, horizon_index].item()),
-                            "sigma_std": float(sigma_std[example_index, horizon_index].item()),
-                            "mu_raw": float(mu_raw[example_index, horizon_index].item()),
-                            "sigma_raw": float(sigma_raw[example_index, horizon_index].item()),
-                            "direction_label": int(example.direction_targets[horizon_index]),
-                            "predicted_sign": int(row["predicted_sign"]),
-                            "p_down": float(row["direction_probabilities"][0]),
-                            "p_flat": float(row["direction_probabilities"][1]),
-                            "p_up": float(row["direction_probabilities"][2]),
-                            "edge": float(row["edge"]),
-                            "prob_gap": float(row["prob_gap"]),
-                            "sign_agreement": float(row["sign_agreement"]),
-                            "direction_alignment": int(row_alignment),
-                            "candidate": int(bool(row["candidate"])),
-                            "strict_candidate": int(bool(row["strict_candidate"])),
-                            "chooser_score": float(row["score"]),
-                            "actionable_sign": int(row["actionable_sign"]),
-                            "actionable_edge": float(row["actionable_edge"]),
-                            "correctness_probability": float(row["q"]),
-                            "selector_probability": float(row["selector_probability"]),
-                            "selection_score": float(row["selection_score"]),
-                            "acceptance_score_source": str(config.selection_score_source),
-                            "selection_threshold": (
-                                None
-                                if decision["selection_threshold"] is None
-                                else float(decision["selection_threshold"])
-                            ),
-                            "cost": float(example.horizon_costs[horizon_index]),
-                            "direction_threshold": float(example.direction_thresholds[horizon_index]),
-                            "direction_mae_threshold": float(
-                                example.direction_mae_thresholds[horizon_index]
-                            ),
-                            "long_mae": float(example.long_mae[horizon_index]),
-                            "short_mae": float(example.short_mae[horizon_index]),
-                            "long_mfe": float(example.long_mfe[horizon_index]),
-                            "short_mfe": float(example.short_mfe[horizon_index]),
-                            "direction_weight": float(example.direction_weights[horizon_index]),
-                            "realized_volatility": float(example.realized_volatility),
-                            "return_scale": float(batch["return_scale"][example_index, horizon_index].item()),
-                            "overlay_probability": float(decision["hold_probability"]),
-                            "hold_threshold": float(decision["hold_threshold"]),
-                            "overlay_action": str(decision["overlay_action"]),
-                            "proposed_horizon": decision["proposed_horizon"],
-                            "accepted_horizon": decision["accepted_horizon"],
-                            "proposal_status": (
-                                "proposed" if decision["proposed_horizon"] is not None else "no_candidate"
-                            ),
-                            "acceptance_status": _acceptance_status(decision),
-                            "proposed": int(row_proposed),
-                            "accepted": int(row_accepted),
-                            "meta_label": row_meta_label,
-                            "pre_threshold_eligible": int(
-                                bool(decision["pre_threshold_eligible"]) if row_proposed else False
-                            ),
-                            "accept_reject_reason": (
-                                str(decision["accept_reject_reason"])
-                                if row_proposed or proposed_horizon is None
-                                else "not_selected"
-                            ),
-                        }
-                    )
-                sample_id += 1
-
-    threshold_scan, threshold_scan_source = _resolve_threshold_scan(
-        validation_rows=validation_rows,
-        selection_policy=selection_policy,
-        config=config,
-        anchor_count=len(validation_examples),
-        proposal_count=proposed_row_count,
-    )
+    horizon_diag = [
+        {
+            "horizon": int(horizon),
+            "sample_count": int(stats["count"]),
+            "selection_rate": int(stats["selected"]) / max(int(stats["count"]), 1),
+            "mean_policy_utility": float(stats["utility_sum"]) / max(int(stats["count"]), 1),
+            "mean_position": float(stats["position_sum"]) / max(int(stats["count"]), 1),
+            "mu_calibration": float(stats["abs_error_sum"]) / max(int(stats["count"]), 1),
+        }
+        for horizon, stats in sorted(horizon_stats.items(), key=lambda item: int(item[0]))
+    ]
     return {
         "validation_rows": validation_rows,
-        "threshold_scan": threshold_scan,
-        "threshold_scan_source": threshold_scan_source,
-        "horizon_diag": _build_horizon_diag(validation_rows, config),
-        "proposed_row_count": proposed_row_count,
-        "accepted_row_count": accepted_row_count,
-        "no_candidate_count": no_candidate_count,
-        "no_strict_candidate_count": no_strict_candidate_count,
-        "candidate_but_no_strict_count": candidate_but_no_strict_count,
-        "any_candidate_rate": any_candidate_count / max(len(validation_examples), 1),
-        "any_strict_candidate_rate": any_strict_candidate_count / max(len(validation_examples), 1),
-        "candidate_count_per_anchor": total_candidate_count / max(len(validation_examples), 1),
-        "strict_candidate_count_per_anchor": total_strict_candidate_count / max(
-            len(validation_examples), 1
-        ),
-        "accept_reject_reason_counts": dict(sorted(accept_reject_reason_counts.items())),
-        "reject_flag_counts": dict(sorted(reject_flag_counts.items())),
-        "threshold_status": threshold_status,
-        "threshold_origin": threshold_origin,
-        "stored_threshold_compatibility": stored_threshold_compatibility,
-        "threshold_score_source": threshold_score_source,
-        "proposed_horizon_summary": proposed_horizon_summary,
+        "policy_summary": policy_summary,
+        "horizon_diag": horizon_diag,
+        "summary": summary,
     }
 
 
@@ -329,305 +282,110 @@ def build_validation_snapshots(
     validation_examples: Sequence[TrainingExample],
     config: TrainingConfig,
 ) -> list[dict[str, object]]:
-    model.eval()
-    snapshots: list[dict[str, object]] = []
-    with torch.no_grad():
-        for chunk in _chunk_examples(validation_examples, config.batch_size):
-            batch = examples_to_batch(chunk, config)
-            outputs = model(batch["main"], batch["overlay"])
-            mu_raw, sigma_raw = restore_return_units(
-                outputs["mu"],
-                outputs["sigma"],
-                batch["return_scale"],
-            )
-            direction_probabilities = torch.softmax(outputs["direction_logits"], dim=-1)
-            overlay_probabilities = torch.sigmoid(outputs["overlay_logits"].squeeze(-1))
-            snapshots.extend(
-                build_prediction_snapshots(
-                    chunk,
-                    mu_raw,
-                    sigma_raw,
-                    direction_probabilities,
-                    overlay_probabilities,
-                    config,
-                )
-            )
-    return snapshots
+    diagnostics = build_validation_diagnostics(model, validation_examples, config)
+    return diagnostics["policy_summary"]
 
 
-def _build_dataset_summary(
-    examples: Sequence[TrainingExample],
+def _build_policy_calibration_sweep(
+    model: SignalCascadeModel,
     validation_examples: Sequence[TrainingExample],
-    source_payload: dict[str, object] | None,
-    source_rows_original: int | None,
-    source_rows_used: int | None,
-    base_bars: Sequence[OHLCVBar] | None,
-) -> dict[str, object]:
-    summary: dict[str, object] = {
-        "anchor_samples_total": len(examples),
-        "anchor_samples_validation": len(validation_examples),
-    }
-    if source_payload is not None:
-        summary["source"] = dict(source_payload)
-    if source_rows_original is not None:
-        summary["source_rows_original"] = int(source_rows_original)
-    if source_rows_used is not None:
-        summary["source_rows_used"] = int(source_rows_used)
-    if base_bars:
-        ordered = sorted(base_bars, key=lambda bar: bar.timestamp)
-        start = ordered[0].timestamp
-        end = ordered[-1].timestamp
-        summary.update(
-            {
-                "base_start_utc": start.isoformat(),
-                "base_end_utc": end.isoformat(),
-                "base_span_days": round((end - start).total_seconds() / 86400.0, 2),
-            }
-        )
-    if validation_examples:
-        validation_start = min(example.anchor_time for example in validation_examples)
-        validation_end = max(example.anchor_time for example in validation_examples)
-        summary.update(
-            {
-                "validation_anchor_start_utc": validation_start.isoformat(),
-                "validation_anchor_end_utc": validation_end.isoformat(),
-            }
-        )
-    return summary
-
-
-def _build_label_summary(
-    examples: Sequence[TrainingExample],
-    config: TrainingConfig,
-) -> dict[str, object]:
-    if not examples:
-        return {"count": 0, "by_horizon": {}}
-
-    by_horizon: dict[str, dict[str, object]] = {}
-    for horizon_index, horizon in enumerate(config.horizons):
-        regime_rows = [_regime_dict_from_id(example.regime_id) for example in examples]
-        by_horizon[str(horizon)] = {
-            "count": len(examples),
-            "direction_counts": {
-                "-1": sum(int(example.direction_targets[horizon_index] < 0) for example in examples),
-                "0": sum(int(example.direction_targets[horizon_index] == 0) for example in examples),
-                "+1": sum(int(example.direction_targets[horizon_index] > 0) for example in examples),
-            },
-            "target_return": _describe([example.returns_target[horizon_index] for example in examples]),
-            "long_mae": _describe([example.long_mae[horizon_index] for example in examples]),
-            "short_mae": _describe([example.short_mae[horizon_index] for example in examples]),
-            "long_mfe": _describe([example.long_mfe[horizon_index] for example in examples]),
-            "short_mfe": _describe([example.short_mfe[horizon_index] for example in examples]),
-            "direction_weight": _describe([example.direction_weights[horizon_index] for example in examples]),
-            "c_h": _describe([example.horizon_costs[horizon_index] for example in examples]),
-            "delta_h": _describe([example.direction_thresholds[horizon_index] for example in examples]),
-            "eta_h": _describe(
-                [example.direction_mae_thresholds[horizon_index] for example in examples]
-            ),
-            "sigma_t": _describe([example.realized_volatility for example in examples]),
-            "scale_h": _describe(
-                [
-                    _return_scale(example.realized_volatility, horizon, config)
-                    for example in examples
-                ]
-            ),
-            "delta_h_recomputed": _describe(
-                [
-                    _main_move_threshold(
-                        config,
-                        horizon,
-                        example.realized_volatility,
-                        regime_rows[index],
-                    )
-                    for index, example in enumerate(examples)
-                ]
-            ),
-            "eta_h_recomputed": _describe(
-                [
-                    _main_mae_threshold(
-                        config,
-                        horizon,
-                        example.realized_volatility,
-                        regime_rows[index],
-                    )
-                    for index, example in enumerate(examples)
-                ]
-            ),
-        }
-    return {
-        "count": len(examples),
-        "by_horizon": by_horizon,
-    }
-
-
-def _build_horizon_diag(
-    validation_rows: Sequence[dict[str, object]],
     config: TrainingConfig,
 ) -> list[dict[str, object]]:
-    rows_by_horizon: dict[str, list[dict[str, object]]] = defaultdict(list)
-    for row in validation_rows:
-        rows_by_horizon[str(row["horizon"])].append(dict(row))
-
-    diagnostics: list[dict[str, object]] = []
-    for horizon in config.horizons:
-        rows = rows_by_horizon.get(str(horizon), [])
-        diagnostics.append(
-            {
-                "horizon": horizon,
-                "nonflat_rate": _rate(rows, lambda row: int(row["direction_label"]) != 0),
-                "up_rate": _rate(rows, lambda row: int(row["direction_label"]) > 0),
-                "down_rate": _rate(rows, lambda row: int(row["direction_label"]) < 0),
-                "align_rate": _rate(rows, lambda row: int(row["direction_alignment"]) == 1),
-                "candidate_rate": _rate(rows, lambda row: int(row["candidate"]) == 1),
-                "strict_candidate_rate": _rate(rows, lambda row: int(row["strict_candidate"]) == 1),
-                "actionable_edge_rate": _rate(rows, lambda row: float(row["actionable_edge"]) > 0.0),
-                "mean_mu": _mean([float(row["mu_raw"]) for row in rows]),
-                "mean_sigma": _mean([float(row["sigma_raw"]) for row in rows]),
-                "median_abs_mu": _median([abs(float(row["mu_raw"])) for row in rows]),
-                "proposed_rate": _rate(rows, lambda row: int(row["proposed"]) == 1),
-                "accepted_rate": _rate(rows, lambda row: int(row["accepted"]) == 1),
-            }
-        )
-    return diagnostics
-
-
-def _resolve_threshold_scan(
-    validation_rows: Sequence[dict[str, object]],
-    selection_policy: dict[str, object] | None,
-    config: TrainingConfig,
-    anchor_count: int,
-    proposal_count: int,
-) -> tuple[list[dict[str, object]], str]:
-    if selection_policy is not None and _policy_thresholds_match_config(selection_policy, config):
-        threshold_origin = str(
-            selection_policy.get("selection_thresholds", {}).get("origin", "stored_policy")
-        )
-        scan = (
-            selection_policy.get("selection_thresholds", {})
-            .get("scan", {})
-            .get("global", [])
-        )
-        if isinstance(scan, list) and scan:
-            return [
-                _normalize_threshold_scan_row(
-                    dict(row),
-                    proposal_count=proposal_count,
-                    anchor_count=anchor_count,
-                )
-                for row in scan
-                if isinstance(row, dict)
-            ], f"policy_calibration:{threshold_origin}"
-
-    records = [
-        {
-            "score": float(row["selection_score"]),
-            "target": int(row["meta_label"]),
-        }
-        for row in validation_rows
-        if int(row["proposed"]) == 1 and int(row["pre_threshold_eligible"]) == 1
-    ]
-    return (
-        _build_threshold_scan(records, config, anchor_count=anchor_count),
-        f"validation_proposed_rows:{config.selection_score_source}",
-    )
+    sweep_rows: list[dict[str, object]] = []
+    for state_reset_mode in config.policy_sweep_state_reset_modes:
+        for min_policy_sigma in config.policy_sweep_min_policy_sigmas:
+            for gamma_multiplier in config.policy_sweep_gamma_multipliers:
+                for cost_multiplier in config.policy_sweep_cost_multipliers:
+                    metrics = evaluate_model(
+                        model=model,
+                        examples=validation_examples,
+                        config=config,
+                        state_reset_mode=state_reset_mode,
+                        cost_multiplier=float(cost_multiplier),
+                        gamma_multiplier=float(gamma_multiplier),
+                        min_policy_sigma=float(min_policy_sigma),
+                    )
+                    sweep_rows.append(
+                        {
+                            "state_reset_mode": state_reset_mode,
+                            "cost_multiplier": float(cost_multiplier),
+                            "gamma_multiplier": float(gamma_multiplier),
+                            "min_policy_sigma": float(min_policy_sigma),
+                            "average_log_wealth": float(metrics["average_log_wealth"]),
+                            "turnover": float(metrics["turnover"]),
+                            "cvar_tail_loss": float(metrics["cvar_tail_loss"]),
+                            "no_trade_band_hit_rate": float(metrics["no_trade_band_hit_rate"]),
+                            "exact_smooth_horizon_agreement": float(
+                                metrics["exact_smooth_horizon_agreement"]
+                            ),
+                            "exact_smooth_no_trade_agreement": float(
+                                metrics["exact_smooth_no_trade_agreement"]
+                            ),
+                            "exact_smooth_position_mae": float(metrics["exact_smooth_position_mae"]),
+                            "exact_smooth_utility_regret": float(
+                                metrics["exact_smooth_utility_regret"]
+                            ),
+                        }
+                    )
+    return _annotate_policy_calibration_sweep(sweep_rows)
 
 
-def _build_threshold_scan(
-    records: Sequence[dict[str, object]],
-    config: TrainingConfig,
-    anchor_count: int,
+def _annotate_policy_calibration_sweep(
+    sweep_rows: Sequence[dict[str, object]],
 ) -> list[dict[str, object]]:
-    if not records:
-        return []
-
-    rows: list[dict[str, object]] = []
-    candidates = sorted({float(record["score"]) for record in records})
-    total = len(records)
-    for tau in candidates:
-        selected = [record for record in records if float(record["score"]) >= tau]
-        selected_count = len(selected)
-        success_count = sum(int(record["target"]) for record in selected)
-        precision = success_count / selected_count if selected_count > 0 else 0.0
-        lcb = (
-            _precision_lower_bound(success_count, selected_count, config.precision_confidence_z)
-            if selected_count > 0
-            else 0.0
+    annotated_rows: list[dict[str, object]] = []
+    for index, row in enumerate(sweep_rows):
+        dominated = any(
+            _policy_sweep_row_dominates(other_row, row)
+            for other_index, other_row in enumerate(sweep_rows)
+            if other_index != index
         )
-        proposal_coverage = selected_count / total if total > 0 else 0.0
-        rows.append(
-            {
-                "tau": tau,
-                "accepted_count_at_tau": selected_count,
-                "success_count_at_tau": success_count,
-                "precision_at_tau": precision,
-                "lcb": lcb,
-                "feasible": (
-                    selected_count >= config.selection_min_support and lcb >= config.precision_target
-                ),
-                "proposal_coverage": proposal_coverage,
-                "anchor_coverage": selected_count / max(anchor_count, 1),
-            }
-        )
-    return rows
-
-
-def _normalize_threshold_scan_row(
-    row: dict[str, object],
-    proposal_count: int,
-    anchor_count: int,
-) -> dict[str, object]:
-    accepted_count = int(
-        row.get(
-            "accepted_count_at_tau",
-            row.get("selected_count", 0),
-        )
-    )
-    success_count = int(
-        row.get(
-            "success_count_at_tau",
-            row.get("success_count", 0),
-        )
-    )
-    precision = float(
-        row.get(
-            "precision_at_tau",
-            row.get("precision", 0.0),
-        )
-    )
-    proposal_coverage = float(
-        row.get(
-            "proposal_coverage",
-            row.get(
-                "coverage",
-                accepted_count / max(proposal_count, 1),
-            ),
-        )
-    )
-    return {
-        "tau": float(row.get("tau", 0.0)),
-        "accepted_count_at_tau": accepted_count,
-        "success_count_at_tau": success_count,
-        "precision_at_tau": precision,
-        "lcb": float(row.get("lcb", 0.0)),
-        "feasible": bool(row.get("feasible", False)),
-        "proposal_coverage": proposal_coverage,
-        "anchor_coverage": float(
-            row.get(
-                "anchor_coverage",
-                accepted_count / max(anchor_count, 1),
-            )
+        enriched = dict(row)
+        enriched["dominated"] = dominated
+        enriched["pareto_optimal"] = not dominated
+        annotated_rows.append(enriched)
+    return sorted(
+        annotated_rows,
+        key=lambda item: (
+            bool(item["dominated"]),
+            -float(item["average_log_wealth"]),
+            float(item["cvar_tail_loss"]),
+            float(item["turnover"]),
+            -float(item["no_trade_band_hit_rate"]),
         ),
+    )
+
+
+def _policy_sweep_row_dominates(
+    left: dict[str, object],
+    right: dict[str, object],
+) -> bool:
+    comparisons = (
+        float(left["average_log_wealth"]) >= float(right["average_log_wealth"]),
+        float(left["turnover"]) <= float(right["turnover"]),
+        float(left["cvar_tail_loss"]) <= float(right["cvar_tail_loss"]),
+        float(left["no_trade_band_hit_rate"]) >= float(right["no_trade_band_hit_rate"]),
+    )
+    strictly_better = (
+        float(left["average_log_wealth"]) > float(right["average_log_wealth"])
+        or float(left["turnover"]) < float(right["turnover"])
+        or float(left["cvar_tail_loss"]) < float(right["cvar_tail_loss"])
+        or float(left["no_trade_band_hit_rate"]) > float(right["no_trade_band_hit_rate"])
+    )
+    return all(comparisons) and strictly_better
+
+
+def _summarize_policy_calibration_sweep(
+    sweep_rows: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    pareto_rows = [dict(row) for row in sweep_rows if not bool(row.get("dominated", False))]
+    best_row = pareto_rows[0] if pareto_rows else (dict(sweep_rows[0]) if sweep_rows else None)
+    return {
+        "row_count": len(sweep_rows),
+        "pareto_optimal_count": len(pareto_rows),
+        "dominated_count": max(len(sweep_rows) - len(pareto_rows), 0),
+        "best_row": best_row,
     }
-
-
-def _acceptance_status(decision: dict[str, object]) -> str:
-    if decision["proposed_horizon"] is None:
-        return "not_applicable"
-    if bool(decision["accepted_signal"]):
-        return "accepted"
-    if decision["selection_threshold"] is None:
-        return "threshold_unavailable"
-    return "below_threshold"
 
 
 def _write_csv(path: Path, rows: Sequence[dict[str, object]]) -> None:
@@ -638,133 +396,5 @@ def _write_csv(path: Path, rows: Sequence[dict[str, object]]) -> None:
     with path.open("w", encoding="utf-8", newline="") as handle:
         writer = csv.DictWriter(handle, fieldnames=fieldnames)
         writer.writeheader()
-        writer.writerows(rows)
-
-
-def _chunk_examples(
-    examples: Sequence[TrainingExample],
-    batch_size: int,
-) -> Sequence[list[TrainingExample]]:
-    for start in range(0, len(examples), batch_size):
-        yield list(examples[start : start + batch_size])
-
-
-def _policy_thresholds_match_config(
-    selection_policy: dict[str, object],
-    config: TrainingConfig,
-) -> bool:
-    thresholds = dict(selection_policy.get("selection_thresholds", {}))
-    stored_score_source = str(
-        thresholds.get(
-            "score_source",
-            selection_policy.get("selection_score_source", "selector_probability"),
-        )
-    )
-    stored_allow_no_candidate = bool(
-        thresholds.get(
-            "allow_no_candidate",
-            selection_policy.get("allow_no_candidate", False),
-        )
-    )
-    return (
-        stored_score_source == str(config.selection_score_source)
-        and stored_allow_no_candidate == bool(config.allow_no_candidate)
-    )
-
-
-def _describe(values: Sequence[float]) -> dict[str, object]:
-    numeric = [float(value) for value in values]
-    if not numeric:
-        return {"count": 0}
-    ordered = sorted(numeric)
-    return {
-        "count": len(ordered),
-        "min": ordered[0],
-        "p05": _quantile(ordered, 0.05),
-        "p25": _quantile(ordered, 0.25),
-        "median": _quantile(ordered, 0.50),
-        "p75": _quantile(ordered, 0.75),
-        "p95": _quantile(ordered, 0.95),
-        "max": ordered[-1],
-        "mean": _mean(ordered),
-    }
-
-
-def _quantile(values: Sequence[float], probability: float) -> float:
-    if not values:
-        return 0.0
-    if len(values) == 1:
-        return float(values[0])
-    position = max(0.0, min(1.0, probability)) * (len(values) - 1)
-    lower_index = int(position)
-    upper_index = min(lower_index + 1, len(values) - 1)
-    weight = position - lower_index
-    return (float(values[lower_index]) * (1.0 - weight)) + (float(values[upper_index]) * weight)
-
-
-def _mean(values: Sequence[float]) -> float:
-    if not values:
-        return 0.0
-    return sum(float(value) for value in values) / len(values)
-
-
-def _median(values: Sequence[float]) -> float:
-    if not values:
-        return 0.0
-    ordered = sorted(float(value) for value in values)
-    midpoint = len(ordered) // 2
-    if len(ordered) % 2 == 1:
-        return ordered[midpoint]
-    return (ordered[midpoint - 1] + ordered[midpoint]) / 2.0
-
-
-def _rate(
-    rows: Sequence[dict[str, object]],
-    predicate,
-) -> float:
-    if not rows:
-        return 0.0
-    return sum(int(predicate(row)) for row in rows) / len(rows)
-
-
-def _regime_dict_from_id(regime_id: str) -> dict[str, object]:
-    session, volatility_bin, trend_bin = regime_id.split("|", maxsplit=2)
-    return {
-        "id": regime_id,
-        "session": session,
-        "volatility_bin": volatility_bin,
-        "trend_bin": trend_bin,
-    }
-
-
-def _return_scale(
-    realized_volatility: float,
-    horizon: int,
-    config: TrainingConfig,
-) -> float:
-    return max((float(realized_volatility) * (horizon**0.5)) + config.return_scale_epsilon, 1e-6)
-
-
-def _sign_of_value(value: float) -> int:
-    if value > 0.0:
-        return 1
-    if value < 0.0:
-        return -1
-    return 0
-
-
-def _precision_lower_bound(success_count: int, total_count: int, z_score: float) -> float:
-    if total_count <= 0:
-        return 0.0
-    proportion = success_count / total_count
-    z2 = z_score**2
-    denominator = 1.0 + (z2 / total_count)
-    centre = proportion + (z2 / (2.0 * total_count))
-    margin = z_score * (
-        (
-            ((proportion * (1.0 - proportion)) / total_count)
-            + (z2 / (4.0 * (total_count**2)))
-        )
-        ** 0.5
-    )
-    return max(0.0, (centre - margin) / denominator)
+        for row in rows:
+            writer.writerow(row)

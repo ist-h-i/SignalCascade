@@ -2,7 +2,6 @@ from __future__ import annotations
 
 import math
 import shutil
-from dataclasses import asdict
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
@@ -13,8 +12,12 @@ from .dataset_service import (
     limit_base_bars_to_lookback_days,
     trim_base_bars_for_latest_inference,
 )
-from .inference_service import predict_from_example
-from .report_service import generate_research_report
+from .inference_service import (
+    build_forecast_summary_payload,
+    predict_from_example,
+    serialize_prediction_result,
+)
+from .report_service import METRICS_SCHEMA_VERSION, generate_research_report
 from .training_service import train_model
 from ..infrastructure.data.csv_source import CsvMarketDataSource
 from ..infrastructure.persistence import ensure_directory, load_json, save_json
@@ -46,12 +49,21 @@ def tune_latest_dataset(
     source_rows_original = len(base_bars)
     base_bars = limit_base_bars_to_lookback_days(base_bars, lookback_days)
     source_rows_used = len(base_bars)
-    static_overrides = dict(config_overrides or {})
+    all_overrides = dict(config_overrides or {})
+    tunable_overrides = _extract_tunable_overrides(all_overrides)
+    static_overrides = {
+        key: value for key, value in all_overrides.items() if key not in tunable_overrides
+    }
 
-    baseline_config = TrainingConfig(seed=seed, output_dir=str(current_dir), **static_overrides)
+    baseline_config = TrainingConfig(
+        seed=seed,
+        output_dir=str(current_dir),
+        **static_overrides,
+        **tunable_overrides,
+    )
     examples = build_training_examples_from_bars(base_bars, baseline_config)
     inherited_parameters = _load_parameter_seed(artifact_root)
-    inherited_parameters.update(_extract_tunable_overrides(static_overrides))
+    inherited_parameters.update(tunable_overrides)
     candidate_parameters = _build_candidate_parameters(inherited_parameters)
     session_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     session_dir = ensure_directory(archive_root / f"session_{session_id}")
@@ -65,15 +77,13 @@ def tune_latest_dataset(
         candidate_dir = ensure_directory(session_dir / candidate_name)
         config = TrainingConfig(seed=seed, output_dir=str(candidate_dir), **static_overrides, **parameters)
         model, summary = train_model(examples, config, candidate_dir)
-        selection_policy = dict(summary.pop("selection_policy"))
         latest_example = _build_latest_example(base_bars, config)
-        prediction = predict_from_example(model, latest_example, config, selection_policy)
+        prediction = predict_from_example(model, latest_example, config)
         _write_run_artifacts(
             output_dir=candidate_dir,
             config=config,
             source_payload=source_payload,
             summary=summary,
-            selection_policy=selection_policy,
             prediction=prediction,
             sample_count=len(examples),
             source_rows_original=source_rows_original,
@@ -85,25 +95,18 @@ def tune_latest_dataset(
                 "best_validation_loss": summary["best_validation_loss"],
                 "project_value_score": summary["validation_metrics"]["project_value_score"],
                 "utility_score": summary["validation_metrics"]["utility_score"],
-                "precision_feasible": summary["validation_metrics"]["precision_feasible"],
-                "acceptance_precision": summary["validation_metrics"]["acceptance_precision"],
-                "acceptance_coverage": summary["validation_metrics"]["acceptance_coverage"],
-                "selection_brier_score": summary["validation_metrics"]["selection_brier_score"],
-                "value_capture_ratio": summary["validation_metrics"]["value_capture_ratio"],
-                "best_selection_lcb": summary["validation_metrics"]["best_selection_lcb"],
-                "support_at_best_lcb": summary["validation_metrics"]["support_at_best_lcb"],
-                "precision_at_best_lcb": summary["validation_metrics"]["precision_at_best_lcb"],
-                "tau_at_best_lcb": summary["validation_metrics"]["tau_at_best_lcb"],
-                "alignment_rate": summary["validation_metrics"]["alignment_rate"],
-                "pre_threshold_capture": summary["validation_metrics"]["pre_threshold_capture"],
-                "profit_factor": summary["validation_metrics"]["profit_factor"],
-                "signal_sortino": summary["validation_metrics"]["signal_sortino"],
+                "average_log_wealth": summary["validation_metrics"]["average_log_wealth"],
+                "realized_pnl_per_anchor": summary["validation_metrics"]["realized_pnl_per_anchor"],
+                "cvar_tail_loss": summary["validation_metrics"]["cvar_tail_loss"],
+                "max_drawdown": summary["validation_metrics"]["max_drawdown"],
+                "no_trade_band_hit_rate": summary["validation_metrics"]["no_trade_band_hit_rate"],
+                "mu_calibration": summary["validation_metrics"]["mu_calibration"],
+                "sigma_calibration": summary["validation_metrics"]["sigma_calibration"],
                 "directional_accuracy": summary["validation_metrics"]["directional_accuracy"],
-                "overlay_accuracy": summary["validation_metrics"]["overlay_accuracy"],
-                "proposed_horizon": prediction.proposed_horizon,
-                "accepted_horizon": prediction.accepted_horizon,
-                "accepted_signal": prediction.accepted_signal,
+                "policy_horizon": prediction.policy_horizon,
+                "executed_horizon": prediction.executed_horizon,
                 "position": prediction.position,
+                "tradeability_gate": prediction.tradeability_gate,
                 "anchor_time": prediction.anchor_time,
                 **parameters,
             }
@@ -111,15 +114,14 @@ def tune_latest_dataset(
 
     leaderboard.sort(
         key=lambda row: (
-            -int(bool(row["precision_feasible"])),
-            -float(row["acceptance_precision"]),
-            -float(row["acceptance_coverage"]),
-            -float(row["best_selection_lcb"]),
-            -float(row["support_at_best_lcb"]),
-            -float(row["alignment_rate"]),
-            -float(row["pre_threshold_capture"]),
-            float(row["selection_brier_score"]),
-            -float(row["value_capture_ratio"]),
+            -float(row["project_value_score"]),
+            -float(row["average_log_wealth"]),
+            -float(row["realized_pnl_per_anchor"]),
+            float(row["cvar_tail_loss"]),
+            float(row["max_drawdown"]),
+            float(row["mu_calibration"]),
+            float(row["sigma_calibration"]),
+            float(row["no_trade_band_hit_rate"]),
             -float(row["directional_accuracy"]),
             float(row["best_validation_loss"]),
         )
@@ -187,7 +189,6 @@ def _write_run_artifacts(
     config: TrainingConfig,
     source_payload: dict[str, object],
     summary: dict[str, object],
-    selection_policy: dict[str, object],
     prediction,
     sample_count: int,
     source_rows_original: int,
@@ -195,65 +196,24 @@ def _write_run_artifacts(
 ) -> None:
     metrics_payload = dict(summary)
     metrics_payload["sample_count"] = sample_count
+    metrics_payload["effective_sample_count"] = int(summary.get("train_samples", 0)) + int(
+        summary.get("validation_samples", 0)
+    )
     metrics_payload["source"] = source_payload
+    metrics_payload["schema_version"] = METRICS_SCHEMA_VERSION
     metrics_payload["source_rows_original"] = source_rows_original
     metrics_payload["source_rows_used"] = source_rows_used
-    anchor_close = float(prediction.current_close)
     save_json(output_dir / "config.json", config.to_dict())
     save_json(output_dir / "source.json", source_payload)
     save_json(output_dir / "metrics.json", metrics_payload)
-    save_json(output_dir / "selection_policy.json", selection_policy)
-    save_json(output_dir / "prediction.json", asdict(prediction))
+    save_json(output_dir / "prediction.json", serialize_prediction_result(prediction))
     save_json(
         output_dir / "forecast_summary.json",
-        {
-            "anchor_time": prediction.anchor_time,
-            "anchor_close": anchor_close,
-            "proposed_horizon": prediction.proposed_horizon,
-            "accepted_horizon": prediction.accepted_horizon,
-            "selected_direction": prediction.selected_direction,
-            "position": prediction.position,
-            "accepted_signal": prediction.accepted_signal,
-            "selection_probability": prediction.selection_probability,
-            "selection_score": prediction.selection_score,
-            "selection_threshold": prediction.selection_threshold,
-            "threshold_status": prediction.threshold_status,
-            "threshold_origin": prediction.threshold_origin,
-            "correctness_probability": prediction.correctness_probability,
-            "hold_probability": prediction.hold_probability,
-            "hold_threshold": prediction.hold_threshold,
-            "overlay_action": prediction.overlay_action,
-            "expected_log_returns": prediction.expected_log_returns,
-            "predicted_closes": prediction.predicted_closes,
-            "uncertainties": prediction.uncertainties,
-            "forecast_rows": [
-                {
-                    "horizon_4h": horizon,
-                    "forecast_time_utc": (
-                        datetime.fromisoformat(prediction.anchor_time)
-                        + timedelta(hours=4 * horizon)
-                    ).isoformat(),
-                    "expected_log_return": prediction.expected_log_returns[str(horizon)],
-                    "expected_return_pct": (
-                        prediction.predicted_closes[str(horizon)] / max(anchor_close, 1e-6)
-                    )
-                    - 1.0,
-                    "predicted_close": prediction.predicted_closes[str(horizon)],
-                    "uncertainty": prediction.uncertainties[str(horizon)],
-                    "one_sigma_low_close": anchor_close
-                    * math.exp(
-                        prediction.expected_log_returns[str(horizon)]
-                        - prediction.uncertainties[str(horizon)]
-                    ),
-                    "one_sigma_high_close": anchor_close
-                    * math.exp(
-                        prediction.expected_log_returns[str(horizon)]
-                        + prediction.uncertainties[str(horizon)]
-                    ),
-                }
-                for horizon in config.horizons
-            ],
-            "best_params": {
+        build_forecast_summary_payload(
+            prediction=prediction,
+            config=config,
+            validation_metrics=summary.get("validation_metrics", {}),
+            best_params={
                 "epochs": config.epochs,
                 "batch_size": config.batch_size,
                 "learning_rate": config.learning_rate,
@@ -261,8 +221,7 @@ def _write_run_artifacts(
                 "dropout": config.dropout,
                 "weight_decay": config.weight_decay,
             },
-            "validation_metrics": summary.get("validation_metrics", {}),
-        },
+        ),
     )
 
 
