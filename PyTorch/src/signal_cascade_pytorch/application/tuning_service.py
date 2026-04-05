@@ -36,6 +36,14 @@ _FALLBACK_PARAMETERS = {
     "dropout": 0.1,
     "weight_decay": 5e-5,
 }
+_OPTIMIZATION_GATE_RULES = (
+    {"metric": "average_log_wealth", "operator": "minimum", "threshold": 0.0},
+    {"metric": "realized_pnl_per_anchor", "operator": "minimum", "threshold": 0.0},
+    {"metric": "cvar_tail_loss", "operator": "maximum", "threshold": 0.08},
+    {"metric": "max_drawdown", "operator": "maximum", "threshold": 0.15},
+    {"metric": "directional_accuracy", "operator": "minimum", "threshold": 0.50},
+    {"metric": "no_trade_band_hit_rate", "operator": "maximum", "threshold": 0.80},
+)
 
 
 def tune_latest_dataset(
@@ -95,31 +103,33 @@ def tune_latest_dataset(
             source_rows_original=source_rows_original,
             source_rows_used=source_rows_used,
         )
-        leaderboard.append(
-            {
-                "candidate": candidate_name,
-                "best_validation_loss": summary["best_validation_loss"],
-                "project_value_score": summary["validation_metrics"]["project_value_score"],
-                "utility_score": summary["validation_metrics"]["utility_score"],
-                "average_log_wealth": summary["validation_metrics"]["average_log_wealth"],
-                "realized_pnl_per_anchor": summary["validation_metrics"]["realized_pnl_per_anchor"],
-                "cvar_tail_loss": summary["validation_metrics"]["cvar_tail_loss"],
-                "max_drawdown": summary["validation_metrics"]["max_drawdown"],
-                "no_trade_band_hit_rate": summary["validation_metrics"]["no_trade_band_hit_rate"],
-                "mu_calibration": summary["validation_metrics"]["mu_calibration"],
-                "sigma_calibration": summary["validation_metrics"]["sigma_calibration"],
-                "directional_accuracy": summary["validation_metrics"]["directional_accuracy"],
-                "policy_horizon": prediction.policy_horizon,
-                "executed_horizon": prediction.executed_horizon,
-                "position": prediction.position,
-                "tradeability_gate": prediction.tradeability_gate,
-                "anchor_time": prediction.anchor_time,
-                **parameters,
-            }
-        )
+        validation_metrics = dict(summary["validation_metrics"])
+        result_row = {
+            "candidate": candidate_name,
+            "best_validation_loss": summary["best_validation_loss"],
+            "project_value_score": validation_metrics["project_value_score"],
+            "utility_score": validation_metrics["utility_score"],
+            "average_log_wealth": validation_metrics["average_log_wealth"],
+            "realized_pnl_per_anchor": validation_metrics["realized_pnl_per_anchor"],
+            "cvar_tail_loss": validation_metrics["cvar_tail_loss"],
+            "max_drawdown": validation_metrics["max_drawdown"],
+            "no_trade_band_hit_rate": validation_metrics["no_trade_band_hit_rate"],
+            "mu_calibration": validation_metrics["mu_calibration"],
+            "sigma_calibration": validation_metrics["sigma_calibration"],
+            "directional_accuracy": validation_metrics["directional_accuracy"],
+            "policy_horizon": prediction.policy_horizon,
+            "executed_horizon": prediction.executed_horizon,
+            "position": prediction.position,
+            "tradeability_gate": prediction.tradeability_gate,
+            "anchor_time": prediction.anchor_time,
+            **parameters,
+        }
+        result_row.update(_evaluate_optimization_gate(result_row))
+        leaderboard.append(result_row)
 
     leaderboard.sort(
         key=lambda row: (
+            not bool(row["optimization_gate_passed"]),
             -float(row["project_value_score"]),
             -float(row["average_log_wealth"]),
             -float(row["realized_pnl_per_anchor"]),
@@ -135,73 +145,102 @@ def tune_latest_dataset(
     save_json(session_dir / "leaderboard.json", {"results": leaderboard})
 
     best_result = leaderboard[0]
-    best_candidate_dir = session_dir / str(best_result["candidate"])
-    archived_current_dir = _archive_existing_current(current_dir, session_dir)
-    archived_legacy_root_dirs = _archive_legacy_root_runs(artifact_root, session_dir)
+    accepted_result = next(
+        (row for row in leaderboard if bool(row["optimization_gate_passed"])),
+        None,
+    )
+    archived_current_dir = None
+    archived_legacy_root_dirs: list[Path] = []
 
-    if current_dir.exists():
-        shutil.rmtree(current_dir)
-    shutil.copytree(best_candidate_dir, current_dir)
+    if accepted_result is not None:
+        accepted_candidate_dir = session_dir / str(accepted_result["candidate"])
+        archived_current_dir = _archive_existing_current(current_dir, session_dir)
+        archived_legacy_root_dirs = _archive_legacy_root_runs(artifact_root, session_dir)
+
+        if current_dir.exists():
+            shutil.rmtree(current_dir)
+        shutil.copytree(accepted_candidate_dir, current_dir)
+
+    current_dir_payload = str(current_dir) if current_dir.exists() or accepted_result is not None else None
 
     manifest = {
         "session_id": session_id,
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "artifact_root": str(artifact_root),
-        "current_dir": str(current_dir),
+        "current_dir": current_dir_payload,
         "archive_session_dir": str(session_dir),
         "leaderboard_path": str(session_dir / "leaderboard.json"),
+        "manifest_path": str(session_dir / "manifest.json"),
         "source_path": str(csv_path),
         "lookback_days": lookback_days,
         "sample_count": len(examples),
         "source_rows_original": source_rows_original,
         "source_rows_used": source_rows_used,
         "best_candidate": best_result,
+        "accepted_candidate": accepted_result,
+        "current_updated": accepted_result is not None,
+        "interrupted_tuning": accepted_result is None,
+        "optimization_gate": {
+            "status": "passed" if accepted_result is not None else "failed",
+            "candidate_count": len(leaderboard),
+            "passed_candidate_count": sum(
+                1 for row in leaderboard if bool(row["optimization_gate_passed"])
+            ),
+            "failed_candidate_count": sum(
+                1 for row in leaderboard if not bool(row["optimization_gate_passed"])
+            ),
+            "thresholds": _optimization_gate_thresholds_payload(),
+            "accepted_candidate": None if accepted_result is None else accepted_result["candidate"],
+            "best_candidate": best_result["candidate"],
+        },
         "archived_previous_current_dir": str(archived_current_dir) if archived_current_dir else None,
         "archived_legacy_root_dirs": [str(path) for path in archived_legacy_root_dirs],
     }
-    save_json(current_dir / "manifest.json", manifest)
-    save_json(
-        artifact_root / "best_params.json",
-        {
-            "updated_at": manifest["generated_at"],
-            "source_path": str(csv_path),
-            "parameters": {
-                key: best_result[key]
-                for key in (
-                    "epochs",
-                    "batch_size",
-                    "learning_rate",
-                    "hidden_dim",
-                    "dropout",
-                    "weight_decay",
-                )
+    save_json(session_dir / "manifest.json", manifest)
+    if accepted_result is not None:
+        save_json(current_dir / "manifest.json", manifest)
+        save_json(
+            artifact_root / "best_params.json",
+            {
+                "updated_at": manifest["generated_at"],
+                "source_path": str(csv_path),
+                "parameters": {
+                    key: accepted_result[key]
+                    for key in (
+                        "epochs",
+                        "batch_size",
+                        "learning_rate",
+                        "hidden_dim",
+                        "dropout",
+                        "weight_decay",
+                    )
+                },
             },
-        },
-    )
-    save_json(
-        current_dir / "source.json",
-        build_artifact_source_payload(
-            materialize_artifact_source(source_payload, current_dir, base_bars=base_bars),
+        )
+        save_json(
+            current_dir / "source.json",
+            build_artifact_source_payload(
+                materialize_artifact_source(source_payload, current_dir, base_bars=base_bars),
+                current_dir,
+                artifact_kind="training_run",
+                generated_at_utc=manifest["generated_at"],
+                sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=True)),
+            ),
+        )
+        generate_research_report(
             current_dir,
-            artifact_kind="training_run",
-            generated_at_utc=manifest["generated_at"],
-            sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=True)),
-        ),
-    )
-    generate_research_report(
-        current_dir,
-        report_path=artifact_root.parent.parent / "report_signalcascade_xauusd.md",
-    )
-    save_json(
-        current_dir / "source.json",
-        build_artifact_source_payload(
-            materialize_artifact_source(source_payload, current_dir, base_bars=base_bars),
-            current_dir,
-            artifact_kind="training_run",
-            generated_at_utc=manifest["generated_at"],
-            sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=True)),
-        ),
-    )
+            report_path=artifact_root.parent.parent / "report_signalcascade_xauusd.md",
+        )
+        save_json(
+            current_dir / "source.json",
+            build_artifact_source_payload(
+                materialize_artifact_source(source_payload, current_dir, base_bars=base_bars),
+                current_dir,
+                artifact_kind="training_run",
+                generated_at_utc=manifest["generated_at"],
+                sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=True)),
+            ),
+        )
     return manifest
 
 
@@ -453,3 +492,41 @@ def _clip_dropout(value: float) -> float:
 
 def _round_float(value: float) -> float:
     return float(f"{value:.6g}")
+
+
+def _evaluate_optimization_gate(candidate: dict[str, object]) -> dict[str, object]:
+    failed_rules: list[str] = []
+
+    for rule in _OPTIMIZATION_GATE_RULES:
+        metric = str(rule["metric"])
+        operator = str(rule["operator"])
+        threshold = float(rule["threshold"])
+        value = candidate.get(metric)
+        numeric_value = float(value) if value is not None else math.nan
+
+        if not math.isfinite(numeric_value):
+            failed_rules.append(f"{metric}:missing")
+            continue
+        if operator == "minimum" and numeric_value < threshold:
+            failed_rules.append(f"{metric}<{threshold:.6f}")
+            continue
+        if operator == "maximum" and numeric_value > threshold:
+            failed_rules.append(f"{metric}>{threshold:.6f}")
+            continue
+
+    passed = not failed_rules
+    return {
+        "optimization_gate_status": "passed" if passed else "failed",
+        "optimization_gate_passed": passed,
+        "optimization_gate_failed_rules": failed_rules,
+    }
+
+
+def _optimization_gate_thresholds_payload() -> dict[str, dict[str, float]]:
+    payload: dict[str, dict[str, float]] = {}
+    for rule in _OPTIMIZATION_GATE_RULES:
+        metric = str(rule["metric"])
+        operator = str(rule["operator"])
+        threshold = float(rule["threshold"])
+        payload[metric] = {"minimum" if operator == "minimum" else "maximum": threshold}
+    return payload

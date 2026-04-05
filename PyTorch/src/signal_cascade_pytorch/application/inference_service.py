@@ -92,7 +92,7 @@ def predict_from_example(
         no_trade_band_hit=bool(decision["no_trade_band_hit"]),
         tradeability_gate=tradeability_gate,
         shape_entropy=float(outputs["shape_entropy"][0].item()),
-        policy_score=float(decision["selection_score"]),
+        policy_score=float(decision["selected_policy_utility"]),
         expected_log_returns=expected_log_returns,
         predicted_closes=predicted_closes,
         uncertainties=uncertainties,

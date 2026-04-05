@@ -235,7 +235,7 @@ def evaluate_model(
             sigma_errors.append(abs(abs(realized_return - float(selected_row["mean"])) - float(selected_row["sigma"])))
             tradeability_gates.append(gate)
             shape_entropies.append(float(outputs["shape_entropy"][0].item()))
-            policy_scores.append(float(decision["selection_score"]))
+            policy_scores.append(float(decision["selected_policy_utility"]))
             horizon_counts[str(selected_horizon)] += 1
             direction_correct += int(
                 _sign_from_value(float(selected_row["mean"])) == _sign_from_value(realized_return)

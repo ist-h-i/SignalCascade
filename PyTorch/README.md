@@ -99,6 +99,36 @@ exact path はこの shared terms から `q_t*` を piecewise に解き、smooth
 
 `research_report.md` もこれらの canonical 名を優先して参照し、旧 `tradeability_gate` / `policy_score` / `expected_log_returns` / `uncertainties` は compatibility alias として扱います。
 
+## CLI And Bootstrap Migration
+
+`Issue 6 / PR 6` では CLI と bootstrap の表示を新 contract に寄せます。
+
+- `predict` / `train` / `export-diagnostics` は `q_t`, `g_t`, `selected policy utility` を主表示にする
+- `--selection-score-source` と `--selection-threshold-mode` は deprecated compatibility option として警告のみ残す
+- diagnostics replay は threshold replay ではなく `q_t` policy path の再計算として扱う
+
+## Legacy Isolation
+
+`Issue 7 / PR 7` では threshold-policy 時代の互換 field を main path から切り離します。
+
+- `apply_selection_policy` の canonical 出力は `policy_horizon`, `executed_horizon`, `position`, `trade_delta`, `no_trade_band_hit`, `selected_policy_utility` を主に使う
+- 旧 `accepted_signal`, `selection_probability`, `selection_threshold`, `correctness_probability` などは `domain/historical_compatibility.py` に集約し、`legacy_compatibility` view 経由でのみ参照する
+- `PredictionResult` も canonical field を主とし、historical alias は `legacy_compatibility` へ隔離する
+
+## Acceptance And Smoke
+
+`Issue 8 / PR 8` の受け入れは次を基準にします。
+
+- unit / integration: `tests/test_policy_training.py`, `tests/test_artifact_schema.py`, `tests/test_policy_consistency.py`, `tests/test_stateful_evaluation.py`, `tests/test_policy_sweep.py`
+- replay diagnostics: `signal-cascade export-diagnostics --output-dir <artifact> --diagnostics-output-dir <overlay>`
+- smoke training: `signal-cascade train --output-dir <artifact>` と `signal-cascade predict --output-dir <artifact>`
+- acceptance checklist:
+  - `Done 1`: primary objective は `profit_objective_log_wealth_minus_cvar`
+  - `Done 2`: inference main path は `q_t*` 中心
+  - `Done 3`: threshold calibration は主経路から除外
+  - `Done 4`: artifact / report / diagnostics / CLI は canonical spec 優先
+  - `Done 5`: unit / replay / smoke を新 contract で再確認
+
 ## クイックスタート
 
 ```bash
@@ -147,6 +177,38 @@ signal-cascade promote-current \
 dashboard の再生成は promotion 後に行います。
 
 ```bash
+cd /Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend
+npm run sync:data:fast
+```
+
+## Tuning Acceptance Gate
+
+`signal-cascade tune-latest` は parameter sweep を回した後、`leaderboard` の 1 位を無条件で `current` に昇格しません。
+`current` へ昇格するのは optimization gate を通過した candidate だけです。
+
+- gate 指標
+  - `average_log_wealth >= 0.0`
+  - `realized_pnl_per_anchor >= 0.0`
+  - `cvar_tail_loss <= 0.08`
+  - `max_drawdown <= 0.15`
+  - `directional_accuracy >= 0.50`
+  - `no_trade_band_hit_rate <= 0.80`
+- pass した candidate が 1 件以上ある場合:
+  - best pass candidate を `current` と `best_params.json` に反映する
+- pass した candidate が 0 件の場合:
+  - `current` は更新しない
+  - session 配下の `leaderboard.json` / `manifest.json` に fail 理由を残す
+  - CLI は non-zero exit で終了する
+
+session ごとの gate 結果は `artifacts/gold_xauusd_m30/archive/session_<timestamp>/manifest.json` に保存されます。
+
+accepted candidate が出た場合、`tune-latest` の時点で `artifacts/gold_xauusd_m30/current` は更新済みです。UI 反映はその後に `Frontend` 側で `dashboard-data.json` を再生成します。
+
+```bash
+cd /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch
+source .venv/bin/activate
+signal-cascade tune-latest --artifact-root artifacts/gold_xauusd_m30
+
 cd /Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend
 npm run sync:data:fast
 ```

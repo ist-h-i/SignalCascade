@@ -1,5 +1,12 @@
 # 予測精度改善 実装ログ
 
+> 2026-04-06 JST 注記:
+> この文書は 2026-03-24 時点の selector / threshold-policy 系の作業ログです。
+> 現在の canonical 実装は `PyTorch/profit_maximization_migration_roadmap.md`,
+> `PyTorch/profit_maximization_execution_schedule.md`, `PyTorch/README.md`
+> にある profit-maximization / `q_t*` 主経路が正であり、
+> `accepted_signal` や `selection_policy.json` は historical compatibility の文脈でのみ参照してください。
+
 ## 2026-03-24 JST Step 1: 現状調査と変更方針の固定
 
 ### Why

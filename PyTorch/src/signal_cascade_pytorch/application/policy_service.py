@@ -8,6 +8,10 @@ from torch.nn import functional as functional
 
 from .config import TrainingConfig
 from ..domain.entities import TrainingExample
+from ..domain.historical_compatibility import (
+    build_policy_decision_legacy_compatibility,
+    sign_from_value,
+)
 
 
 def build_default_policy(config: TrainingConfig) -> dict[str, object]:
@@ -82,63 +86,48 @@ def apply_selection_policy(
     executed_horizon = int(selected_row["horizon"]) if abs(position) > 1e-9 else None
     shape_vector = list(shape_probs or [])
     shape_entropy = _shape_entropy(shape_vector)
-    selected_direction = _sign_from_value(float(selected_row["mean"]))
-
-    return {
+    selected_direction = sign_from_value(float(selected_row["mean"]))
+    meta_label = int(
+        executed_horizon is not None
+        and selected_direction != 0
+        and selected_direction
+        == int(example.direction_targets[config.horizons.index(int(selected_row["horizon"]))])
+    )
+    direction_correct = int(
+        selected_direction != 0
+        and selected_direction
+        == sign_from_value(
+            float(example.returns_target[config.horizons.index(int(selected_row["horizon"]))])
+        )
+    )
+    selected_policy_utility = float(selected_row["policy_utility"])
+    decision = {
         "policy_horizon": int(selected_row["horizon"]),
-        "proposed_horizon": int(selected_row["horizon"]),
         "executed_horizon": executed_horizon,
-        "accepted_horizon": executed_horizon,
-        "selected_horizon": int(selected_row["horizon"]),
-        "selected_direction": selected_direction,
         "position": position,
         "previous_position": float(previous_position),
         "trade_delta": trade_delta,
-        "raw_position": position,
-        "pre_threshold_position": position,
-        "pre_threshold_eligible": not no_trade,
-        "accepted_signal": executed_horizon is not None,
         "no_trade_band_hit": no_trade,
-        "selection_probability": float(tradeability_gate),
-        "selection_score": float(selected_row["policy_utility"]),
-        "selection_score_source": "profit_utility",
-        "selection_threshold": None,
-        "threshold_status": "retired",
-        "threshold_origin": "profit_policy",
-        "stored_threshold_compatibility": "retired",
-        "threshold_score_source": "profit_utility",
-        "precision_infeasible": False,
-        "correctness_probability": float(tradeability_gate),
-        "hold_probability": max(0.0, 1.0 - min(abs(position), 1.0)),
-        "hold_threshold": 0.0,
-        "overlay_action": "hold" if no_trade else "reduce",
-        "expected_direction": selected_direction,
-        "direction_alignment": True,
-        "accept_reject_reason": "no_trade_band" if no_trade else "executed",
-        "reject_flags": {
-            "no_trade_band": no_trade,
-            "retired_threshold_policy": True,
-        },
-        "meta_label": int(
-            executed_horizon is not None
-            and selected_direction != 0
-            and selected_direction == int(example.direction_targets[config.horizons.index(int(selected_row["horizon"]))])
-        ),
-        "direction_correct": int(
-            selected_direction != 0
-            and selected_direction == _sign_from_value(
-                float(example.returns_target[config.horizons.index(int(selected_row["horizon"]))])
-            )
-        ),
-        "candidate_count": len(rows),
-        "strict_candidate_count": len(rows),
-        "any_candidate": bool(rows),
-        "any_strict_candidate": bool(rows),
+        "selected_policy_utility": selected_policy_utility,
         "tradeability_gate": float(tradeability_gate),
         "shape_entropy": shape_entropy,
         "horizon_rows": rows,
         "selected_row": selected_row,
     }
+    decision["legacy_compatibility"] = build_policy_decision_legacy_compatibility(
+        policy_horizon=int(selected_row["horizon"]),
+        executed_horizon=executed_horizon,
+        position=position,
+        trade_delta=trade_delta,
+        no_trade_band_hit=no_trade,
+        tradeability_gate=float(tradeability_gate),
+        selected_policy_utility=selected_policy_utility,
+        selected_direction=selected_direction,
+        meta_label=meta_label,
+        direction_correct=direction_correct,
+        candidate_count=len(rows),
+    )
+    return decision
 
 
 def build_prediction_snapshots(
@@ -434,11 +423,7 @@ def implied_direction_probabilities(
 
 
 def _sign_from_value(value: float) -> int:
-    if value > 0.0:
-        return 1
-    if value < 0.0:
-        return -1
-    return 0
+    return sign_from_value(value)
 
 
 def _shape_entropy(shape_probs: Sequence[float]) -> float:

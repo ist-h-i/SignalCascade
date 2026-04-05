@@ -268,14 +268,32 @@ def tune_latest_command(args) -> int:
         lookback_days=getattr(args, "csv_lookback_days", None),
     )
     best_candidate = manifest["best_candidate"]
+    accepted_candidate = manifest.get("accepted_candidate")
+    optimization_gate = manifest.get("optimization_gate", {})
 
     print(f"current run dir: {manifest['current_dir']}")
     print(f"archive session dir: {manifest['archive_session_dir']}")
+    print(f"leaderboard: {manifest['leaderboard_path']}")
+    print(f"optimization gate: {optimization_gate.get('status', 'unknown')}")
+    print(
+        "passed candidates: "
+        f"{optimization_gate.get('passed_candidate_count', 0)}/"
+        f"{optimization_gate.get('candidate_count', 0)}"
+    )
     print(f"best validation loss: {best_candidate['best_validation_loss']:.6f}")
     print(f"best project value score: {best_candidate['project_value_score']:.6f}")
     print(f"best average_log_wealth: {best_candidate['average_log_wealth']:.6f}")
     print(f"best cvar_tail_loss: {best_candidate['cvar_tail_loss']:.6f}")
     print(f"best policy horizon: {best_candidate['policy_horizon']}")
+    if accepted_candidate is None:
+        print("accepted candidate: none")
+        failed_rules = list(best_candidate.get("optimization_gate_failed_rules", []))
+        if failed_rules:
+            print(f"best candidate failed rules: {', '.join(str(rule) for rule in failed_rules)}")
+        print("current updated: False")
+        return 2
+    print(f"accepted candidate: {accepted_candidate['candidate']}")
+    print("current updated: True")
     return 0
 
 

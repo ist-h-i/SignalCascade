@@ -9,19 +9,26 @@
 - `artifact contract 先行` を優先順位として確定する
 - issue / PR 粒度まで分解し、日付付きの実行スケジュールに落とす
 
+## 0. Status Snapshot
+
+- 2026-04-06 JST: `PR 1` から `PR 6` までの core / contract / CLI migration を実装済み
+- 2026-04-06 JST: `PR 7` として threshold-policy 由来の互換 field を `domain/historical_compatibility.py` へ隔離済み
+- 2026-04-06 JST: `PR 8` として README / acceptance を更新し、unit 32件と `train -> predict -> export-diagnostics` smoke を再確認済み
+- 2026-04-06 JST: `tune-latest` に optimization gate を導入し、実データ tuning で accepted candidate の `current` 反映、`Frontend/public/dashboard-data.json` 再同期、`npm run build` を確認済み
+
 ## 1. 現在地
 
 2026-04-06 JST 時点の認識は次です。
 
-- `Phase 1`: 部分完了
-- `Phase 2`: 部分完了
-- `Phase 3`: 部分完了
-- `Phase 4`: 部分完了
-- `Phase 5`: 未完了
-- `Phase 6`: 未完了
-- `Phase 7`: 未完了
+- `Phase 1`: 完了
+- `Phase 2`: 完了
+- `Phase 3`: 完了
+- `Phase 4`: 完了
+- `Phase 5`: 完了
+- `Phase 6`: 完了
+- `Phase 7`: 完了
 
-部分完了と判定する理由は、現行コードが `shape_probs`, `mu`, `sigma`, `tradeability_gate`, `state_vector` を返し、profit objective と exact policy を一部持っている一方で、artifact / CLI / diagnostics に旧 threshold-policy 語彙が残っているためです。
+現行コードは、`q_t*` 主経路、profit objective、artifact / CLI / diagnostics の canonical contract、legacy compatibility の隔離、tuning acceptance gate、dashboard sync まで含めて schedule 上のスコープを一通り満たしています。
 
 ## 2. 優先順位
 
@@ -325,5 +332,5 @@ Gate:
 
 ## 9. 次の着手点
 
-最初の着手は `Issue 1 / PR 1` です。
-内容は `TrainingExample` / state feature / `state_vector` の contract freeze です。
+この execution schedule に載せた `Issue 1` から `Issue 8` までは一通り完了しました。
+次の着手点は、新 canonical artifact を読む downstream (`Frontend/scripts/sync-signal-cascade-data.mjs` など) から互換 alias 依存を段階的に外す follow-up です。

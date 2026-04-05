@@ -5,6 +5,11 @@ from datetime import datetime
 import math
 from typing import Sequence
 
+from .historical_compatibility import (
+    build_prediction_legacy_compatibility,
+    prediction_selected_direction,
+)
+
 FeatureVector = tuple[float, float, float, float, float, float]
 ShapeVector = tuple[float, float, float]
 RegimeVector = tuple[float, float, float, float, float]
@@ -242,64 +247,9 @@ class PredictionResult:
     regime_id: str
 
     @property
-    def proposed_horizon(self) -> int:
-        return self.policy_horizon
-
-    @property
-    def accepted_horizon(self) -> int | None:
-        return self.executed_horizon
-
-    @property
-    def selected_horizon(self) -> int:
-        return self.policy_horizon
-
-    @property
     def selected_direction(self) -> int:
-        mean = self.expected_log_returns.get(str(self.policy_horizon), 0.0)
-        if mean > 0.0:
-            return 1
-        if mean < 0.0:
-            return -1
-        return 0
+        return prediction_selected_direction(self)
 
     @property
-    def accepted_signal(self) -> bool:
-        return self.executed_horizon is not None and (
-            abs(self.position) > 1e-9 or abs(self.trade_delta) > 1e-9
-        )
-
-    @property
-    def selection_probability(self) -> float:
-        return self.tradeability_gate
-
-    @property
-    def selection_score(self) -> float:
-        return self.policy_score
-
-    @property
-    def selection_threshold(self) -> None:
-        return None
-
-    @property
-    def threshold_status(self) -> str:
-        return "retired"
-
-    @property
-    def threshold_origin(self) -> str:
-        return "profit_policy"
-
-    @property
-    def correctness_probability(self) -> float:
-        return self.tradeability_gate
-
-    @property
-    def hold_probability(self) -> float:
-        return max(0.0, 1.0 - min(abs(self.position), 1.0))
-
-    @property
-    def hold_threshold(self) -> float:
-        return 0.0
-
-    @property
-    def overlay_action(self) -> str:
-        return "hold" if self.no_trade_band_hit else "reduce"
+    def legacy_compatibility(self) -> dict[str, object]:
+        return build_prediction_legacy_compatibility(self)

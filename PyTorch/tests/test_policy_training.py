@@ -24,6 +24,7 @@ from signal_cascade_pytorch.application.policy_service import (
 )
 from signal_cascade_pytorch.application.training_service import examples_to_batch, train_model
 from signal_cascade_pytorch.application.tuning_service import tune_latest_dataset
+from signal_cascade_pytorch.bootstrap import _emit_cli_compat_warnings
 from signal_cascade_pytorch.domain.entities import (
     PredictionResult,
     STATE_FEATURE_NAMES,
@@ -105,7 +106,9 @@ class PolicyAndTrainingTests(unittest.TestCase):
         )
 
         self.assertEqual(decision["policy_horizon"], 3)
-        self.assertGreater(float(decision["selection_score"]), 0.0)
+        self.assertGreater(float(decision["selected_policy_utility"]), 0.0)
+        self.assertNotIn("selection_score", decision)
+        self.assertGreater(float(decision["legacy_compatibility"]["selection_score"]), 0.0)
 
     def test_smooth_policy_distribution_returns_finite_outputs(self) -> None:
         config = TrainingConfig(horizons=(1, 3))
@@ -246,7 +249,7 @@ class PolicyAndTrainingTests(unittest.TestCase):
         )
         self.assertTrue(torch.allclose(outputs["state_vector"], reconstructed_state_vector))
 
-    def test_prediction_result_keeps_compatibility_properties(self) -> None:
+    def test_prediction_result_exposes_legacy_compatibility_view(self) -> None:
         prediction = PredictionResult(
             anchor_time="2026-03-24T00:00:00+00:00",
             current_close=100.0,
@@ -268,11 +271,13 @@ class PolicyAndTrainingTests(unittest.TestCase):
             regime_id="asia|low|trend",
         )
 
-        self.assertEqual(prediction.proposed_horizon, 3)
-        self.assertEqual(prediction.accepted_horizon, 3)
-        self.assertTrue(prediction.accepted_signal)
-        self.assertEqual(prediction.selection_probability, 0.8)
-        self.assertNotIn("proposed_horizon", asdict(prediction))
+        legacy = prediction.legacy_compatibility
+
+        self.assertEqual(legacy["proposed_horizon"], 3)
+        self.assertEqual(legacy["accepted_horizon"], 3)
+        self.assertTrue(legacy["accepted_signal"])
+        self.assertEqual(legacy["selection_probability"], 0.8)
+        self.assertNotIn("legacy_compatibility", asdict(prediction))
 
     def test_export_diagnostics_writes_new_schema_summary(self) -> None:
         config = TrainingConfig(horizons=(1,))
@@ -338,6 +343,23 @@ class PolicyAndTrainingTests(unittest.TestCase):
         )
 
         self.assertEqual(args.selection_threshold_mode, "none")
+
+    def test_cli_compat_warnings_emit_for_deprecated_options(self) -> None:
+        parser = build_parser()
+        args = parser.parse_args(
+            [
+                "export-diagnostics",
+                "--selection-threshold-mode",
+                "replay",
+                "--selection-score-source",
+                "selector_probability",
+            ]
+        )
+
+        with patch("builtins.print") as print_mock:
+            _emit_cli_compat_warnings(args)
+
+        self.assertEqual(print_mock.call_count, 2)
 
     def test_tune_latest_dataset_accepts_tunable_overrides(self) -> None:
         validation_metrics = {
@@ -421,11 +443,109 @@ class PolicyAndTrainingTests(unittest.TestCase):
                 )
 
             self.assertEqual(manifest["best_candidate"]["epochs"], 6)
+            self.assertEqual(manifest["optimization_gate"]["status"], "passed")
+            self.assertIsNotNone(manifest["accepted_candidate"])
+            self.assertTrue(manifest["current_updated"])
             saved_config = json.loads(
                 (artifact_root / "current" / "config.json").read_text(encoding="utf-8")
             )
             self.assertEqual(saved_config["epochs"], 6)
             self.assertEqual(saved_config["horizons"], [1, 3])
+
+    def test_tune_latest_dataset_keeps_current_when_optimization_gate_fails(self) -> None:
+        validation_metrics = {
+            "project_value_score": 0.1,
+            "utility_score": 0.05,
+            "average_log_wealth": -0.01,
+            "realized_pnl_per_anchor": -0.02,
+            "cvar_tail_loss": 0.2,
+            "max_drawdown": 0.3,
+            "no_trade_band_hit_rate": 0.9,
+            "mu_calibration": 0.02,
+            "sigma_calibration": 0.03,
+            "directional_accuracy": 0.4,
+        }
+        summary = {
+            "best_validation_loss": 1.2,
+            "validation_metrics": validation_metrics,
+        }
+        prediction = PredictionResult(
+            anchor_time="2026-03-24T00:00:00+00:00",
+            current_close=100.0,
+            policy_horizon=1,
+            executed_horizon=None,
+            previous_position=0.0,
+            position=0.0,
+            trade_delta=0.0,
+            no_trade_band_hit=True,
+            tradeability_gate=0.4,
+            shape_entropy=0.3,
+            policy_score=0.0,
+            expected_log_returns={"1": -0.01, "3": -0.02},
+            predicted_closes={"1": 99.0, "3": 98.0},
+            uncertainties={"1": 0.02, "3": 0.03},
+            horizon_utilities={"1": -0.01, "3": -0.02},
+            horizon_positions={"1": 0.0, "3": 0.0},
+            shape_probabilities={"0": 0.4, "1": 0.6},
+            regime_id="asia|low|trend",
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir) / "artifact_root"
+            artifact_root.mkdir()
+            current_dir = artifact_root / "current"
+            current_dir.mkdir()
+            (current_dir / "marker.txt").write_text("keep", encoding="utf-8")
+            csv_path = artifact_root / "latest.csv"
+            csv_path.write_text("timestamp,open,high,low,close,volume\n", encoding="utf-8")
+
+            with patch(
+                "signal_cascade_pytorch.application.tuning_service.CsvMarketDataSource.load_bars",
+                return_value=["bar"],
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.build_training_examples_from_bars",
+                return_value=[object()],
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service._build_latest_example",
+                return_value=object(),
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.train_model",
+                return_value=(object(), summary),
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.predict_from_example",
+                return_value=prediction,
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.generate_research_report",
+                return_value=None,
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service._build_candidate_parameters",
+                return_value=[
+                    {
+                        "epochs": 6,
+                        "batch_size": 16,
+                        "learning_rate": 8e-4,
+                        "hidden_dim": 48,
+                        "dropout": 0.1,
+                        "weight_decay": 1e-4,
+                    }
+                ],
+            ):
+                manifest = tune_latest_dataset(
+                    csv_path=csv_path,
+                    artifact_root=artifact_root,
+                    config_overrides={"epochs": 6, "horizons": (1, 3)},
+                )
+
+            self.assertEqual(manifest["optimization_gate"]["status"], "failed")
+            self.assertIsNone(manifest["accepted_candidate"])
+            self.assertFalse(manifest["current_updated"])
+            self.assertTrue(manifest["interrupted_tuning"])
+            self.assertTrue((current_dir / "marker.txt").exists())
+            self.assertFalse((artifact_root / "best_params.json").exists())
+            session_manifest = json.loads(
+                Path(manifest["manifest_path"]).read_text(encoding="utf-8")
+            )
+            self.assertEqual(session_manifest["optimization_gate"]["status"], "failed")
 
     def test_train_model_summary_marks_profit_objective_as_primary(self) -> None:
         examples = [_example(returns_target=(0.01, 0.02)) for _ in range(4)]

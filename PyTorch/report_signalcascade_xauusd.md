@@ -1,43 +1,43 @@
 # SignalCascade Research Report
 
-- Generated (JST): `2026-04-06T01:53:32.605024+09:00`
+- Generated (JST): `2026-04-06T05:35:59.996778+09:00`
 - Policy mode: `shape_aware_profit_maximization`
 
 ## Artifact
 - kind: `training_run`
-- artifact id: `a8421e752a1cde28f9622d39e21e2f65010870a08d6d56ddebad06406a119393`
+- artifact id: `3d3da091d771ef7433fde1cb101d322987fab6ef4a5e5c8cc29a63f41844706d`
 - source kind / path: `csv` / `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/current/data_snapshot.csv`
 - config origin: `explicit_v2`
-- git head / dirty: `88c46878eaef49b5ad2ad402ce9bba28abf17251` / `True`
-- git tree sha: `a8149ff65be671aea41cb03243b40f9bfca5b718`
+- git head / dirty: `d8ea7668f3e8f9adbd741cf315be3b28c4547df6` / `True`
+- git tree sha: `07361b19559b65251dd30c713ee6084dae7abd6f`
 - data snapshot sha256: `b851b48d449a5017`
 - sub-artifact lineage: `analysis.json:regenerated, config.json:generated, data_snapshot.csv:generated, forecast_summary.json:generated, manifest.json:generated, metrics.json:generated, prediction.json:generated, research_report.md:regenerated, source.json:generated`
 
 ## Dataset
-- sample_count: `119`
-- effective_sample_count / purged_samples: `89` / `30`
-- train / validation: `66` / `23`
+- sample_count: `181`
+- effective_sample_count / purged_samples: `151` / `30`
+- train / validation: `115` / `36`
 - source_rows_original / used: `2886` / `2886`
 
 ## Training
-- best_validation_loss: `-0.355344`
-- best_epoch: `3`
-- epochs / warmup_epochs: `6` / `2`
+- best_validation_loss: `-0.356716`
+- best_epoch: `5`
+- epochs / warmup_epochs: `8` / `2`
 - shape_classes / state_dim: `6` / `24`
 
 ## Validation
-- average_log_wealth: `0.014923`
-- realized_pnl_per_anchor: `0.015250`
-- cvar_tail_loss: `0.020756`
-- max_drawdown: `0.053173`
+- average_log_wealth: `0.006312`
+- realized_pnl_per_anchor: `0.006654`
+- cvar_tail_loss: `0.036532`
+- max_drawdown: `0.080585`
 - no_trade_band_hit_rate: `0.000000`
-- exact_smooth_horizon_agreement / no_trade_agreement: `0.782609` / `1.000000`
-- exact_smooth_position_mae / utility_regret: `0.490120` / `0.012436`
-- shape_gate_usage: `0.514300`
-- expert_entropy: `0.120315`
-- mu_calibration / sigma_calibration: `0.173035` / `0.111195`
+- exact_smooth_horizon_agreement / no_trade_agreement: `0.666667` / `1.000000`
+- exact_smooth_position_mae / utility_regret: `0.672176` / `0.011478`
+- shape_gate_usage: `0.524924`
+- expert_entropy: `0.193249`
+- mu_calibration / sigma_calibration: `0.112999` / `0.044620`
 - log_wealth_clamp_hit_rate / state_reset_mode: `0.000000` / `carry_on`
-- project_value_score / utility_score: `0.603435` / `0.743359`
+- project_value_score / utility_score: `0.515672` / `0.635933`
 
 ## Evaluation
 - carry_on average_log_wealth: `0.000000`
@@ -52,17 +52,17 @@
 ## Forecast
 - anchor_time_utc / jst: `2026-04-03T00:00:00+00:00` / `2026-04-03T09:00:00+09:00`
 - anchor_close: `4675.8050`
-- policy_horizon / executed_horizon: `6` / `6`
-- previous_position / position / trade_delta: `0.0000` / `0.7095` / `0.7095`
+- policy_horizon / executed_horizon: `18` / `18`
+- previous_position / position / trade_delta: `0.0000` / `-1.0000` / `-1.0000`
 - no_trade_band_hit: `False`
-- tradeability_gate / shape_entropy / policy_score: `0.5114` / `0.6856` / `0.0207`
-- h=1: expected_log_return=0.1160, expected_return_pct=0.1230, predicted_close=5250.9849, uncertainty=0.1995
-- h=2: expected_log_return=0.0318, expected_return_pct=0.0323, predicted_close=4826.8368, uncertainty=0.1943
-- h=3: expected_log_return=0.0346, expected_return_pct=0.0352, predicted_close=4840.5411, uncertainty=0.1936
-- h=6: expected_log_return=0.1171, expected_return_pct=0.1242, predicted_close=5256.4693, uncertainty=0.1656
-- h=12: expected_log_return=0.0380, expected_return_pct=0.0387, predicted_close=4856.7079, uncertainty=0.2034
-- h=18: expected_log_return=0.0351, expected_return_pct=0.0357, predicted_close=4842.6370, uncertainty=0.1912
-- h=30: expected_log_return=0.0294, expected_return_pct=0.0298, predicted_close=4815.1948, uncertainty=0.2168
+- g_t / shape_entropy / selected_policy_utility: `0.5246` / `0.2881` / `0.0850`
+- h=1: mu_t=-0.1014, expected_return_pct=-0.0964, predicted_close=4224.9679, sigma_t=0.1033
+- h=2: mu_t=-0.0720, expected_return_pct=-0.0695, predicted_close=4350.8970, sigma_t=0.0804
+- h=3: mu_t=0.0104, expected_return_pct=0.0105, predicted_close=4724.8028, sigma_t=0.0910
+- h=6: mu_t=-0.0869, expected_return_pct=-0.0832, predicted_close=4286.6187, sigma_t=0.0815
+- h=12: mu_t=0.0903, expected_return_pct=0.0945, predicted_close=5117.5921, sigma_t=0.0687
+- h=18: mu_t=-0.2259, expected_return_pct=-0.2022, predicted_close=3730.3145, sigma_t=0.1436
+- h=30: mu_t=-0.0114, expected_return_pct=-0.0113, predicted_close=4622.7788, sigma_t=0.0778
 
 ## Assessment
-- 新 spec の主経路は threshold policy ではなく `shape -> return distribution -> q_t*` です。 validation では average_log_wealth=0.0149, realized_pnl_per_anchor=0.0153, cvar_tail_loss=0.0208, no_trade_band_hit_rate=0.0000。 latest policy_horizon=6, position=0.7095, tradeability_gate=0.5114。
+- 新 spec の主経路は threshold policy ではなく `shape -> return distribution -> q_t*` です。 validation では average_log_wealth=0.0063, realized_pnl_per_anchor=0.0067, cvar_tail_loss=0.0365, no_trade_band_hit_rate=0.0000。 latest policy_horizon=18, q_t=-1.0000, g_t=0.5246, selected_policy_utility=0.0850。

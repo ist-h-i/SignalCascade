@@ -52,11 +52,30 @@ if (anchorIndex < 0) {
 }
 
 const anchorBar = bars4h[anchorIndex]
-const horizons = Object.keys(prediction.expected_log_returns ?? {})
+const meanByHorizon = prediction.mu_t ?? prediction.expected_log_returns ?? {}
+const sigmaByHorizon = prediction.sigma_t ?? prediction.uncertainties ?? {}
+const sigmaSqByHorizon = prediction.sigma_t_sq ?? {}
+const predictedCloseByHorizon =
+  prediction.median_predicted_close_by_horizon ??
+  prediction.median_predicted_closes ??
+  prediction.predicted_closes ??
+  {}
+const selectedPolicyUtility = prediction.selected_policy_utility ?? prediction.policy_score ?? 0
+const gT = prediction.g_t ?? prediction.tradeability_gate ?? 0
+const horizons = Object.keys(meanByHorizon)
   .map((value) => Number(value))
   .filter((value) => Number.isFinite(value))
   .sort((left, right) => left - right)
-const horizonRows = buildHorizonRows({ prediction, horizons, bars4h, anchorIndex, anchorClose: anchorBar.close })
+const horizonRows = buildHorizonRows({
+  horizons,
+  bars4h,
+  anchorIndex,
+  anchorClose: anchorBar.close,
+  meanByHorizon,
+  sigmaByHorizon,
+  sigmaSqByHorizon,
+  predictedCloseByHorizon,
+})
 const chartRows = buildChartRows({ rawRows: csvRows, anchorTime, anchorBar, horizonRows, bars4h, anchorIndex })
 const selectedHorizon =
   prediction.executed_horizon ??
@@ -133,8 +152,14 @@ const payload = {
     anchorTime: toIso(anchorBar.ts),
     anchorClose: anchorBar.close,
     selectedHorizon,
+    executedHorizon: prediction.executed_horizon ?? null,
     selectedHours: selectedHorizon * 4,
+    previousPosition: prediction.q_t_prev ?? prediction.previous_position ?? 0,
     position: prediction.position,
+    tradeDelta: prediction.q_t_trade_delta ?? prediction.trade_delta ?? 0,
+    noTradeBandHit: prediction.no_trade_band_hit === true,
+    gT,
+    selectedPolicyUtility,
     overlayAction,
     policyStatus: prediction.no_trade_band_hit ? 'no-trade' : 'active',
     stateResetMode: operatingPoint.stateResetMode,
@@ -624,11 +649,27 @@ function mergeBucket(rows, bucketEnd) {
   }
 }
 
-function buildHorizonRows({ prediction, horizons, bars4h, anchorIndex, anchorClose }) {
-  const predictedCloses = prediction.median_predicted_closes ?? prediction.predicted_closes ?? {}
+function buildHorizonRows({
+  horizons,
+  bars4h,
+  anchorIndex,
+  anchorClose,
+  meanByHorizon,
+  sigmaByHorizon,
+  sigmaSqByHorizon,
+  predictedCloseByHorizon,
+}) {
   return horizons.map((horizon) => {
-    const predictedClose = predictedCloses[String(horizon)]
-    const uncertainty = prediction.uncertainties[String(horizon)]
+    const muT = meanByHorizon[String(horizon)] ?? null
+    const sigmaTSq =
+      sigmaSqByHorizon[String(horizon)] ??
+      (Number.isFinite(sigmaByHorizon[String(horizon)])
+        ? sigmaByHorizon[String(horizon)] * sigmaByHorizon[String(horizon)]
+        : null)
+    const uncertainty = sigmaByHorizon[String(horizon)] ?? (sigmaTSq !== null ? Math.sqrt(sigmaTSq) : 0)
+    const predictedClose =
+      predictedCloseByHorizon[String(horizon)] ??
+      (muT !== null ? anchorClose * Math.exp(muT) : anchorClose)
     const lowerClose = predictedClose * Math.exp(-uncertainty)
     const upperClose = predictedClose * Math.exp(uncertainty)
     const actualBar = bars4h[anchorIndex + horizon] ?? null
@@ -637,6 +678,9 @@ function buildHorizonRows({ prediction, horizons, bars4h, anchorIndex, anchorClo
     return {
       horizon,
       hours: horizon * 4,
+      muT,
+      sigmaT: uncertainty,
+      sigmaTSq,
       predictedClose,
       lowerClose,
       upperClose,
@@ -807,6 +851,7 @@ function interpolateForecast({ anchorBar, horizonRows, bars4h, anchorIndex, hist
 
 function buildNarrative({ prediction, horizonRows }) {
   const selected = horizonRows.find((row) => row.horizon === (prediction.policy_horizon ?? prediction.selected_horizon)) ?? horizonRows[0]
+  const selectedPolicyUtility = prediction.selected_policy_utility ?? prediction.policy_score ?? 0
   const directionalWord = prediction.no_trade_band_hit === true
     ? 'ノートレードです。'
     : prediction.position < -0.25
@@ -839,8 +884,8 @@ function buildNarrative({ prediction, horizonRows }) {
       `変化率は ${selected.expectedReturnPct.toFixed(2)}%、不確実性は ${selected.uncertainty.toFixed(4)} です。`,
       `予測幅は ${Math.round(selected.lowerClose).toLocaleString('ja-JP')} - ${Math.round(selected.upperClose).toLocaleString('ja-JP')} です。`,
       prediction.no_trade_band_hit === true
-        ? `no-trade band に入りました。直前ポジションは ${Number(prediction.previous_position ?? 0).toFixed(2)} です。`
-        : `policy score は ${Number(prediction.policy_score ?? 0).toFixed(3)}、強さは ${Math.abs(prediction.position).toFixed(2)} です。`,
+        ? `no-trade band に入りました。直前ポジションは ${Number(prediction.q_t_prev ?? prediction.previous_position ?? 0).toFixed(2)} です。`
+        : `selected policy utility は ${Number(selectedPolicyUtility).toFixed(3)}、強さは ${Math.abs(prediction.position).toFixed(2)} です。`,
     ],
     segments,
   }

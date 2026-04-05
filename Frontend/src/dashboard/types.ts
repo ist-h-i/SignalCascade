@@ -1,6 +1,9 @@
 export type HorizonRow = {
   horizon: number
   hours: number
+  muT: number | null
+  sigmaT: number
+  sigmaTSq: number | null
   predictedClose: number
   lowerClose: number
   upperClose: number
@@ -127,8 +130,14 @@ export type DashboardData = {
     anchorTime: string
     anchorClose: number
     selectedHorizon: number
+    executedHorizon: number | null
     selectedHours: number
+    previousPosition: number
     position: number
+    tradeDelta: number
+    noTradeBandHit: boolean
+    gT: number
+    selectedPolicyUtility: number
     overlayAction: string
     policyStatus: string
     stateResetMode: string | null
