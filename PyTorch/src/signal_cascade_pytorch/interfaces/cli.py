@@ -2,7 +2,13 @@ from __future__ import annotations
 
 import argparse
 
-from ..bootstrap import export_diagnostics_command, predict_command, train_command, tune_latest_command
+from ..bootstrap import (
+    export_diagnostics_command,
+    predict_command,
+    promote_current_command,
+    train_command,
+    tune_latest_command,
+)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -185,6 +191,18 @@ def build_parser() -> argparse.ArgumentParser:
     tune_parser.add_argument("--q-max", type=float, default=None)
     tune_parser.add_argument("--seed", type=int, default=7)
     tune_parser.set_defaults(handler=tune_latest_command)
+
+    promote_parser = subparsers.add_parser(
+        "promote-current",
+        help="Promote a training_run artifact to the local current alias with whole-directory replacement.",
+    )
+    promote_parser.add_argument("--artifact-root", default="artifacts/gold_xauusd_m30")
+    promote_parser.add_argument(
+        "--source-artifact-dir",
+        required=True,
+        help="Path to the accepted training_run artifact directory to promote to current.",
+    )
+    promote_parser.set_defaults(handler=promote_current_command)
 
     return parser
 

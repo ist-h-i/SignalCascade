@@ -14,6 +14,7 @@ from signal_cascade_pytorch.application.artifact_provenance import (
 from signal_cascade_pytorch.bootstrap import (
     _build_artifact_entrypoints,
     _build_artifact_manifest,
+    _promote_training_run_to_current,
     _resolve_diagnostics_output_dir,
 )
 from signal_cascade_pytorch.application.config import TrainingConfig
@@ -363,6 +364,57 @@ class ArtifactSchemaTests(unittest.TestCase):
 
             with self.assertRaises(ValueError):
                 _resolve_diagnostics_output_dir(artifact_dir, str(artifact_dir))
+
+    def test_promote_training_run_to_current_replaces_current_without_mutating_source(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            source_dir = artifact_root / "reruns" / "accepted_parent"
+            current_dir = artifact_root / "current"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            current_dir.mkdir(parents=True, exist_ok=True)
+
+            (source_dir / "source.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_kind": "training_run",
+                        "artifact_id": "artifact-123",
+                        "git": {"git_commit_sha": "1497a93", "git_dirty": False},
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (source_dir / "config.json").write_text("{}", encoding="utf-8")
+            (source_dir / "marker.txt").write_text("accepted", encoding="utf-8")
+            (current_dir / "source.json").write_text(
+                json.dumps({"artifact_kind": "legacy"}),
+                encoding="utf-8",
+            )
+            (current_dir / "old-only.txt").write_text("legacy", encoding="utf-8")
+
+            promoted_dir = _promote_training_run_to_current(artifact_root, source_dir)
+
+            self.assertEqual(promoted_dir.resolve(), current_dir.resolve())
+            self.assertTrue((current_dir / "marker.txt").exists())
+            self.assertFalse((current_dir / "old-only.txt").exists())
+            promoted_source = json.loads((current_dir / "source.json").read_text(encoding="utf-8"))
+            self.assertEqual(promoted_source["artifact_kind"], "training_run")
+            self.assertEqual(promoted_source["artifact_id"], "artifact-123")
+            self.assertTrue((source_dir / "marker.txt").exists())
+            source_source = json.loads((source_dir / "source.json").read_text(encoding="utf-8"))
+            self.assertEqual(source_source["artifact_id"], "artifact-123")
+
+    def test_promote_training_run_to_current_rejects_non_training_source(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            source_dir = artifact_root / "reruns" / "overlay"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            (source_dir / "source.json").write_text(
+                json.dumps({"artifact_kind": "diagnostic_replay_overlay"}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError):
+                _promote_training_run_to_current(artifact_root, source_dir)
 
     def test_prediction_serializer_adds_schema_and_median_semantics(self) -> None:
         payload = serialize_prediction_result(_prediction())

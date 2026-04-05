@@ -43,6 +43,17 @@ export default defineConfig([
 ])
 ```
 
+## SignalCascade dashboard
+
+```bash
+cd /Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend
+npm run dev:dashboard
+```
+
+`dev:dashboard` は既存の `PyTorch/artifacts/gold_xauusd_m30/current` を使って `public/dashboard-data.json` を再生成し、そのまま `http://127.0.0.1:5173/` を起動します。
+
+フルの最新学習まで含めて同期したい場合は、別途 `npm run sync:data` を実行してください。
+
 You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
 
 ```js

@@ -3,6 +3,9 @@ from __future__ import annotations
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
+import shutil
+from tempfile import mkdtemp
+from uuid import uuid4
 
 from .application.artifact_provenance import (
     build_artifact_source_payload,
@@ -263,6 +266,18 @@ def tune_latest_command(args) -> int:
     return 0
 
 
+def promote_current_command(args) -> int:
+    artifact_root = Path(args.artifact_root).expanduser().resolve()
+    source_artifact_dir = Path(args.source_artifact_dir).expanduser().resolve()
+    current_dir = _promote_training_run_to_current(artifact_root, source_artifact_dir)
+    source_payload = load_json(current_dir / "source.json")
+    print(f"current run dir: {current_dir}")
+    print(f"artifact kind: {source_payload.get('artifact_kind')}")
+    print(f"artifact id: {source_payload.get('artifact_id')}")
+    print(f"git commit sha: {source_payload.get('git', {}).get('git_commit_sha')}")
+    return 0
+
+
 def _build_model_from_example(example, config: TrainingConfig) -> SignalCascadeModel:
     return SignalCascadeModel(
         feature_dim=len(example.main_sequences["4h"][0]),
@@ -408,6 +423,53 @@ def _resolve_diagnostics_output_dir(
             "diagnostic replay overlay must not overwrite the source artifact directory"
         )
     return resolved_output_dir
+
+
+def _promote_training_run_to_current(
+    artifact_root: Path,
+    source_artifact_dir: Path,
+) -> Path:
+    resolved_artifact_root = artifact_root.expanduser().resolve()
+    resolved_source_dir = source_artifact_dir.expanduser().resolve()
+    current_dir = resolved_artifact_root / "current"
+
+    if not resolved_artifact_root.exists():
+        raise FileNotFoundError(f"artifact root was not found: {resolved_artifact_root}")
+    if not resolved_source_dir.exists():
+        raise FileNotFoundError(f"source artifact dir was not found: {resolved_source_dir}")
+    if not resolved_source_dir.is_dir():
+        raise ValueError(f"source artifact dir must be a directory: {resolved_source_dir}")
+    if resolved_source_dir == current_dir:
+        raise ValueError("current alias must be promoted from a distinct source artifact directory")
+
+    source_payload_path = resolved_source_dir / "source.json"
+    if not source_payload_path.exists():
+        raise FileNotFoundError(f"source artifact is missing source.json: {source_payload_path}")
+    source_payload = load_json(source_payload_path)
+    if source_payload.get("artifact_kind") != "training_run":
+        raise ValueError("current alias can only be promoted from a training_run artifact")
+
+    stage_dir = resolved_artifact_root / f".current_promote_stage_{uuid4().hex}"
+    backup_root = Path(mkdtemp(prefix="signalcascade-current-backup-")).resolve()
+    backup_dir = backup_root / "current_legacy"
+
+    try:
+        shutil.copytree(resolved_source_dir, stage_dir)
+        if current_dir.exists():
+            shutil.move(str(current_dir), str(backup_dir))
+        shutil.move(str(stage_dir), str(current_dir))
+    except Exception:
+        if stage_dir.exists():
+            shutil.rmtree(stage_dir, ignore_errors=True)
+        if backup_dir.exists() and not current_dir.exists():
+            shutil.move(str(backup_dir), str(current_dir))
+        shutil.rmtree(backup_root, ignore_errors=True)
+        raise
+
+    if backup_dir.exists():
+        shutil.rmtree(backup_dir, ignore_errors=True)
+    shutil.rmtree(backup_root, ignore_errors=True)
+    return current_dir
 
 
 def _build_artifact_entrypoints(

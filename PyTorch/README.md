@@ -51,6 +51,32 @@ source .venv/bin/activate
 signal-cascade predict --output-dir artifacts/demo
 ```
 
+## Local `current` promotion
+
+accepted な `training_run` を local alias として `artifacts/gold_xauusd_m30/current` に昇格させるときは、partial overwrite をせず whole-directory replacement で更新します。
+
+```bash
+cd /Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch
+source .venv/bin/activate
+signal-cascade promote-current \
+  --artifact-root artifacts/gold_xauusd_m30 \
+  --source-artifact-dir artifacts/gold_xauusd_m30/reruns/v2_parent_20260406T002338_JST
+```
+
+この command の運用上の前提は次です。
+
+- `current` は新しい artifact ではなく accepted artifact の local alias view
+- `current` は whole-directory replacement でのみ更新する
+- `current` 配下を in-place mutate しない
+- `artifacts/` は Git 非追跡なので、shared / upstream に渡すのは artifact bytes ではなく code / docs / exported payload
+
+dashboard の再生成は promotion 後に行います。
+
+```bash
+cd /Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend
+npm run sync:data:fast
+```
+
 ## CSV 入力
 
 CSV を使う場合は 30 分足相当のデータを用意してください。

@@ -153,7 +153,7 @@ const payload = {
     convergenceGain,
     generalizationGap,
     sourceRows: metrics.source_rows_used ?? csvRows.length,
-    modelDirectory: currentRunDir,
+    modelDirectory: toRepoRelativePath(currentRunDir),
     tuningSessionId: manifest?.session_id ?? null,
     bestParams: manifest?.best_candidate
       ? {
@@ -302,11 +302,24 @@ function resolveArtifactProvenance(sourceMeta) {
     parentArtifactId: isVersionedArtifact ? sourceMeta?.parent_artifact_id ?? null : null,
     dataSnapshotSha256: isVersionedArtifact ? sourceMeta?.data_snapshot_sha256 ?? null : null,
     configOrigin: isVersionedArtifact ? sourceMeta?.config_origin ?? null : null,
-    sourcePath: isVersionedArtifact ? sourceMeta?.path ?? null : null,
-    sourceOriginPath: isVersionedArtifact ? sourceMeta?.source_origin_path ?? null : null,
+    sourcePath: isVersionedArtifact ? toRepoRelativePath(sourceMeta?.path) : null,
+    sourceOriginPath: isVersionedArtifact ? toRepoRelativePath(sourceMeta?.source_origin_path) : null,
     gitCommitSha: isVersionedArtifact ? git.git_commit_sha ?? git.commit_sha ?? git.head ?? null : null,
     gitDirty: isVersionedArtifact ? git.git_dirty ?? git.dirty ?? null : null,
   }
+}
+
+function toRepoRelativePath(value) {
+  if (!value || typeof value !== 'string') {
+    return null
+  }
+
+  const resolved = path.resolve(value)
+  const relative = path.relative(repoRoot, resolved)
+  if (!relative || relative.startsWith('..') || path.isAbsolute(relative)) {
+    return value
+  }
+  return relative.split(path.sep).join('/')
 }
 
 function refreshLatestCsv(targetDateJst) {

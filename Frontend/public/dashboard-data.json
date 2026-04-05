@@ -1,77 +1,79 @@
 {
-  "schemaVersion": 4,
-  "generatedAt": "2026-03-27T09:55:05.081Z",
+  "schemaVersion": 5,
+  "generatedAt": "2026-04-05T16:22:14.080Z",
   "instrument": "金 / XAUUSD",
   "artifacts": {
     "metricsSchemaVersion": 4,
     "predictionSchemaVersion": 4,
-    "forecastSchemaVersion": 4
+    "forecastSchemaVersion": 4,
+    "sourceSchemaVersion": 2
   },
   "provenance": {
-    "rawRows": 2834,
-    "sourcePath": "/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/live/xauusd_m30_latest.csv",
-    "start": "2025-12-30T13:00:00.000Z",
+    "rawRows": 2908,
+    "artifactKind": "training_run",
+    "artifactId": "4aebf56ac65444244b7d662d8df003641ed6de4858687a62ce3365a593ef28c9",
+    "parentArtifactId": null,
+    "dataSnapshotSha256": "b5d7a5dd5dde3780483e738016dffe77ed6759a7818fa2e3259a22f6a2b76dd3",
+    "configOrigin": "explicit_v2",
+    "sourcePath": "PyTorch/artifacts/gold_xauusd_m30/reruns/v2_parent_20260406T002338_JST/data_snapshot.csv",
+    "sourceOriginPath": "PyTorch/artifacts/gold_xauusd_m30/frozen_snapshots/xauusd_m30_20260405T185835_JST.csv",
+    "gitCommitSha": "1497a9316538c893bb42b03be57164d5cd15d185",
+    "gitDirty": false,
+    "start": "2025-12-28T23:00:00.000Z",
     "end": "2026-03-27T07:30:00.000Z",
-    "manifestGeneratedAt": "2026-03-27T04:18:04.395085+00:00",
-    "diagnosticsGeneratedAt": "2026-03-27T06:27:55.599148+00:00",
+    "manifestGeneratedAt": "2026-04-05T15:24:06.787149+00:00",
+    "diagnosticsGeneratedAt": "2026-04-05T15:24:55.060375+00:00",
     "forecastGeneratedAt": null,
-    "predictionAnchorTime": "2026-03-24T20:00:00+00:00",
+    "predictionAnchorTime": "2026-03-26T20:00:00+00:00",
     "freshness": {
-      "dashboardGeneratedAt": "2026-03-27T09:55:05.081Z",
-      "manifestGeneratedAt": "2026-03-27T04:18:04.395085+00:00",
-      "diagnosticsGeneratedAt": "2026-03-27T06:27:55.599148+00:00",
+      "dashboardGeneratedAt": "2026-04-05T16:22:14.080Z",
+      "manifestGeneratedAt": "2026-04-05T15:24:06.787149+00:00",
+      "diagnosticsGeneratedAt": "2026-04-05T15:24:55.060375+00:00",
       "forecastGeneratedAt": null,
-      "predictionAnchorTime": "2026-03-24T20:00:00+00:00",
-      "artifactLagHours": 61.92,
+      "predictionAnchorTime": "2026-03-26T20:00:00+00:00",
+      "artifactLagHours": 236.37,
       "forecastAgeHours": null,
-      "diagnosticsAgeHours": 3.45,
-      "predictionLagHours": 61.92
+      "diagnosticsAgeHours": 0.96,
+      "predictionLagHours": 236.37
     }
   },
   "run": {
-    "anchorTime": "2026-03-24T20:00:00.000Z",
-    "anchorClose": 4455.425,
+    "anchorTime": "2026-03-26T20:00:00.000Z",
+    "anchorClose": 4404.005,
     "selectedHorizon": 1,
     "selectedHours": 4,
-    "position": 0.18051757675864127,
+    "position": 1,
     "overlayAction": "reduce",
     "policyStatus": "active",
     "stateResetMode": "carry_on",
     "costMultiplier": 1,
     "gammaMultiplier": 1,
     "minPolicySigma": 0.0001,
-    "interruptedTuning": true,
-    "runQuality": "degraded",
-    "trainSamples": 129,
-    "validationSamples": 32,
-    "sampleCount": 164,
-    "effectiveSampleCount": 161,
+    "interruptedTuning": false,
+    "runQuality": "stale",
+    "trainSamples": 141,
+    "validationSamples": 35,
+    "sampleCount": 179,
+    "effectiveSampleCount": 176,
     "purgedSamples": 3,
-    "bestValidationLoss": -0.392638826277107,
-    "bestEpoch": 6,
-    "convergenceGain": 0.18435578234493732,
-    "generalizationGap": -0.11153722483693629,
-    "sourceRows": 2834,
-    "modelDirectory": "/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/current",
-    "tuningSessionId": "20260327T041009Z",
-    "bestParams": {
-      "epochs": 6,
-      "batchSize": 16,
-      "learningRate": 0.0008,
-      "hiddenDim": 48,
-      "dropout": 0.1,
-      "weightDecay": 0.0001
-    }
+    "bestValidationLoss": -0.3835078205381121,
+    "bestEpoch": 5,
+    "convergenceGain": 0.19334665260144643,
+    "generalizationGap": -0.05190140607841354,
+    "sourceRows": 2908,
+    "modelDirectory": "PyTorch/artifacts/gold_xauusd_m30/current",
+    "tuningSessionId": null,
+    "bestParams": null
   },
   "chart": {
     "rows": [
       {
-        "ts": 1774265400000,
-        "label": "2026-03-23T11:30:00.000Z",
+        "ts": 1774438200000,
+        "label": "2026-03-25T11:30:00.000Z",
         "phase": "history",
-        "close": 4378.795,
-        "high": 4431.425,
-        "low": 4361.115,
+        "close": 4578.665,
+        "high": 4585.475,
+        "low": 4572.06,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -81,12 +83,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774267200000,
-        "label": "2026-03-23T12:00:00.000Z",
+        "ts": 1774440000000,
+        "label": "2026-03-25T12:00:00.000Z",
         "phase": "history",
-        "close": 4389.855,
-        "high": 4404.725,
-        "low": 4336.305,
+        "close": 4544.875,
+        "high": 4583.385,
+        "low": 4539.875,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -96,12 +98,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774269000000,
-        "label": "2026-03-23T12:30:00.000Z",
+        "ts": 1774441800000,
+        "label": "2026-03-25T12:30:00.000Z",
         "phase": "history",
-        "close": 4478.095,
-        "high": 4492.185,
-        "low": 4373.035,
+        "close": 4543.715,
+        "high": 4554.405,
+        "low": 4521.695,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -111,12 +113,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774270800000,
-        "label": "2026-03-23T13:00:00.000Z",
+        "ts": 1774443600000,
+        "label": "2026-03-25T13:00:00.000Z",
         "phase": "history",
-        "close": 4409.045,
-        "high": 4484.905,
-        "low": 4405.008,
+        "close": 4568.595,
+        "high": 4571.065,
+        "low": 4540.975,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -126,12 +128,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774272600000,
-        "label": "2026-03-23T13:30:00.000Z",
+        "ts": 1774445400000,
+        "label": "2026-03-25T13:30:00.000Z",
         "phase": "history",
-        "close": 4453.975,
-        "high": 4466.315,
-        "low": 4400.995,
+        "close": 4544.565,
+        "high": 4576.285,
+        "low": 4540.665,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -141,12 +143,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774274400000,
-        "label": "2026-03-23T14:00:00.000Z",
+        "ts": 1774447200000,
+        "label": "2026-03-25T14:00:00.000Z",
         "phase": "history",
-        "close": 4486.225,
-        "high": 4512.665,
-        "low": 4453.385,
+        "close": 4562.595,
+        "high": 4562.595,
+        "low": 4532.975,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -156,12 +158,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774276200000,
-        "label": "2026-03-23T14:30:00.000Z",
+        "ts": 1774449000000,
+        "label": "2026-03-25T14:30:00.000Z",
         "phase": "history",
-        "close": 4461.695,
-        "high": 4504.145,
-        "low": 4456.565,
+        "close": 4566.925,
+        "high": 4579.075,
+        "low": 4557.018,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -171,12 +173,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774278000000,
-        "label": "2026-03-23T15:00:00.000Z",
+        "ts": 1774450800000,
+        "label": "2026-03-25T15:00:00.000Z",
         "phase": "history",
-        "close": 4447.355,
-        "high": 4486.765,
-        "low": 4426.988,
+        "close": 4560.455,
+        "high": 4568.781,
+        "low": 4524.915,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -186,12 +188,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774279800000,
-        "label": "2026-03-23T15:30:00.000Z",
+        "ts": 1774452600000,
+        "label": "2026-03-25T15:30:00.000Z",
         "phase": "history",
-        "close": 4363.515,
-        "high": 4455.775,
-        "low": 4350.798,
+        "close": 4558.725,
+        "high": 4565.675,
+        "low": 4553.525,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -201,12 +203,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774281600000,
-        "label": "2026-03-23T16:00:00.000Z",
+        "ts": 1774454400000,
+        "label": "2026-03-25T16:00:00.000Z",
         "phase": "history",
-        "close": 4354.458,
-        "high": 4389.885,
-        "low": 4352.058,
+        "close": 4555.485,
+        "high": 4564.78,
+        "low": 4544.758,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -216,12 +218,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774283400000,
-        "label": "2026-03-23T16:30:00.000Z",
+        "ts": 1774456200000,
+        "label": "2026-03-25T16:30:00.000Z",
         "phase": "history",
-        "close": 4375.325,
-        "high": 4391.505,
-        "low": 4353.258,
+        "close": 4555.055,
+        "high": 4560.685,
+        "low": 4549.605,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -231,12 +233,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774285200000,
-        "label": "2026-03-23T17:00:00.000Z",
+        "ts": 1774458000000,
+        "label": "2026-03-25T17:00:00.000Z",
         "phase": "history",
-        "close": 4405.275,
-        "high": 4413.615,
-        "low": 4370.575,
+        "close": 4553.225,
+        "high": 4558.085,
+        "low": 4542.525,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -246,12 +248,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774287000000,
-        "label": "2026-03-23T17:30:00.000Z",
+        "ts": 1774459800000,
+        "label": "2026-03-25T17:30:00.000Z",
         "phase": "history",
-        "close": 4425.965,
-        "high": 4438.835,
-        "low": 4403.875,
+        "close": 4550.365,
+        "high": 4563.645,
+        "low": 4545.595,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -261,12 +263,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774288800000,
-        "label": "2026-03-23T18:00:00.000Z",
+        "ts": 1774461600000,
+        "label": "2026-03-25T18:00:00.000Z",
         "phase": "history",
-        "close": 4425.895,
-        "high": 4430.515,
-        "low": 4402.005,
+        "close": 4551.578,
+        "high": 4568.695,
+        "low": 4545.255,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -276,12 +278,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774290600000,
-        "label": "2026-03-23T18:30:00.000Z",
+        "ts": 1774463400000,
+        "label": "2026-03-25T18:30:00.000Z",
         "phase": "history",
-        "close": 4448.785,
-        "high": 4466.895,
-        "low": 4425.365,
+        "close": 4537.965,
+        "high": 4557.525,
+        "low": 4530.665,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -291,12 +293,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774292400000,
-        "label": "2026-03-23T19:00:00.000Z",
+        "ts": 1774465200000,
+        "label": "2026-03-25T19:00:00.000Z",
         "phase": "history",
-        "close": 4410.445,
-        "high": 4450.325,
-        "low": 4392.885,
+        "close": 4513.105,
+        "high": 4539.445,
+        "low": 4486.508,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -306,12 +308,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774294200000,
-        "label": "2026-03-23T19:30:00.000Z",
+        "ts": 1774467000000,
+        "label": "2026-03-25T19:30:00.000Z",
         "phase": "history",
-        "close": 4398.025,
-        "high": 4427.425,
-        "low": 4396.825,
+        "close": 4530.835,
+        "high": 4533.675,
+        "low": 4506.155,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -321,12 +323,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774296000000,
-        "label": "2026-03-23T20:00:00.000Z",
+        "ts": 1774468800000,
+        "label": "2026-03-25T20:00:00.000Z",
         "phase": "history",
-        "close": 4406.965,
-        "high": 4412.975,
-        "low": 4382.575,
+        "close": 4523.585,
+        "high": 4541.755,
+        "low": 4522.155,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -336,12 +338,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774297800000,
-        "label": "2026-03-23T20:30:00.000Z",
+        "ts": 1774470600000,
+        "label": "2026-03-25T20:30:00.000Z",
         "phase": "history",
-        "close": 4405.895,
-        "high": 4412.635,
-        "low": 4395.655,
+        "close": 4505.325,
+        "high": 4524.765,
+        "low": 4494.585,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -351,12 +353,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774303200000,
-        "label": "2026-03-23T22:00:00.000Z",
+        "ts": 1774476000000,
+        "label": "2026-03-25T22:00:00.000Z",
         "phase": "history",
-        "close": 4413.835,
-        "high": 4419.598,
-        "low": 4359.348,
+        "close": 4511.465,
+        "high": 4531.535,
+        "low": 4505.098,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -366,12 +368,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774305000000,
-        "label": "2026-03-23T22:30:00.000Z",
+        "ts": 1774477800000,
+        "label": "2026-03-25T22:30:00.000Z",
         "phase": "history",
-        "close": 4426.338,
-        "high": 4431.065,
-        "low": 4397.975,
+        "close": 4517.058,
+        "high": 4534.525,
+        "low": 4507.725,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -381,12 +383,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774306800000,
-        "label": "2026-03-23T23:00:00.000Z",
+        "ts": 1774479600000,
+        "label": "2026-03-25T23:00:00.000Z",
         "phase": "history",
-        "close": 4441.525,
-        "high": 4448.005,
-        "low": 4422.798,
+        "close": 4505.165,
+        "high": 4517.518,
+        "low": 4496.655,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -396,12 +398,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774308600000,
-        "label": "2026-03-23T23:30:00.000Z",
+        "ts": 1774481400000,
+        "label": "2026-03-25T23:30:00.000Z",
         "phase": "history",
-        "close": 4440.915,
-        "high": 4446.075,
-        "low": 4421.705,
+        "close": 4497.875,
+        "high": 4510.785,
+        "low": 4488.575,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -411,12 +413,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774310400000,
-        "label": "2026-03-24T00:00:00.000Z",
+        "ts": 1774483200000,
+        "label": "2026-03-26T00:00:00.000Z",
         "phase": "history",
-        "close": 4377.705,
-        "high": 4446.435,
-        "low": 4367.828,
+        "close": 4524.945,
+        "high": 4535.235,
+        "low": 4497.798,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -426,12 +428,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774312200000,
-        "label": "2026-03-24T00:30:00.000Z",
+        "ts": 1774485000000,
+        "label": "2026-03-26T00:30:00.000Z",
         "phase": "history",
-        "close": 4364.035,
-        "high": 4387.045,
-        "low": 4330.695,
+        "close": 4534.938,
+        "high": 4538.875,
+        "low": 4524.335,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -441,12 +443,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774314000000,
-        "label": "2026-03-24T01:00:00.000Z",
+        "ts": 1774486800000,
+        "label": "2026-03-26T01:00:00.000Z",
         "phase": "history",
-        "close": 4354.365,
-        "high": 4373.895,
-        "low": 4327.825,
+        "close": 4534.235,
+        "high": 4544.275,
+        "low": 4526.478,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -456,12 +458,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774315800000,
-        "label": "2026-03-24T01:30:00.000Z",
+        "ts": 1774488600000,
+        "label": "2026-03-26T01:30:00.000Z",
         "phase": "history",
-        "close": 4321.765,
-        "high": 4368.225,
-        "low": 4307.555,
+        "close": 4534.995,
+        "high": 4537.418,
+        "low": 4522.215,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -471,12 +473,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774317600000,
-        "label": "2026-03-24T02:00:00.000Z",
+        "ts": 1774490400000,
+        "label": "2026-03-26T02:00:00.000Z",
         "phase": "history",
-        "close": 4351.575,
-        "high": 4353.395,
-        "low": 4305.565,
+        "close": 4527.955,
+        "high": 4535.468,
+        "low": 4524.458,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -486,12 +488,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774319400000,
-        "label": "2026-03-24T02:30:00.000Z",
+        "ts": 1774492200000,
+        "label": "2026-03-26T02:30:00.000Z",
         "phase": "history",
-        "close": 4365.725,
-        "high": 4378.965,
-        "low": 4344.165,
+        "close": 4508.465,
+        "high": 4530.225,
+        "low": 4505.535,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -501,12 +503,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774321200000,
-        "label": "2026-03-24T03:00:00.000Z",
+        "ts": 1774494000000,
+        "label": "2026-03-26T03:00:00.000Z",
         "phase": "history",
-        "close": 4364.365,
-        "high": 4367.905,
-        "low": 4349.835,
+        "close": 4506.295,
+        "high": 4513.455,
+        "low": 4499.635,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -516,12 +518,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774323000000,
-        "label": "2026-03-24T03:30:00.000Z",
+        "ts": 1774495800000,
+        "label": "2026-03-26T03:30:00.000Z",
         "phase": "history",
-        "close": 4347.045,
-        "high": 4364.465,
-        "low": 4334.835,
+        "close": 4516.425,
+        "high": 4518.555,
+        "low": 4506.145,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -531,12 +533,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774324800000,
-        "label": "2026-03-24T04:00:00.000Z",
+        "ts": 1774497600000,
+        "label": "2026-03-26T04:00:00.000Z",
         "phase": "history",
-        "close": 4339.485,
-        "high": 4357.005,
-        "low": 4326.245,
+        "close": 4520.525,
+        "high": 4521.755,
+        "low": 4511.315,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -546,12 +548,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774326600000,
-        "label": "2026-03-24T04:30:00.000Z",
+        "ts": 1774499400000,
+        "label": "2026-03-26T04:30:00.000Z",
         "phase": "history",
-        "close": 4333.115,
-        "high": 4349.015,
-        "low": 4331.775,
+        "close": 4520.225,
+        "high": 4523.985,
+        "low": 4516.275,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -561,12 +563,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774328400000,
-        "label": "2026-03-24T05:00:00.000Z",
+        "ts": 1774501200000,
+        "label": "2026-03-26T05:00:00.000Z",
         "phase": "history",
-        "close": 4334.915,
-        "high": 4346.285,
-        "low": 4319.515,
+        "close": 4493.345,
+        "high": 4522.095,
+        "low": 4488.945,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -576,12 +578,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774330200000,
-        "label": "2026-03-24T05:30:00.000Z",
+        "ts": 1774503000000,
+        "label": "2026-03-26T05:30:00.000Z",
         "phase": "history",
-        "close": 4346.945,
-        "high": 4373.595,
-        "low": 4320.645,
+        "close": 4438.715,
+        "high": 4495.455,
+        "low": 4438.585,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -591,12 +593,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774332000000,
-        "label": "2026-03-24T06:00:00.000Z",
+        "ts": 1774504800000,
+        "label": "2026-03-26T06:00:00.000Z",
         "phase": "history",
-        "close": 4386.595,
-        "high": 4396.455,
-        "low": 4342.635,
+        "close": 4440.065,
+        "high": 4450.335,
+        "low": 4415.505,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -606,12 +608,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774333800000,
-        "label": "2026-03-24T06:30:00.000Z",
+        "ts": 1774506600000,
+        "label": "2026-03-26T06:30:00.000Z",
         "phase": "history",
-        "close": 4401.855,
-        "high": 4404.765,
-        "low": 4372.525,
+        "close": 4456.175,
+        "high": 4459.225,
+        "low": 4430.365,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -621,12 +623,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774335600000,
-        "label": "2026-03-24T07:00:00.000Z",
+        "ts": 1774508400000,
+        "label": "2026-03-26T07:00:00.000Z",
         "phase": "history",
-        "close": 4412.115,
-        "high": 4425.218,
-        "low": 4399.365,
+        "close": 4448.515,
+        "high": 4460.335,
+        "low": 4438.755,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -636,12 +638,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774337400000,
-        "label": "2026-03-24T07:30:00.000Z",
+        "ts": 1774510200000,
+        "label": "2026-03-26T07:30:00.000Z",
         "phase": "history",
-        "close": 4416.855,
-        "high": 4432.785,
-        "low": 4399.555,
+        "close": 4452.565,
+        "high": 4463.665,
+        "low": 4447.515,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -651,12 +653,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774339200000,
-        "label": "2026-03-24T08:00:00.000Z",
+        "ts": 1774512000000,
+        "label": "2026-03-26T08:00:00.000Z",
         "phase": "history",
-        "close": 4396.295,
-        "high": 4420.735,
-        "low": 4390.895,
+        "close": 4427.995,
+        "high": 4459.075,
+        "low": 4424.845,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -666,12 +668,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774341000000,
-        "label": "2026-03-24T08:30:00.000Z",
+        "ts": 1774513800000,
+        "label": "2026-03-26T08:30:00.000Z",
         "phase": "history",
-        "close": 4411.535,
-        "high": 4414.285,
-        "low": 4391.305,
+        "close": 4427.455,
+        "high": 4439.678,
+        "low": 4412.595,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -681,12 +683,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774342800000,
-        "label": "2026-03-24T09:00:00.000Z",
+        "ts": 1774515600000,
+        "label": "2026-03-26T09:00:00.000Z",
         "phase": "history",
-        "close": 4407.085,
-        "high": 4419.035,
-        "low": 4395.625,
+        "close": 4432.125,
+        "high": 4436.695,
+        "low": 4418.085,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -696,12 +698,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774344600000,
-        "label": "2026-03-24T09:30:00.000Z",
+        "ts": 1774517400000,
+        "label": "2026-03-26T09:30:00.000Z",
         "phase": "history",
-        "close": 4425.945,
-        "high": 4430.625,
-        "low": 4404.915,
+        "close": 4423.465,
+        "high": 4431.905,
+        "low": 4414.085,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -711,12 +713,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774346400000,
-        "label": "2026-03-24T10:00:00.000Z",
+        "ts": 1774519200000,
+        "label": "2026-03-26T10:00:00.000Z",
         "phase": "history",
-        "close": 4421.905,
-        "high": 4432.865,
-        "low": 4414.705,
+        "close": 4441.515,
+        "high": 4447.845,
+        "low": 4416.525,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -726,12 +728,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774348200000,
-        "label": "2026-03-24T10:30:00.000Z",
+        "ts": 1774521000000,
+        "label": "2026-03-26T10:30:00.000Z",
         "phase": "history",
-        "close": 4438.445,
-        "high": 4441.308,
-        "low": 4414.355,
+        "close": 4442.898,
+        "high": 4447.315,
+        "low": 4423.205,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -741,12 +743,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774350000000,
-        "label": "2026-03-24T11:00:00.000Z",
+        "ts": 1774522800000,
+        "label": "2026-03-26T11:00:00.000Z",
         "phase": "history",
-        "close": 4412.775,
-        "high": 4441.865,
-        "low": 4373.048,
+        "close": 4442.918,
+        "high": 4456.505,
+        "low": 4439.205,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -756,12 +758,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774351800000,
-        "label": "2026-03-24T11:30:00.000Z",
+        "ts": 1774524600000,
+        "label": "2026-03-26T11:30:00.000Z",
         "phase": "history",
-        "close": 4407.345,
-        "high": 4431.475,
-        "low": 4390.175,
+        "close": 4422.795,
+        "high": 4451.715,
+        "low": 4418.595,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -771,12 +773,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774353600000,
-        "label": "2026-03-24T12:00:00.000Z",
+        "ts": 1774526400000,
+        "label": "2026-03-26T12:00:00.000Z",
         "phase": "history",
-        "close": 4401.995,
-        "high": 4427.205,
-        "low": 4395.088,
+        "close": 4436.355,
+        "high": 4445.425,
+        "low": 4416.335,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -786,12 +788,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774355400000,
-        "label": "2026-03-24T12:30:00.000Z",
+        "ts": 1774528200000,
+        "label": "2026-03-26T12:30:00.000Z",
         "phase": "history",
-        "close": 4378.905,
-        "high": 4406.455,
-        "low": 4361.545,
+        "close": 4429.355,
+        "high": 4444.625,
+        "low": 4428.235,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -801,12 +803,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774357200000,
-        "label": "2026-03-24T13:00:00.000Z",
+        "ts": 1774530000000,
+        "label": "2026-03-26T13:00:00.000Z",
         "phase": "history",
-        "close": 4356.808,
-        "high": 4389.575,
-        "low": 4356.288,
+        "close": 4447.865,
+        "high": 4453.645,
+        "low": 4419.955,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -816,12 +818,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774359000000,
-        "label": "2026-03-24T13:30:00.000Z",
+        "ts": 1774531800000,
+        "label": "2026-03-26T13:30:00.000Z",
         "phase": "history",
-        "close": 4381.165,
-        "high": 4383.058,
-        "low": 4350.838,
+        "close": 4452.238,
+        "high": 4460.205,
+        "low": 4428.818,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -831,12 +833,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774360800000,
-        "label": "2026-03-24T14:00:00.000Z",
+        "ts": 1774533600000,
+        "label": "2026-03-26T14:00:00.000Z",
         "phase": "history",
-        "close": 4408.735,
-        "high": 4414.475,
-        "low": 4380.019,
+        "close": 4458.638,
+        "high": 4469.355,
+        "low": 4436.905,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -846,12 +848,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774362600000,
-        "label": "2026-03-24T14:30:00.000Z",
+        "ts": 1774535400000,
+        "label": "2026-03-26T14:30:00.000Z",
         "phase": "history",
-        "close": 4415.558,
-        "high": 4433.085,
-        "low": 4399.748,
+        "close": 4464.695,
+        "high": 4479.515,
+        "low": 4445.645,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -861,12 +863,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774364400000,
-        "label": "2026-03-24T15:00:00.000Z",
+        "ts": 1774537200000,
+        "label": "2026-03-26T15:00:00.000Z",
         "phase": "history",
-        "close": 4412.298,
-        "high": 4420.055,
-        "low": 4395.758,
+        "close": 4454.115,
+        "high": 4468.618,
+        "low": 4448.685,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -876,12 +878,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774366200000,
-        "label": "2026-03-24T15:30:00.000Z",
+        "ts": 1774539000000,
+        "label": "2026-03-26T15:30:00.000Z",
         "phase": "history",
-        "close": 4411.118,
-        "high": 4430.398,
-        "low": 4408.835,
+        "close": 4437.945,
+        "high": 4454.005,
+        "low": 4433.498,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -891,12 +893,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774368000000,
-        "label": "2026-03-24T16:00:00.000Z",
+        "ts": 1774540800000,
+        "label": "2026-03-26T16:00:00.000Z",
         "phase": "history",
-        "close": 4420.698,
-        "high": 4425.268,
-        "low": 4402.198,
+        "close": 4396.185,
+        "high": 4442.398,
+        "low": 4386.205,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -906,12 +908,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774369800000,
-        "label": "2026-03-24T16:30:00.000Z",
+        "ts": 1774542600000,
+        "label": "2026-03-26T16:30:00.000Z",
         "phase": "history",
-        "close": 4420.958,
-        "high": 4427.148,
-        "low": 4408.288,
+        "close": 4388.965,
+        "high": 4396.118,
+        "low": 4366.455,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -921,12 +923,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774371600000,
-        "label": "2026-03-24T17:00:00.000Z",
+        "ts": 1774544400000,
+        "label": "2026-03-26T17:00:00.000Z",
         "phase": "history",
-        "close": 4399.838,
-        "high": 4426.058,
-        "low": 4387.975,
+        "close": 4383.075,
+        "high": 4402.215,
+        "low": 4376.995,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -936,12 +938,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774373400000,
-        "label": "2026-03-24T17:30:00.000Z",
+        "ts": 1774546200000,
+        "label": "2026-03-26T17:30:00.000Z",
         "phase": "history",
-        "close": 4388.395,
-        "high": 4399.838,
-        "low": 4372.155,
+        "close": 4381.205,
+        "high": 4392.665,
+        "low": 4377.105,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -951,12 +953,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774375200000,
-        "label": "2026-03-24T18:00:00.000Z",
+        "ts": 1774548000000,
+        "label": "2026-03-26T18:00:00.000Z",
         "phase": "history",
-        "close": 4406.975,
-        "high": 4409.585,
-        "low": 4383.545,
+        "close": 4374.025,
+        "high": 4390.355,
+        "low": 4367.228,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -966,12 +968,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774377000000,
-        "label": "2026-03-24T18:30:00.000Z",
+        "ts": 1774549800000,
+        "label": "2026-03-26T18:30:00.000Z",
         "phase": "history",
-        "close": 4389.285,
-        "high": 4423.105,
-        "low": 4383.695,
+        "close": 4394.255,
+        "high": 4397.495,
+        "low": 4373.155,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -981,12 +983,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774378800000,
-        "label": "2026-03-24T19:00:00.000Z",
+        "ts": 1774551600000,
+        "label": "2026-03-26T19:00:00.000Z",
         "phase": "history",
-        "close": 4407.128,
-        "high": 4411.108,
-        "low": 4388.475,
+        "close": 4380.455,
+        "high": 4399.145,
+        "low": 4377.998,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -996,12 +998,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774380600000,
-        "label": "2026-03-24T19:30:00.000Z",
+        "ts": 1774553400000,
+        "label": "2026-03-26T19:30:00.000Z",
         "phase": "history",
-        "close": 4400.085,
-        "high": 4407.188,
-        "low": 4394.755,
+        "close": 4363.765,
+        "high": 4388.255,
+        "low": 4358.915,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -1011,12 +1013,12 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774382400000,
-        "label": "2026-03-24T20:00:00.000Z",
+        "ts": 1774555200000,
+        "label": "2026-03-26T20:00:00.000Z",
         "phase": "history",
-        "close": 4455.425,
-        "high": 4483.945,
-        "low": 4397.025,
+        "close": 4404.005,
+        "high": 4415.665,
+        "low": 4350.995,
         "forecastBase": null,
         "forecastLower": null,
         "forecastUpper": null,
@@ -1026,800 +1028,793 @@
         "actualRangeEnd": null
       },
       {
-        "ts": 1774382400000,
-        "label": "2026-03-24T20:00:00.000Z",
+        "ts": 1774555200000,
+        "label": "2026-03-26T20:00:00.000Z",
         "phase": "forecast",
         "close": null,
         "high": null,
         "low": null,
-        "forecastBase": 4455.425,
-        "forecastLower": 4455.425,
-        "forecastUpper": 4455.425,
+        "forecastBase": 4404.005,
+        "forecastLower": 4404.005,
+        "forecastUpper": 4404.005,
         "forecastSpread": 0,
-        "actualClose": 4455.425,
-        "actualRangeStart": 1774369800000,
-        "actualRangeEnd": 1774382400000
+        "actualClose": 4404.005,
+        "actualRangeStart": 1774542600000,
+        "actualRangeEnd": 1774555200000
       },
       {
-        "ts": 1774396800000,
-        "label": "2026-03-25T00:00:00.000Z",
+        "ts": 1774569600000,
+        "label": "2026-03-27T00:00:00.000Z",
         "phase": "forecast",
         "close": null,
         "high": null,
         "low": null,
-        "forecastBase": 4577.961999976752,
-        "forecastLower": 3849.1851481744857,
-        "forecastUpper": 5444.720185302222,
-        "forecastSpread": 1595.535037127736,
-        "actualClose": 4553.105,
-        "actualRangeStart": 1774384200000,
-        "actualRangeEnd": 1774396800000
+        "forecastBase": 4667.704086039721,
+        "forecastLower": 4458.13519476785,
+        "forecastUpper": 4887.124432745349,
+        "forecastSpread": 428.9892379774983,
+        "actualClose": 4391.005,
+        "actualRangeStart": 1774557000000,
+        "actualRangeEnd": 1774569600000
       },
       {
-        "ts": 1774411200000,
-        "label": "2026-03-25T04:00:00.000Z",
+        "ts": 1774584000000,
+        "label": "2026-03-27T04:00:00.000Z",
         "phase": "forecast",
         "close": null,
         "high": null,
         "low": null,
-        "forecastBase": 4448.189042263309,
-        "forecastLower": 3709.9894730210567,
-        "forecastUpper": 5333.272749046173,
-        "forecastSpread": 1623.2832760251163,
-        "actualClose": 4573.985,
-        "actualRangeStart": 1774398600000,
-        "actualRangeEnd": 1774411200000
+        "forecastBase": 4519.812396594955,
+        "forecastLower": 4297.711962480593,
+        "forecastUpper": 4753.390706207822,
+        "forecastSpread": 455.67874372722963,
+        "actualClose": 4433.885,
+        "actualRangeStart": 1774571400000,
+        "actualRangeEnd": 1774584000000
       },
       {
-        "ts": 1774425600000,
-        "label": "2026-03-25T08:00:00.000Z",
+        "ts": 1774596600000,
+        "label": "2026-03-27T07:30:00.000Z",
         "phase": "forecast",
         "close": null,
         "high": null,
         "low": null,
-        "forecastBase": 4322.094800221551,
-        "forecastLower": 3575.827444012347,
-        "forecastUpper": 5224.1065192847345,
-        "forecastSpread": 1648.2790752723877,
-        "actualClose": 4565.445,
-        "actualRangeStart": 1774413000000,
-        "actualRangeEnd": 1774425600000
+        "forecastBase": 4376.606512292002,
+        "forecastLower": 4143.061460793271,
+        "forecastUpper": 4623.316536503712,
+        "forecastSpread": 480.2550757104409,
+        "actualClose": 4447.435,
+        "actualRangeStart": 1774585800000,
+        "actualRangeEnd": 1774596600000
       }
     ],
     "microRows": [
       {
-        "ts": 1774265400000,
-        "open": 4398.428,
-        "high": 4431.425,
-        "low": 4361.115,
-        "close": 4378.795
+        "ts": 1774438200000,
+        "open": 4579.705,
+        "high": 4585.475,
+        "low": 4572.06,
+        "close": 4578.665
       },
       {
-        "ts": 1774267200000,
-        "open": 4378.825,
-        "high": 4404.725,
-        "low": 4336.305,
-        "close": 4389.855
+        "ts": 1774440000000,
+        "open": 4578.605,
+        "high": 4583.385,
+        "low": 4539.875,
+        "close": 4544.875
       },
       {
-        "ts": 1774269000000,
-        "open": 4389.295,
-        "high": 4492.185,
-        "low": 4373.035,
-        "close": 4478.095
+        "ts": 1774441800000,
+        "open": 4544.205,
+        "high": 4554.405,
+        "low": 4521.695,
+        "close": 4543.715
       },
       {
-        "ts": 1774270800000,
-        "open": 4478.108,
-        "high": 4484.905,
-        "low": 4405.008,
-        "close": 4409.045
+        "ts": 1774443600000,
+        "open": 4543.735,
+        "high": 4571.065,
+        "low": 4540.975,
+        "close": 4568.595
       },
       {
-        "ts": 1774272600000,
-        "open": 4409.365,
-        "high": 4466.315,
-        "low": 4400.995,
-        "close": 4453.975
+        "ts": 1774445400000,
+        "open": 4568.955,
+        "high": 4576.285,
+        "low": 4540.665,
+        "close": 4544.565
       },
       {
-        "ts": 1774274400000,
-        "open": 4454.145,
-        "high": 4512.665,
-        "low": 4453.385,
-        "close": 4486.225
+        "ts": 1774447200000,
+        "open": 4544.595,
+        "high": 4562.595,
+        "low": 4532.975,
+        "close": 4562.595
       },
       {
-        "ts": 1774276200000,
-        "open": 4486.295,
-        "high": 4504.145,
-        "low": 4456.565,
-        "close": 4461.695
+        "ts": 1774449000000,
+        "open": 4562.595,
+        "high": 4579.075,
+        "low": 4557.018,
+        "close": 4566.925
       },
       {
-        "ts": 1774278000000,
-        "open": 4461.238,
-        "high": 4486.765,
-        "low": 4426.988,
-        "close": 4447.355
+        "ts": 1774450800000,
+        "open": 4566.935,
+        "high": 4568.781,
+        "low": 4524.915,
+        "close": 4560.455
       },
       {
-        "ts": 1774279800000,
-        "open": 4446.925,
-        "high": 4455.775,
-        "low": 4350.798,
-        "close": 4363.515
+        "ts": 1774452600000,
+        "open": 4560.525,
+        "high": 4565.675,
+        "low": 4553.525,
+        "close": 4558.725
       },
       {
-        "ts": 1774281600000,
-        "open": 4363.158,
-        "high": 4389.885,
-        "low": 4352.058,
-        "close": 4354.458
+        "ts": 1774454400000,
+        "open": 4558.775,
+        "high": 4564.78,
+        "low": 4544.758,
+        "close": 4555.485
       },
       {
-        "ts": 1774283400000,
-        "open": 4354.538,
-        "high": 4391.505,
-        "low": 4353.258,
-        "close": 4375.325
+        "ts": 1774456200000,
+        "open": 4555.315,
+        "high": 4560.685,
+        "low": 4549.605,
+        "close": 4555.055
       },
       {
-        "ts": 1774285200000,
-        "open": 4375.285,
-        "high": 4413.615,
-        "low": 4370.575,
-        "close": 4405.275
+        "ts": 1774458000000,
+        "open": 4554.838,
+        "high": 4558.085,
+        "low": 4542.525,
+        "close": 4553.225
       },
       {
-        "ts": 1774287000000,
-        "open": 4404.985,
-        "high": 4438.835,
-        "low": 4403.875,
-        "close": 4425.965
+        "ts": 1774459800000,
+        "open": 4553.295,
+        "high": 4563.645,
+        "low": 4545.595,
+        "close": 4550.365
       },
       {
-        "ts": 1774288800000,
-        "open": 4425.995,
-        "high": 4430.515,
-        "low": 4402.005,
-        "close": 4425.895
+        "ts": 1774461600000,
+        "open": 4550.365,
+        "high": 4568.695,
+        "low": 4545.255,
+        "close": 4551.578
       },
       {
-        "ts": 1774290600000,
-        "open": 4425.775,
-        "high": 4466.895,
-        "low": 4425.365,
-        "close": 4448.785
+        "ts": 1774463400000,
+        "open": 4551.538,
+        "high": 4557.525,
+        "low": 4530.665,
+        "close": 4537.965
       },
       {
-        "ts": 1774292400000,
-        "open": 4448.625,
-        "high": 4450.325,
-        "low": 4392.885,
-        "close": 4410.445
+        "ts": 1774465200000,
+        "open": 4537.925,
+        "high": 4539.445,
+        "low": 4486.508,
+        "close": 4513.105
       },
       {
-        "ts": 1774294200000,
-        "open": 4410.225,
-        "high": 4427.425,
-        "low": 4396.825,
-        "close": 4398.025
+        "ts": 1774467000000,
+        "open": 4512.925,
+        "high": 4533.675,
+        "low": 4506.155,
+        "close": 4530.835
       },
       {
-        "ts": 1774296000000,
-        "open": 4397.625,
-        "high": 4412.975,
-        "low": 4382.575,
-        "close": 4406.965
+        "ts": 1774468800000,
+        "open": 4530.745,
+        "high": 4541.755,
+        "low": 4522.155,
+        "close": 4523.585
       },
       {
-        "ts": 1774297800000,
-        "open": 4406.935,
-        "high": 4412.635,
-        "low": 4395.655,
-        "close": 4405.895
+        "ts": 1774470600000,
+        "open": 4523.715,
+        "high": 4524.765,
+        "low": 4494.585,
+        "close": 4505.325
       },
       {
-        "ts": 1774303200000,
-        "open": 4411.898,
-        "high": 4419.598,
-        "low": 4359.348,
-        "close": 4413.835
+        "ts": 1774476000000,
+        "open": 4508.498,
+        "high": 4531.535,
+        "low": 4505.098,
+        "close": 4511.465
       },
       {
-        "ts": 1774305000000,
-        "open": 4413.975,
-        "high": 4431.065,
-        "low": 4397.975,
-        "close": 4426.338
+        "ts": 1774477800000,
+        "open": 4511.465,
+        "high": 4534.525,
+        "low": 4507.725,
+        "close": 4517.058
       },
       {
-        "ts": 1774306800000,
-        "open": 4424.509,
-        "high": 4448.005,
-        "low": 4422.798,
-        "close": 4441.525
+        "ts": 1774479600000,
+        "open": 4517.138,
+        "high": 4517.518,
+        "low": 4496.655,
+        "close": 4505.165
       },
       {
-        "ts": 1774308600000,
-        "open": 4441.505,
-        "high": 4446.075,
-        "low": 4421.705,
-        "close": 4440.915
+        "ts": 1774481400000,
+        "open": 4505.185,
+        "high": 4510.785,
+        "low": 4488.575,
+        "close": 4497.875
       },
       {
-        "ts": 1774310400000,
-        "open": 4440.895,
-        "high": 4446.435,
-        "low": 4367.828,
-        "close": 4377.705
+        "ts": 1774483200000,
+        "open": 4497.845,
+        "high": 4535.235,
+        "low": 4497.798,
+        "close": 4524.945
       },
       {
-        "ts": 1774312200000,
-        "open": 4378.075,
-        "high": 4387.045,
-        "low": 4330.695,
-        "close": 4364.035
+        "ts": 1774485000000,
+        "open": 4524.895,
+        "high": 4538.875,
+        "low": 4524.335,
+        "close": 4534.938
       },
       {
-        "ts": 1774314000000,
-        "open": 4364.165,
-        "high": 4373.895,
-        "low": 4327.825,
-        "close": 4354.365
+        "ts": 1774486800000,
+        "open": 4534.515,
+        "high": 4544.275,
+        "low": 4526.478,
+        "close": 4534.235
       },
       {
-        "ts": 1774315800000,
-        "open": 4354.305,
-        "high": 4368.225,
-        "low": 4307.555,
-        "close": 4321.765
+        "ts": 1774488600000,
+        "open": 4534.265,
+        "high": 4537.418,
+        "low": 4522.215,
+        "close": 4534.995
       },
       {
-        "ts": 1774317600000,
-        "open": 4321.745,
-        "high": 4353.395,
-        "low": 4305.565,
-        "close": 4351.575
+        "ts": 1774490400000,
+        "open": 4535.015,
+        "high": 4535.468,
+        "low": 4524.458,
+        "close": 4527.955
       },
       {
-        "ts": 1774319400000,
-        "open": 4351.595,
-        "high": 4378.965,
-        "low": 4344.165,
-        "close": 4365.725
+        "ts": 1774492200000,
+        "open": 4527.349,
+        "high": 4530.225,
+        "low": 4505.535,
+        "close": 4508.465
       },
       {
-        "ts": 1774321200000,
-        "open": 4365.655,
-        "high": 4367.905,
-        "low": 4349.835,
-        "close": 4364.365
+        "ts": 1774494000000,
+        "open": 4508.395,
+        "high": 4513.455,
+        "low": 4499.635,
+        "close": 4506.295
       },
       {
-        "ts": 1774323000000,
-        "open": 4364.085,
-        "high": 4364.465,
-        "low": 4334.835,
-        "close": 4347.045
+        "ts": 1774495800000,
+        "open": 4506.405,
+        "high": 4518.555,
+        "low": 4506.145,
+        "close": 4516.425
       },
       {
-        "ts": 1774324800000,
-        "open": 4347.025,
-        "high": 4357.005,
-        "low": 4326.245,
-        "close": 4339.485
+        "ts": 1774497600000,
+        "open": 4516.585,
+        "high": 4521.755,
+        "low": 4511.315,
+        "close": 4520.525
       },
       {
-        "ts": 1774326600000,
-        "open": 4339.455,
-        "high": 4349.015,
-        "low": 4331.775,
-        "close": 4333.115
+        "ts": 1774499400000,
+        "open": 4520.645,
+        "high": 4523.985,
+        "low": 4516.275,
+        "close": 4520.225
       },
       {
-        "ts": 1774328400000,
-        "open": 4333.115,
-        "high": 4346.285,
-        "low": 4319.515,
-        "close": 4334.915
+        "ts": 1774501200000,
+        "open": 4520.245,
+        "high": 4522.095,
+        "low": 4488.945,
+        "close": 4493.345
       },
       {
-        "ts": 1774330200000,
-        "open": 4334.595,
-        "high": 4373.595,
-        "low": 4320.645,
-        "close": 4346.945
+        "ts": 1774503000000,
+        "open": 4493.315,
+        "high": 4495.455,
+        "low": 4438.585,
+        "close": 4438.715
       },
       {
-        "ts": 1774332000000,
-        "open": 4347.135,
-        "high": 4396.455,
-        "low": 4342.635,
-        "close": 4386.595
+        "ts": 1774504800000,
+        "open": 4439.055,
+        "high": 4450.335,
+        "low": 4415.505,
+        "close": 4440.065
       },
       {
-        "ts": 1774333800000,
-        "open": 4386.218,
-        "high": 4404.765,
-        "low": 4372.525,
-        "close": 4401.855
+        "ts": 1774506600000,
+        "open": 4440.005,
+        "high": 4459.225,
+        "low": 4430.365,
+        "close": 4456.175
       },
       {
-        "ts": 1774335600000,
-        "open": 4401.885,
-        "high": 4425.218,
-        "low": 4399.365,
-        "close": 4412.115
+        "ts": 1774508400000,
+        "open": 4456.265,
+        "high": 4460.335,
+        "low": 4438.755,
+        "close": 4448.515
       },
       {
-        "ts": 1774337400000,
-        "open": 4412.085,
-        "high": 4432.785,
-        "low": 4399.555,
-        "close": 4416.855
+        "ts": 1774510200000,
+        "open": 4448.485,
+        "high": 4463.665,
+        "low": 4447.515,
+        "close": 4452.565
       },
       {
-        "ts": 1774339200000,
-        "open": 4416.815,
-        "high": 4420.735,
-        "low": 4390.895,
-        "close": 4396.295
+        "ts": 1774512000000,
+        "open": 4452.355,
+        "high": 4459.075,
+        "low": 4424.845,
+        "close": 4427.995
       },
       {
-        "ts": 1774341000000,
-        "open": 4396.008,
-        "high": 4414.285,
-        "low": 4391.305,
-        "close": 4411.535
+        "ts": 1774513800000,
+        "open": 4428.015,
+        "high": 4439.678,
+        "low": 4412.595,
+        "close": 4427.455
       },
       {
-        "ts": 1774342800000,
-        "open": 4412.015,
-        "high": 4419.035,
-        "low": 4395.625,
-        "close": 4407.085
+        "ts": 1774515600000,
+        "open": 4427.355,
+        "high": 4436.695,
+        "low": 4418.085,
+        "close": 4432.125
       },
       {
-        "ts": 1774344600000,
-        "open": 4407.055,
-        "high": 4430.625,
-        "low": 4404.915,
-        "close": 4425.945
+        "ts": 1774517400000,
+        "open": 4431.905,
+        "high": 4431.905,
+        "low": 4414.085,
+        "close": 4423.465
       },
       {
-        "ts": 1774346400000,
-        "open": 4426.255,
-        "high": 4432.865,
-        "low": 4414.705,
-        "close": 4421.905
+        "ts": 1774519200000,
+        "open": 4423.495,
+        "high": 4447.845,
+        "low": 4416.525,
+        "close": 4441.515
       },
       {
-        "ts": 1774348200000,
-        "open": 4421.875,
-        "high": 4441.308,
-        "low": 4414.355,
-        "close": 4438.445
+        "ts": 1774521000000,
+        "open": 4441.485,
+        "high": 4447.315,
+        "low": 4423.205,
+        "close": 4442.898
       },
       {
-        "ts": 1774350000000,
-        "open": 4438.445,
-        "high": 4441.865,
-        "low": 4373.048,
-        "close": 4412.775
+        "ts": 1774522800000,
+        "open": 4443.185,
+        "high": 4456.505,
+        "low": 4439.205,
+        "close": 4442.918
       },
       {
-        "ts": 1774351800000,
-        "open": 4412.605,
-        "high": 4431.475,
-        "low": 4390.175,
-        "close": 4407.345
+        "ts": 1774524600000,
+        "open": 4442.865,
+        "high": 4451.715,
+        "low": 4418.595,
+        "close": 4422.795
       },
       {
-        "ts": 1774353600000,
-        "open": 4407.375,
-        "high": 4427.205,
-        "low": 4395.088,
-        "close": 4401.995
+        "ts": 1774526400000,
+        "open": 4422.775,
+        "high": 4445.425,
+        "low": 4416.335,
+        "close": 4436.355
       },
       {
-        "ts": 1774355400000,
-        "open": 4402.015,
-        "high": 4406.455,
-        "low": 4361.545,
-        "close": 4378.905
+        "ts": 1774528200000,
+        "open": 4436.265,
+        "high": 4444.625,
+        "low": 4428.235,
+        "close": 4429.355
       },
       {
-        "ts": 1774357200000,
-        "open": 4378.885,
-        "high": 4389.575,
-        "low": 4356.288,
-        "close": 4356.808
+        "ts": 1774530000000,
+        "open": 4429.205,
+        "high": 4453.645,
+        "low": 4419.955,
+        "close": 4447.865
       },
       {
-        "ts": 1774359000000,
-        "open": 4356.108,
-        "high": 4383.058,
-        "low": 4350.838,
-        "close": 4381.165
+        "ts": 1774531800000,
+        "open": 4447.765,
+        "high": 4460.205,
+        "low": 4428.818,
+        "close": 4452.238
       },
       {
-        "ts": 1774360800000,
-        "open": 4381.175,
-        "high": 4414.475,
-        "low": 4380.019,
-        "close": 4408.735
+        "ts": 1774533600000,
+        "open": 4452.205,
+        "high": 4469.355,
+        "low": 4436.905,
+        "close": 4458.638
       },
       {
-        "ts": 1774362600000,
-        "open": 4408.555,
-        "high": 4433.085,
-        "low": 4399.748,
-        "close": 4415.558
+        "ts": 1774535400000,
+        "open": 4458.658,
+        "high": 4479.515,
+        "low": 4445.645,
+        "close": 4464.695
       },
       {
-        "ts": 1774364400000,
-        "open": 4415.005,
-        "high": 4420.055,
-        "low": 4395.758,
-        "close": 4412.298
+        "ts": 1774537200000,
+        "open": 4464.735,
+        "high": 4468.618,
+        "low": 4448.685,
+        "close": 4454.115
       },
       {
-        "ts": 1774366200000,
-        "open": 4412.215,
-        "high": 4430.398,
-        "low": 4408.835,
-        "close": 4411.118
+        "ts": 1774539000000,
+        "open": 4454.005,
+        "high": 4454.005,
+        "low": 4433.498,
+        "close": 4437.945
       },
       {
-        "ts": 1774368000000,
-        "open": 4411.158,
-        "high": 4425.268,
-        "low": 4402.198,
-        "close": 4420.698
+        "ts": 1774540800000,
+        "open": 4437.945,
+        "high": 4442.398,
+        "low": 4386.205,
+        "close": 4396.185
       },
       {
-        "ts": 1774369800000,
-        "open": 4420.698,
-        "high": 4427.148,
-        "low": 4408.288,
-        "close": 4420.958
+        "ts": 1774542600000,
+        "open": 4396.118,
+        "high": 4396.118,
+        "low": 4366.455,
+        "close": 4388.965
       },
       {
-        "ts": 1774371600000,
-        "open": 4420.958,
-        "high": 4426.058,
-        "low": 4387.975,
-        "close": 4399.838
+        "ts": 1774544400000,
+        "open": 4388.775,
+        "high": 4402.215,
+        "low": 4376.995,
+        "close": 4383.075
       },
       {
-        "ts": 1774373400000,
-        "open": 4399.838,
-        "high": 4399.838,
-        "low": 4372.155,
-        "close": 4388.395
+        "ts": 1774546200000,
+        "open": 4382.798,
+        "high": 4392.665,
+        "low": 4377.105,
+        "close": 4381.205
       },
       {
-        "ts": 1774375200000,
-        "open": 4388.365,
-        "high": 4409.585,
-        "low": 4383.545,
-        "close": 4406.975
+        "ts": 1774548000000,
+        "open": 4381.095,
+        "high": 4390.355,
+        "low": 4367.228,
+        "close": 4374.025
       },
       {
-        "ts": 1774377000000,
-        "open": 4406.795,
-        "high": 4423.105,
-        "low": 4383.695,
-        "close": 4389.285
+        "ts": 1774549800000,
+        "open": 4374.055,
+        "high": 4397.495,
+        "low": 4373.155,
+        "close": 4394.255
       },
       {
-        "ts": 1774378800000,
-        "open": 4389.275,
-        "high": 4411.108,
-        "low": 4388.475,
-        "close": 4407.128
+        "ts": 1774551600000,
+        "open": 4394.285,
+        "high": 4399.145,
+        "low": 4377.998,
+        "close": 4380.455
       },
       {
-        "ts": 1774380600000,
-        "open": 4407.145,
-        "high": 4407.188,
-        "low": 4394.755,
-        "close": 4400.085
+        "ts": 1774553400000,
+        "open": 4380.745,
+        "high": 4388.255,
+        "low": 4358.915,
+        "close": 4363.765
       },
       {
-        "ts": 1774382400000,
-        "open": 4399.998,
-        "high": 4483.945,
-        "low": 4397.025,
-        "close": 4455.425
+        "ts": 1774555200000,
+        "open": 4363.685,
+        "high": 4415.665,
+        "low": 4350.995,
+        "close": 4404.005
       },
       {
-        "ts": 1774384200000,
-        "open": 4455.395,
-        "high": 4481.195,
-        "low": 4444.325,
-        "close": 4471.835
+        "ts": 1774557000000,
+        "open": 4404.205,
+        "high": 4420.305,
+        "low": 4372.735,
+        "close": 4379.375
       },
       {
-        "ts": 1774389600000,
-        "open": 4471.098,
-        "high": 4485.185,
-        "low": 4467.715,
-        "close": 4469.678
+        "ts": 1774562400000,
+        "open": 4389.735,
+        "high": 4407.785,
+        "low": 4375.775,
+        "close": 4397.965
       },
       {
-        "ts": 1774391400000,
-        "open": 4469.658,
-        "high": 4484.198,
-        "low": 4455.258,
-        "close": 4484.118
+        "ts": 1774564200000,
+        "open": 4397.548,
+        "high": 4415.145,
+        "low": 4393.248,
+        "close": 4410.398
       },
       {
-        "ts": 1774393200000,
-        "open": 4483.778,
-        "high": 4509.678,
-        "low": 4471.958,
-        "close": 4509.548
+        "ts": 1774566000000,
+        "open": 4410.498,
+        "high": 4413.598,
+        "low": 4389.405,
+        "close": 4399.165
       },
       {
-        "ts": 1774395000000,
-        "open": 4509.548,
-        "high": 4551.118,
-        "low": 4504.035,
-        "close": 4546.375
+        "ts": 1774567800000,
+        "open": 4399.225,
+        "high": 4407.755,
+        "low": 4395.565,
+        "close": 4404.665
       },
       {
-        "ts": 1774396800000,
-        "open": 4546.335,
-        "high": 4556.618,
-        "low": 4537.065,
-        "close": 4553.105
+        "ts": 1774569600000,
+        "open": 4404.775,
+        "high": 4410.835,
+        "low": 4382.415,
+        "close": 4391.005
       },
       {
-        "ts": 1774398600000,
-        "open": 4553.105,
-        "high": 4571.738,
-        "low": 4546.138,
-        "close": 4562.698
+        "ts": 1774571400000,
+        "open": 4390.985,
+        "high": 4396.315,
+        "low": 4375.235,
+        "close": 4378.425
       },
       {
-        "ts": 1774400400000,
-        "open": 4562.698,
-        "high": 4578.428,
-        "low": 4552.085,
-        "close": 4575.055
+        "ts": 1774573200000,
+        "open": 4378.395,
+        "high": 4406.405,
+        "low": 4377.005,
+        "close": 4406.215
       },
       {
-        "ts": 1774402200000,
-        "open": 4575.005,
-        "high": 4600.955,
-        "low": 4573.685,
-        "close": 4594.655
+        "ts": 1774575000000,
+        "open": 4406.255,
+        "high": 4420.275,
+        "low": 4403.285,
+        "close": 4417.045
       },
       {
-        "ts": 1774404000000,
-        "open": 4594.635,
-        "high": 4596.125,
-        "low": 4579.585,
-        "close": 4586.635
+        "ts": 1774576800000,
+        "open": 4417.205,
+        "high": 4439.445,
+        "low": 4416.755,
+        "close": 4430.485
       },
       {
-        "ts": 1774405800000,
-        "open": 4586.885,
-        "high": 4602.125,
-        "low": 4580.695,
-        "close": 4583.325
+        "ts": 1774578600000,
+        "open": 4430.515,
+        "high": 4440.225,
+        "low": 4424.605,
+        "close": 4431.298
       },
       {
-        "ts": 1774407600000,
-        "open": 4583.285,
-        "high": 4585.905,
-        "low": 4571.548,
-        "close": 4575.135
+        "ts": 1774580400000,
+        "open": 4431.925,
+        "high": 4436.545,
+        "low": 4420.975,
+        "close": 4435.035
       },
       {
-        "ts": 1774409400000,
-        "open": 4575.165,
-        "high": 4577.408,
-        "low": 4567.258,
-        "close": 4569.738
+        "ts": 1774582200000,
+        "open": 4434.965,
+        "high": 4445.935,
+        "low": 4430.375,
+        "close": 4437.265
       },
       {
-        "ts": 1774411200000,
-        "open": 4569.595,
-        "high": 4574.265,
-        "low": 4565.295,
-        "close": 4573.985
+        "ts": 1774584000000,
+        "open": 4437.315,
+        "high": 4439.465,
+        "low": 4431.215,
+        "close": 4433.885
       },
       {
-        "ts": 1774413000000,
-        "open": 4573.905,
-        "high": 4574.385,
-        "low": 4565.865,
-        "close": 4572.248
+        "ts": 1774585800000,
+        "open": 4433.905,
+        "high": 4449.315,
+        "low": 4433.765,
+        "close": 4446.045
       },
       {
-        "ts": 1774414800000,
-        "open": 4572.495,
-        "high": 4573.295,
-        "low": 4553.355,
-        "close": 4554.345
+        "ts": 1774587600000,
+        "open": 4445.645,
+        "high": 4447.345,
+        "low": 4440.138,
+        "close": 4443.065
       },
       {
-        "ts": 1774416600000,
-        "open": 4554.315,
-        "high": 4566.555,
-        "low": 4548.898,
-        "close": 4555.215
+        "ts": 1774589400000,
+        "open": 4443.025,
+        "high": 4474.915,
+        "low": 4442.485,
+        "close": 4454.315
       },
       {
-        "ts": 1774418400000,
-        "open": 4555.235,
-        "high": 4556.655,
-        "low": 4532.668,
-        "close": 4550.295
+        "ts": 1774591200000,
+        "open": 4454.275,
+        "high": 4472.555,
+        "low": 4451.595,
+        "close": 4463.465
       },
       {
-        "ts": 1774420200000,
-        "open": 4550.305,
-        "high": 4556.505,
-        "low": 4543.065,
-        "close": 4545.405
+        "ts": 1774593000000,
+        "open": 4463.465,
+        "high": 4468.255,
+        "low": 4454.185,
+        "close": 4459.385
       },
       {
-        "ts": 1774422000000,
-        "open": 4545.365,
-        "high": 4562.915,
-        "low": 4544.555,
-        "close": 4560.795
+        "ts": 1774594800000,
+        "open": 4459.395,
+        "high": 4462.915,
+        "low": 4447.555,
+        "close": 4452.055
       },
       {
-        "ts": 1774423800000,
-        "open": 4560.855,
-        "high": 4560.855,
-        "low": 4536.548,
-        "close": 4539.065
-      },
-      {
-        "ts": 1774425600000,
-        "open": 4539.135,
-        "high": 4567.475,
-        "low": 4535.428,
-        "close": 4565.445
+        "ts": 1774596600000,
+        "open": 4451.955,
+        "high": 4455.765,
+        "low": 4442.455,
+        "close": 4447.435
       }
     ],
     "yDomain": [
-      4301,
-      4599
+      4339,
+      4693
     ]
   },
   "horizons": [
     {
       "horizon": 1,
       "hours": 4,
-      "predictedClose": 4577.961999976752,
-      "lowerClose": 3849.1851481744857,
-      "upperClose": 5444.720185302222,
-      "uncertainty": 0.17339244484901428,
-      "expectedReturnPct": 2.750287570248666,
-      "actualClose": 4553.105,
-      "actualReturnPct": 2.1923834426569755
+      "predictedClose": 4667.704086039721,
+      "lowerClose": 4458.13519476785,
+      "upperClose": 4887.124432745349,
+      "uncertainty": 0.04593675956130028,
+      "expectedReturnPct": 5.987710868623464,
+      "actualClose": 4391.005,
+      "actualReturnPct": -0.29518585923494767
     },
     {
       "horizon": 3,
       "hours": 12,
-      "predictedClose": 4322.094800221551,
-      "lowerClose": 3575.827444012347,
-      "upperClose": 5224.1065192847345,
-      "uncertainty": 0.18954358994960785,
-      "expectedReturnPct": -2.9925360606103624,
-      "actualClose": 4565.445,
-      "actualReturnPct": 2.4693491642211463
+      "predictedClose": 4376.606512292002,
+      "lowerClose": 4143.061460793271,
+      "upperClose": 4623.316536503712,
+      "uncertainty": 0.05483865737915039,
+      "expectedReturnPct": -0.6221266258325864,
+      "actualClose": 4447.435,
+      "actualReturnPct": 0.9861478358902831
     }
   ],
   "metrics": {
     "history": [
       {
         "epoch": 1,
-        "trainTotal": -0.17384633846407713,
-        "validationTotal": -0.20828304393216968,
-        "trainReturn": -1.2009019509766452,
-        "validationReturn": -1.4769304171204567,
-        "trainProfit": -0.000015244896651667603,
-        "validationProfit": 0.005546296546526719,
-        "trainLogWealth": 0.000011625581562437345,
-        "validationLogWealth": -0.004628615148249082
+        "trainTotal": -0.18709707693428013,
+        "validationTotal": -0.19016116793666568,
+        "trainReturn": -1.2924809479121622,
+        "validationReturn": -1.3479827659470693,
+        "trainProfit": -0.0005245065194621091,
+        "validationProfit": 0.00035447665452790843,
+        "trainLogWealth": 0.00043473347414093807,
+        "validationLogWealth": -0.0002961330473356481
       },
       {
         "epoch": 2,
-        "trainTotal": -0.2078313524148954,
-        "validationTotal": -0.35008459724485874,
-        "trainReturn": -1.4310661577439123,
-        "validationReturn": -2.330749850720167,
-        "trainProfit": 0.0022992808036326816,
-        "validationProfit": -0.006673667994846255,
-        "trainLogWealth": -0.0019176994946480922,
-        "validationLogWealth": 0.0055440881112645
+        "trainTotal": -0.2650624253318136,
+        "validationTotal": -0.2789438818182264,
+        "trainReturn": -1.792279504715128,
+        "validationReturn": -1.8882270983287266,
+        "trainProfit": -0.0006574276469483582,
+        "validationProfit": -0.0025499281817506665,
+        "trainLogWealth": 0.0005444079527201244,
+        "validationLogWealth": 0.002118635501366433
       },
       {
         "epoch": 3,
-        "trainTotal": -0.2770312761584687,
-        "validationTotal": -0.34718573559075594,
-        "trainReturn": -1.867960577787355,
-        "validationReturn": -2.3814932480454445,
-        "trainProfit": 0.0002447143098108018,
-        "validationProfit": 0.0030166111046128208,
-        "trainLogWealth": -0.0002053843906647784,
-        "validationLogWealth": -0.0025217544762199395
+        "trainTotal": -0.3098547919157972,
+        "validationTotal": -0.30071566360337393,
+        "trainReturn": -2.0809834426176463,
+        "validationReturn": -2.0463731901986257,
+        "trainProfit": -0.001312491326495437,
+        "validationProfit": 0.0016878798371180892,
+        "trainLogWealth": 0.0010914982628640357,
+        "validationLogWealth": -0.0014107172654933362
       },
       {
         "epoch": 4,
-        "trainTotal": -0.32966509120639903,
-        "validationTotal": -0.30740861978847533,
-        "trainReturn": -2.2196054555648983,
-        "validationReturn": -2.097516428679228,
-        "trainProfit": 0.0006615546788297668,
-        "validationProfit": 0.002208723452213235,
-        "trainLogWealth": -0.0005536363031180457,
-        "validationLogWealth": -0.0018489547921944904
+        "trainTotal": -0.352001428921172,
+        "validationTotal": -0.317934398991721,
+        "trainReturn": -2.365514479630382,
+        "validationReturn": -2.168899178504944,
+        "trainProfit": 0.00029335716027299226,
+        "validationProfit": 0.0026768785335921814,
+        "trainLogWealth": -0.0002471484970666711,
+        "validationLogWealth": -0.002238221689393478
       },
       {
         "epoch": 5,
-        "trainTotal": -0.31674512793389403,
-        "validationTotal": -0.018406827934086323,
-        "trainReturn": -2.1209571181341658,
-        "validationReturn": -0.16474630497395992,
-        "trainProfit": -0.0007546918409212777,
-        "validationProfit": 0.0026345670626142237,
-        "trainLogWealth": 0.0006272067416160613,
-        "validationLogWealth": -0.0022069988813200325
+        "trainTotal": -0.3316064144596986,
+        "validationTotal": -0.3835078205381121,
+        "trainReturn": -2.21909572723064,
+        "validationReturn": -2.594004947798593,
+        "trainProfit": -0.0008804119007171921,
+        "validationProfit": 0.001177282125614251,
+        "trainLogWealth": 0.0007308061934486593,
+        "validationLogWealth": -0.0009897710445719505
       },
       {
         "epoch": 6,
-        "trainTotal": -0.2811016014401707,
-        "validationTotal": -0.392638826277107,
-        "trainReturn": -1.8945233821868896,
-        "validationReturn": -2.585844613611698,
-        "trainProfit": 0.000878538271867311,
-        "validationProfit": -0.008777150441801496,
-        "trainLogWealth": -0.0007340722907027284,
-        "validationLogWealth": 0.007298988458956046
+        "trainTotal": -0.36485004296248896,
+        "validationTotal": -0.355822923460177,
+        "trainReturn": -2.4399918791250133,
+        "validationReturn": -2.4114939042500088,
+        "trainProfit": -0.0007761724569357135,
+        "validationProfit": 0.0010962212390690444,
+        "trainLogWealth": 0.0006440008026737628,
+        "validationLogWealth": -0.0009208073977788444
       }
     ],
     "validation": {
-      "averageLogWealth": 0.00430597409890736,
-      "realizedPnlPerAnchor": 0.004429503809889926,
-      "cvarTailLoss": 0.021612780168652534,
+      "averageLogWealth": -0.0005547871034936306,
+      "realizedPnlPerAnchor": -0.0004172829514027553,
+      "cvarTailLoss": 0.02641540765762329,
       "noTradeBandHitRate": 0,
-      "shapeGateUsage": 0.48368864227086306,
-      "expertEntropy": 0.14246521890163422,
-      "muCalibration": 0.09901334740987168,
-      "sigmaCalibration": 0.05038660046955356,
-      "directionalAccuracy": 0.71875,
-      "projectValueScore": 0.5711067832502575,
-      "exactSmoothHorizonAgreement": 0.84375,
+      "shapeGateUsage": 0.4998431989124843,
+      "expertEntropy": 0.051351978390344555,
+      "muCalibration": 0.06496256254001102,
+      "sigmaCalibration": 0.03218522717600366,
+      "directionalAccuracy": 0.5142857142857142,
+      "projectValueScore": 0.5090493810378429,
+      "exactSmoothHorizonAgreement": 0.8,
       "exactSmoothNoTradeAgreement": 1,
-      "exactSmoothPositionMae": 0.2989177416440315,
-      "exactSmoothUtilityRegret": 0.0070845208398817375,
+      "exactSmoothPositionMae": 0.4604593469628266,
+      "exactSmoothUtilityRegret": 0.0035702625010489686,
       "logWealthClampHitRate": 0,
       "stateResetMode": "carry_on",
       "costMultiplier": 1,
       "gammaMultiplier": 1,
-      "minPolicySigma": null,
-      "turnover": 8.776042206270933,
-      "maxDrawdown": 0.05190163901661479,
-      "utilityScore": 0.6694646927362589
+      "minPolicySigma": 0.0001,
+      "turnover": 17,
+      "maxDrawdown": 0.10276373447514414,
+      "utilityScore": 0.6013287599943267
     }
   },
   "narrative": {
-    "title": "横ばいです。",
-    "summary": "短期判断はポジション調整です。 4時間先の予測値は 4,578 です。",
+    "title": "上向きです。",
+    "summary": "短期判断はポジション調整です。 4時間先の予測値は 4,668 です。",
     "bullets": [
-      "変化率は 2.75%、不確実性は 0.1734 です。",
-      "予測幅は 3,849 - 5,445 です。",
-      "policy score は 0.001、強さは 0.18 です。"
+      "変化率は 5.99%、不確実性は 0.0459 です。",
+      "予測幅は 4,458 - 4,887 です。",
+      "policy score は 0.025、強さは 1.00 です。"
     ],
     "segments": [
       {
