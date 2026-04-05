@@ -10,6 +10,7 @@ from typing import Sequence
 
 import torch
 
+from .artifact_provenance import STATE_RESET_BOUNDARY_SPEC_VERSION
 from .config import TrainingConfig
 from .policy_service import apply_selection_policy, policy_utility, smooth_policy_distribution
 from ..domain.entities import TrainingExample
@@ -147,9 +148,20 @@ def evaluate_model(
     exact_smooth_no_trade_matches = 0
     exact_smooth_position_abs_error = 0.0
     exact_smooth_utility_regret = 0.0
+    state_reset_count = 0
+    session_count = 0
+    window_count = 0
 
     with torch.no_grad():
         for example in examples:
+            session_boundary, window_boundary = _state_reset_boundaries(
+                current_example=example,
+                previous_example=previous_example,
+            )
+            if previous_example is None or session_boundary:
+                session_count += 1
+            if previous_example is None or window_boundary:
+                window_count += 1
             if _should_reset_recurrent_context(
                 state_reset_mode=resolved_state_reset_mode,
                 current_example=example,
@@ -157,6 +169,7 @@ def evaluate_model(
             ):
                 previous_state = None
                 previous_position = 0.0
+                state_reset_count += 1
             batch = examples_to_batch([example], effective_config)
             outputs = model(
                 batch["main"],
@@ -298,6 +311,10 @@ def evaluate_model(
         "utility_score": utility_score,
         "project_value_score": project_value_score,
         "state_reset_mode": resolved_state_reset_mode,
+        "state_reset_boundary_spec_version": STATE_RESET_BOUNDARY_SPEC_VERSION,
+        "state_reset_count": state_reset_count,
+        "session_count": session_count,
+        "window_count": window_count,
         "cost_multiplier": float(cost_multiplier),
         "gamma_multiplier": float(gamma_multiplier),
         "min_policy_sigma": float(effective_config.min_policy_sigma),
@@ -475,15 +492,27 @@ def _should_reset_recurrent_context(
         return False
     if state_reset_mode == "reset_each_example":
         return True
+    session_boundary, window_boundary = _state_reset_boundaries(
+        current_example=current_example,
+        previous_example=previous_example,
+    )
+    return session_boundary or window_boundary
+
+
+def _state_reset_boundaries(
+    current_example: TrainingExample,
+    previous_example: TrainingExample | None,
+) -> tuple[bool, bool]:
+    if previous_example is None:
+        return True, True
     previous_session = previous_example.regime_id.split("|", maxsplit=1)[0]
     current_session = current_example.regime_id.split("|", maxsplit=1)[0]
     previous_day = previous_example.anchor_time.date()
     current_day = current_example.anchor_time.date()
     anchor_gap = current_example.anchor_time - previous_example.anchor_time
     return (
-        previous_session != current_session
-        or previous_day != current_day
-        or anchor_gap > timedelta(hours=4)
+        previous_session != current_session,
+        previous_day != current_day or anchor_gap > timedelta(hours=4),
     )
 
 

@@ -11,8 +11,11 @@ const artifactRoot = path.resolve(repoRoot, 'PyTorch/artifacts/gold_xauusd_m30')
 const currentRunDir = path.join(artifactRoot, 'current')
 const predictionPath = path.join(currentRunDir, 'prediction.json')
 const metricsPath = path.join(currentRunDir, 'metrics.json')
+const configPath = path.join(currentRunDir, 'config.json')
+const sourceMetaPath = path.join(currentRunDir, 'source.json')
 const forecastSummaryPath = path.join(currentRunDir, 'forecast_summary.json')
 const manifestPath = path.join(currentRunDir, 'manifest.json')
+const validationSummaryPath = path.join(currentRunDir, 'validation_summary.json')
 const outputPath = path.resolve(frontendRoot, 'public/dashboard-data.json')
 const liveDataDir = path.join(artifactRoot, 'live')
 const liveCsvPath = path.join(liveDataDir, 'xauusd_m30_latest.csv')
@@ -22,12 +25,19 @@ const targetDateJst = resolveTargetDateJst(process.env.SIGNAL_CASCADE_TARGET_DAT
 const csvPath = resolveCsvPath(targetDateJst)
 ensureCurrentRun(csvPath)
 const metrics = JSON.parse(fs.readFileSync(metricsPath, 'utf8'))
+const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
+const sourceMeta = fs.existsSync(sourceMetaPath)
+  ? JSON.parse(fs.readFileSync(sourceMetaPath, 'utf8'))
+  : null
 const prediction = JSON.parse(fs.readFileSync(predictionPath, 'utf8'))
 const forecastSummary = fs.existsSync(forecastSummaryPath)
   ? JSON.parse(fs.readFileSync(forecastSummaryPath, 'utf8'))
   : null
 const manifest = fs.existsSync(manifestPath)
   ? JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
+  : null
+const validationSummary = fs.existsSync(validationSummaryPath)
+  ? JSON.parse(fs.readFileSync(validationSummaryPath, 'utf8'))
   : null
 const allCsvRows = parseCsv(fs.readFileSync(csvPath, 'utf8'))
 const requiredSourceRows = resolveRequiredSourceRows(metrics, allCsvRows.length)
@@ -69,21 +79,55 @@ const bestEpochRow = history.reduce((best, row) => (row.validationTotal < best.v
 const convergenceGain = history[0].validationTotal - bestEpochRow.validationTotal
 const generalizationGap = bestEpochRow.validationTotal - bestEpochRow.trainTotal
 const validationMetrics = metrics.validation_metrics ?? null
+const artifactProvenance = resolveArtifactProvenance(sourceMeta)
+const primaryStateResetMode =
+  validationMetrics?.state_reset_mode ??
+  validationSummary?.primary_state_reset_mode ??
+  null
+const operatingPoint = {
+  stateResetMode: primaryStateResetMode,
+  costMultiplier: validationMetrics?.cost_multiplier ?? 1.0,
+  gammaMultiplier: validationMetrics?.gamma_multiplier ?? 1.0,
+  minPolicySigma: validationMetrics?.min_policy_sigma ?? config.min_policy_sigma ?? null,
+}
+const freshness = buildFreshness({
+  dashboardGeneratedAt: new Date().toISOString(),
+  manifestGeneratedAt: manifest?.generated_at ?? null,
+  diagnosticsGeneratedAt: validationSummary?.generated_at_utc ?? null,
+  forecastGeneratedAt: forecastSummary?.generated_at_utc ?? null,
+  predictionAnchorTime: prediction.anchor_time ?? null,
+})
+const interruptedTuning = Boolean(manifest?.interrupted_tuning)
+const runQuality = deriveRunQuality({ interruptedTuning, freshness })
 const overlayAction = prediction.no_trade_band_hit ? 'hold' : 'reduce'
 const payload = {
-  schemaVersion: 4,
-  generatedAt: new Date().toISOString(),
+  schemaVersion: 5,
+  generatedAt: freshness.dashboardGeneratedAt,
   instrument: '金 / XAUUSD',
   artifacts: {
     metricsSchemaVersion: metrics.schema_version ?? null,
     predictionSchemaVersion: prediction.schema_version ?? null,
     forecastSchemaVersion: forecastSummary?.schema_version ?? null,
+    sourceSchemaVersion: artifactProvenance.artifactSchemaVersion,
   },
   provenance: {
     rawRows: csvRows.length,
-    sourcePath: csvPath,
+    artifactKind: artifactProvenance.artifactKind,
+    artifactId: artifactProvenance.artifactId,
+    parentArtifactId: artifactProvenance.parentArtifactId,
+    dataSnapshotSha256: artifactProvenance.dataSnapshotSha256,
+    configOrigin: artifactProvenance.configOrigin,
+    sourcePath: artifactProvenance.sourcePath,
+    sourceOriginPath: artifactProvenance.sourceOriginPath,
+    gitCommitSha: artifactProvenance.gitCommitSha,
+    gitDirty: artifactProvenance.gitDirty,
     start: toIso(csvRows[0].ts),
     end: toIso(csvRows[csvRows.length - 1].ts),
+    manifestGeneratedAt: manifest?.generated_at ?? null,
+    diagnosticsGeneratedAt: validationSummary?.generated_at_utc ?? null,
+    forecastGeneratedAt: forecastSummary?.generated_at_utc ?? null,
+    predictionAnchorTime: prediction.anchor_time ?? null,
+    freshness,
   },
   run: {
     anchorTime: toIso(anchorBar.ts),
@@ -93,6 +137,12 @@ const payload = {
     position: prediction.position,
     overlayAction,
     policyStatus: prediction.no_trade_band_hit ? 'no-trade' : 'active',
+    stateResetMode: operatingPoint.stateResetMode,
+    costMultiplier: operatingPoint.costMultiplier,
+    gammaMultiplier: operatingPoint.gammaMultiplier,
+    minPolicySigma: operatingPoint.minPolicySigma,
+    interruptedTuning,
+    runQuality,
     trainSamples: metrics.train_samples,
     validationSamples: metrics.validation_samples,
     sampleCount: metrics.sample_count,
@@ -142,6 +192,9 @@ const payload = {
           exactSmoothUtilityRegret: validationMetrics.exact_smooth_utility_regret ?? null,
           logWealthClampHitRate: validationMetrics.log_wealth_clamp_hit_rate ?? null,
           stateResetMode: validationMetrics.state_reset_mode ?? null,
+          costMultiplier: validationMetrics.cost_multiplier ?? null,
+          gammaMultiplier: validationMetrics.gamma_multiplier ?? null,
+          minPolicySigma: validationMetrics.min_policy_sigma ?? null,
           turnover: validationMetrics.turnover ?? null,
           maxDrawdown: validationMetrics.max_drawdown ?? null,
           utilityScore: validationMetrics.utility_score ?? null,
@@ -158,6 +211,10 @@ console.log(`Wrote ${outputPath}`)
 function resolveCsvPath(targetDateJst) {
   if (process.env.SIGNAL_CASCADE_CSV_PATH) {
     return path.resolve(process.env.SIGNAL_CASCADE_CSV_PATH)
+  }
+
+  if (process.env.SIGNAL_CASCADE_DISABLE_TRAINING === '1') {
+    return resolveStoredCsvPath()
   }
 
   if (process.env.SIGNAL_CASCADE_DISABLE_LIVE_SYNC === '1') {
@@ -217,11 +274,39 @@ function resolveStoredCsvPath() {
     }
   }
 
+  if (fs.existsSync(sourceMetaPath)) {
+    const sourceMeta = JSON.parse(fs.readFileSync(sourceMetaPath, 'utf8'))
+    if (sourceMeta?.path) {
+      return path.resolve(sourceMeta.path)
+    }
+  }
+
   if (fs.existsSync(liveCsvPath)) {
     return liveCsvPath
   }
 
   throw new Error('No stored CSV source was found for the current SignalCascade run.')
+}
+
+function resolveArtifactProvenance(sourceMeta) {
+  const artifactSchemaVersion = Number.isInteger(sourceMeta?.artifact_schema_version)
+    ? sourceMeta.artifact_schema_version
+    : null
+  const isVersionedArtifact = artifactSchemaVersion !== null && artifactSchemaVersion >= 2
+  const git = sourceMeta?.git ?? {}
+
+  return {
+    artifactSchemaVersion,
+    artifactKind: isVersionedArtifact ? sourceMeta?.artifact_kind ?? null : null,
+    artifactId: isVersionedArtifact ? sourceMeta?.artifact_id ?? null : null,
+    parentArtifactId: isVersionedArtifact ? sourceMeta?.parent_artifact_id ?? null : null,
+    dataSnapshotSha256: isVersionedArtifact ? sourceMeta?.data_snapshot_sha256 ?? null : null,
+    configOrigin: isVersionedArtifact ? sourceMeta?.config_origin ?? null : null,
+    sourcePath: isVersionedArtifact ? sourceMeta?.path ?? null : null,
+    sourceOriginPath: isVersionedArtifact ? sourceMeta?.source_origin_path ?? null : null,
+    gitCommitSha: isVersionedArtifact ? git.git_commit_sha ?? git.commit_sha ?? git.head ?? null : null,
+    gitDirty: isVersionedArtifact ? git.git_dirty ?? git.dirty ?? null : null,
+  }
 }
 
 function refreshLatestCsv(targetDateJst) {
@@ -273,6 +358,77 @@ function refreshLatestCsv(targetDateJst) {
 
   console.log(download.stdout.trim())
   return liveCsvPath
+}
+
+function buildFreshness({
+  dashboardGeneratedAt,
+  manifestGeneratedAt,
+  diagnosticsGeneratedAt,
+  forecastGeneratedAt,
+  predictionAnchorTime,
+}) {
+  const timestamps = {
+    dashboardGeneratedAt,
+    manifestGeneratedAt,
+    diagnosticsGeneratedAt,
+    forecastGeneratedAt,
+    predictionAnchorTime,
+  }
+  const parsed = Object.values(timestamps)
+    .map((value) => parseIsoDate(value))
+    .filter((value) => value !== null)
+  const minTs = parsed.length > 0 ? Math.min(...parsed.map((value) => value.getTime())) : null
+  const maxTs = parsed.length > 0 ? Math.max(...parsed.map((value) => value.getTime())) : null
+
+  return {
+    ...timestamps,
+    artifactLagHours:
+      minTs === null || maxTs === null ? null : Number(((maxTs - minTs) / (1000 * 60 * 60)).toFixed(2)),
+    forecastAgeHours:
+      timestamps.forecastGeneratedAt && timestamps.dashboardGeneratedAt
+        ? computeHoursBetween(timestamps.forecastGeneratedAt, timestamps.dashboardGeneratedAt)
+        : null,
+    diagnosticsAgeHours:
+      timestamps.diagnosticsGeneratedAt && timestamps.dashboardGeneratedAt
+        ? computeHoursBetween(timestamps.diagnosticsGeneratedAt, timestamps.dashboardGeneratedAt)
+        : null,
+    predictionLagHours:
+      timestamps.predictionAnchorTime && timestamps.dashboardGeneratedAt
+        ? computeHoursBetween(timestamps.predictionAnchorTime, timestamps.dashboardGeneratedAt)
+        : null,
+  }
+}
+
+function deriveRunQuality({ interruptedTuning, freshness }) {
+  if (interruptedTuning) {
+    return 'degraded'
+  }
+
+  if ((freshness.artifactLagHours ?? 0) >= 24 || (freshness.predictionLagHours ?? 0) >= 48) {
+    return 'stale'
+  }
+
+  return 'fresh'
+}
+
+function parseIsoDate(value) {
+  if (!value) {
+    return null
+  }
+
+  const parsed = new Date(value)
+  return Number.isNaN(parsed.getTime()) ? null : parsed
+}
+
+function computeHoursBetween(left, right) {
+  const leftDate = parseIsoDate(left)
+  const rightDate = parseIsoDate(right)
+
+  if (!leftDate || !rightDate) {
+    return null
+  }
+
+  return Number((Math.abs(rightDate.getTime() - leftDate.getTime()) / (1000 * 60 * 60)).toFixed(2))
 }
 
 function normalizeDukascopyCsv(inputPath, outputPath, cutoffTs) {

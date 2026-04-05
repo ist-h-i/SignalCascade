@@ -6,6 +6,10 @@ from ..domain.close_anchor import TimeframeParameters
 from ..domain.timeframes import HORIZONS
 
 
+CONFIG_SCHEMA_VERSION = 2
+LEGACY_CONFIG_SCHEMA_VERSION = 1
+
+
 def _default_main_windows() -> dict[str, int]:
     return {"4h": 48, "1d": 21, "1w": 8}
 
@@ -25,7 +29,11 @@ def _default_timeframe_parameters() -> dict[str, TimeframeParameters]:
 
 
 def _default_diagnostic_state_reset_modes() -> tuple[str, ...]:
-    return ("reset_each_session_or_window", "carry_on", "reset_each_example")
+    return ("carry_on", "reset_each_session_or_window", "reset_each_example")
+
+
+def _legacy_diagnostic_state_reset_modes() -> tuple[str, ...]:
+    return ("carry_on", "reset_each_example", "reset_each_session_or_window")
 
 
 def _default_policy_sweep_cost_multipliers() -> tuple[float, ...]:
@@ -42,6 +50,10 @@ def _default_policy_sweep_min_policy_sigmas() -> tuple[float, ...]:
 
 def _default_policy_sweep_state_reset_modes() -> tuple[str, ...]:
     return ("carry_on", "reset_each_session_or_window")
+
+
+def _legacy_policy_sweep_state_reset_modes() -> tuple[str, ...]:
+    return ("carry_on",)
 
 
 @dataclass(frozen=True)
@@ -82,8 +94,8 @@ class TrainingConfig:
     position_scale: float = 1.0
     allow_no_candidate: bool = False
     selection_score_source: str = "profit_utility"
-    training_state_reset_mode: str = "reset_each_session_or_window"
-    evaluation_state_reset_mode: str = "reset_each_session_or_window"
+    training_state_reset_mode: str = "carry_on"
+    evaluation_state_reset_mode: str = "carry_on"
     diagnostic_state_reset_modes: tuple[str, ...] = field(
         default_factory=_default_diagnostic_state_reset_modes
     )
@@ -120,6 +132,7 @@ class TrainingConfig:
 
     def to_dict(self) -> dict[str, object]:
         return {
+            "config_schema_version": CONFIG_SCHEMA_VERSION,
             "seed": self.seed,
             "synthetic_bars": self.synthetic_bars,
             "epochs": self.epochs,
@@ -174,10 +187,69 @@ class TrainingConfig:
 
     @classmethod
     def from_dict(cls, payload: dict[str, object]) -> "TrainingConfig":
+        config_schema_version = int(
+            payload.get("config_schema_version", LEGACY_CONFIG_SCHEMA_VERSION)
+        )
         timeframe_parameters = {
             key: TimeframeParameters.from_dict(value)
             for key, value in dict(payload["timeframe_parameters"]).items()
         }
+        if config_schema_version >= CONFIG_SCHEMA_VERSION:
+            training_state_reset_mode = str(payload["training_state_reset_mode"])
+            evaluation_state_reset_mode = str(payload["evaluation_state_reset_mode"])
+            diagnostic_state_reset_modes = tuple(
+                str(value) for value in payload["diagnostic_state_reset_modes"]
+            )
+            policy_sweep_cost_multipliers = tuple(
+                float(value) for value in payload["policy_sweep_cost_multipliers"]
+            )
+            policy_sweep_gamma_multipliers = tuple(
+                float(value) for value in payload["policy_sweep_gamma_multipliers"]
+            )
+            policy_sweep_min_policy_sigmas = tuple(
+                float(value) for value in payload["policy_sweep_min_policy_sigmas"]
+            )
+            policy_sweep_state_reset_modes = tuple(
+                str(value) for value in payload["policy_sweep_state_reset_modes"]
+            )
+        else:
+            training_state_reset_mode = str(payload.get("training_state_reset_mode", "carry_on"))
+            evaluation_state_reset_mode = str(payload.get("evaluation_state_reset_mode", "carry_on"))
+            diagnostic_state_reset_modes = tuple(
+                str(value)
+                for value in payload.get(
+                    "diagnostic_state_reset_modes",
+                    list(_legacy_diagnostic_state_reset_modes()),
+                )
+            )
+            policy_sweep_cost_multipliers = tuple(
+                float(value)
+                for value in payload.get(
+                    "policy_sweep_cost_multipliers",
+                    list(_default_policy_sweep_cost_multipliers()),
+                )
+            )
+            policy_sweep_gamma_multipliers = tuple(
+                float(value)
+                for value in payload.get(
+                    "policy_sweep_gamma_multipliers",
+                    list(_default_policy_sweep_gamma_multipliers()),
+                )
+            )
+            policy_sweep_min_policy_sigmas = tuple(
+                float(value)
+                for value in payload.get(
+                    "policy_sweep_min_policy_sigmas",
+                    [payload.get("min_policy_sigma", 1e-4)],
+                )
+            )
+            policy_sweep_state_reset_modes = tuple(
+                str(value)
+                for value in payload.get(
+                    "policy_sweep_state_reset_modes",
+                    list(_legacy_policy_sweep_state_reset_modes()),
+                )
+            )
         return cls(
             seed=int(payload["seed"]),
             synthetic_bars=int(payload["synthetic_bars"]),
@@ -215,43 +287,13 @@ class TrainingConfig:
             position_scale=float(payload.get("position_scale", 1.0)),
             allow_no_candidate=bool(payload.get("allow_no_candidate", False)),
             selection_score_source=str(payload.get("selection_score_source", "profit_utility")),
-            training_state_reset_mode=str(payload.get("training_state_reset_mode", "carry_on")),
-            evaluation_state_reset_mode=str(payload.get("evaluation_state_reset_mode", "carry_on")),
-            diagnostic_state_reset_modes=tuple(
-                str(value)
-                for value in payload.get(
-                    "diagnostic_state_reset_modes",
-                    list(_default_diagnostic_state_reset_modes()),
-                )
-            ),
-            policy_sweep_cost_multipliers=tuple(
-                float(value)
-                for value in payload.get(
-                    "policy_sweep_cost_multipliers",
-                    list(_default_policy_sweep_cost_multipliers()),
-                )
-            ),
-            policy_sweep_gamma_multipliers=tuple(
-                float(value)
-                for value in payload.get(
-                    "policy_sweep_gamma_multipliers",
-                    list(_default_policy_sweep_gamma_multipliers()),
-                )
-            ),
-            policy_sweep_min_policy_sigmas=tuple(
-                float(value)
-                for value in payload.get(
-                    "policy_sweep_min_policy_sigmas",
-                    list(_default_policy_sweep_min_policy_sigmas()),
-                )
-            ),
-            policy_sweep_state_reset_modes=tuple(
-                str(value)
-                for value in payload.get(
-                    "policy_sweep_state_reset_modes",
-                    list(_default_policy_sweep_state_reset_modes()),
-                )
-            ),
+            training_state_reset_mode=training_state_reset_mode,
+            evaluation_state_reset_mode=evaluation_state_reset_mode,
+            diagnostic_state_reset_modes=diagnostic_state_reset_modes,
+            policy_sweep_cost_multipliers=policy_sweep_cost_multipliers,
+            policy_sweep_gamma_multipliers=policy_sweep_gamma_multipliers,
+            policy_sweep_min_policy_sigmas=policy_sweep_min_policy_sigmas,
+            policy_sweep_state_reset_modes=policy_sweep_state_reset_modes,
             output_dir=str(payload["output_dir"]),
             horizons=tuple(int(value) for value in payload["horizons"]),
             main_windows={key: int(value) for key, value in dict(payload["main_windows"]).items()},

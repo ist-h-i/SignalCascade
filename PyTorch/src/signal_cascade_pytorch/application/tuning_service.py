@@ -5,6 +5,11 @@ import shutil
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .artifact_provenance import (
+    build_artifact_source_payload,
+    build_subartifact_lineage,
+    materialize_artifact_source,
+)
 from .config import TrainingConfig
 from .dataset_service import (
     build_latest_inference_example_from_bars,
@@ -83,6 +88,7 @@ def tune_latest_dataset(
             output_dir=candidate_dir,
             config=config,
             source_payload=source_payload,
+            base_bars=base_bars,
             summary=summary,
             prediction=prediction,
             sample_count=len(examples),
@@ -172,9 +178,29 @@ def tune_latest_dataset(
             },
         },
     )
+    save_json(
+        current_dir / "source.json",
+        build_artifact_source_payload(
+            materialize_artifact_source(source_payload, current_dir, base_bars=base_bars),
+            current_dir,
+            artifact_kind="training_run",
+            generated_at_utc=manifest["generated_at"],
+            sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=True)),
+        ),
+    )
     generate_research_report(
         current_dir,
         report_path=artifact_root.parent.parent / "report_signalcascade_xauusd.md",
+    )
+    save_json(
+        current_dir / "source.json",
+        build_artifact_source_payload(
+            materialize_artifact_source(source_payload, current_dir, base_bars=base_bars),
+            current_dir,
+            artifact_kind="training_run",
+            generated_at_utc=manifest["generated_at"],
+            sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=True)),
+        ),
     )
     return manifest
 
@@ -188,23 +214,28 @@ def _write_run_artifacts(
     output_dir: Path,
     config: TrainingConfig,
     source_payload: dict[str, object],
+    base_bars,
     summary: dict[str, object],
     prediction,
     sample_count: int,
     source_rows_original: int,
     source_rows_used: int,
 ) -> None:
+    artifact_source_payload = materialize_artifact_source(
+        source_payload,
+        output_dir,
+        base_bars=base_bars,
+    )
     metrics_payload = dict(summary)
     metrics_payload["sample_count"] = sample_count
     metrics_payload["effective_sample_count"] = int(summary.get("train_samples", 0)) + int(
         summary.get("validation_samples", 0)
     )
-    metrics_payload["source"] = source_payload
+    metrics_payload["source"] = artifact_source_payload
     metrics_payload["schema_version"] = METRICS_SCHEMA_VERSION
     metrics_payload["source_rows_original"] = source_rows_original
     metrics_payload["source_rows_used"] = source_rows_used
     save_json(output_dir / "config.json", config.to_dict())
-    save_json(output_dir / "source.json", source_payload)
     save_json(output_dir / "metrics.json", metrics_payload)
     save_json(output_dir / "prediction.json", serialize_prediction_result(prediction))
     save_json(
@@ -223,6 +254,31 @@ def _write_run_artifacts(
             },
         ),
     )
+    save_json(
+        output_dir / "source.json",
+        build_artifact_source_payload(
+            artifact_source_payload,
+            output_dir,
+            artifact_kind="training_run",
+            sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=False)),
+        ),
+    )
+
+
+def _training_sub_artifacts(*, include_report: bool) -> dict[str, str]:
+    entries = {
+        "config.json": "generated",
+        "forecast_summary.json": "generated",
+        "metrics.json": "generated",
+        "prediction.json": "generated",
+        "source.json": "generated",
+        "data_snapshot.csv": "generated",
+    }
+    if include_report:
+        entries["analysis.json"] = "regenerated"
+        entries["manifest.json"] = "generated"
+        entries["research_report.md"] = "regenerated"
+    return entries
 
 
 def _load_parameter_seed(artifact_root: Path) -> dict[str, object]:

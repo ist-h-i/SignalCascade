@@ -78,12 +78,36 @@ type DashboardData = {
     metricsSchemaVersion: number | null
     predictionSchemaVersion: number | null
     forecastSchemaVersion: number | null
+    sourceSchemaVersion?: number | null
   }
   provenance: {
     rawRows: number
-    sourcePath: string
+    artifactKind?: string | null
+    artifactId?: string | null
+    parentArtifactId?: string | null
+    dataSnapshotSha256?: string | null
+    configOrigin?: string | null
+    sourcePath: string | null
+    sourceOriginPath?: string | null
+    gitCommitSha?: string | null
+    gitDirty?: boolean | null
     start: string
     end: string
+    manifestGeneratedAt?: string | null
+    diagnosticsGeneratedAt?: string | null
+    forecastGeneratedAt?: string | null
+    predictionAnchorTime?: string | null
+    freshness?: {
+      dashboardGeneratedAt: string
+      manifestGeneratedAt: string | null
+      diagnosticsGeneratedAt: string | null
+      forecastGeneratedAt: string | null
+      predictionAnchorTime: string | null
+      artifactLagHours: number | null
+      forecastAgeHours: number | null
+      diagnosticsAgeHours: number | null
+      predictionLagHours: number | null
+    }
   }
   run: {
     anchorTime: string
@@ -93,6 +117,12 @@ type DashboardData = {
     position: number
     overlayAction: string
     policyStatus: string
+    stateResetMode: string | null
+    costMultiplier: number | null
+    gammaMultiplier: number | null
+    minPolicySigma: number | null
+    interruptedTuning: boolean
+    runQuality: string
     trainSamples: number
     validationSamples: number
     sampleCount: number
@@ -139,6 +169,9 @@ type DashboardData = {
       exactSmoothUtilityRegret: number | null
       logWealthClampHitRate: number | null
       stateResetMode: string | null
+      costMultiplier: number | null
+      gammaMultiplier: number | null
+      minPolicySigma: number | null
       turnover: number | null
       maxDrawdown: number | null
     } | null
@@ -279,6 +312,14 @@ function App() {
   const predictionBandWidthPct = ((selectedForecast.upperClose - selectedForecast.lowerClose) / data.run.anchorClose) * 100
   const selectedUncertaintyScore = getUncertaintyScore(selectedForecast.uncertainty, data.horizons)
   const selectedUncertaintyLabel = getUncertaintyLabel(selectedUncertaintyScore)
+  const operatingPointSummary = [
+    translateStateResetMode(data.run.stateResetMode),
+    data.run.costMultiplier !== null ? `cost x${data.run.costMultiplier.toFixed(2)}` : null,
+    data.run.gammaMultiplier !== null ? `gamma x${data.run.gammaMultiplier.toFixed(2)}` : null,
+  ]
+    .filter(Boolean)
+    .join(' / ')
+  const freshness = data.provenance.freshness
   const bestParamsSummary = bestParams
     ? `E${formatInteger(bestParams.epochs)} / B${formatInteger(bestParams.batchSize)} / H${formatInteger(bestParams.hiddenDim)}`
     : '-'
@@ -312,6 +353,7 @@ function App() {
           <MetricTile label="平均 Log Wealth" value={formatNullableSignedDecimal(averageLogWealth, 3)} />
           <MetricTile label="信頼度" value={`${trustScore} / 100`} accent={confidenceTone !== 'confidence-pill--caution'} />
           <MetricTile label="ポリシー状態" value={translatePolicyState(data.run.policyStatus)} accent />
+          <MetricTile label="run quality" value={translateRunQuality(data.run.runQuality)} />
         </div>
       </motion.header>
 
@@ -448,11 +490,28 @@ function App() {
               <MiniStat label="採用エポック" value={`${data.run.bestEpoch}回`} />
               <MiniStat label="PnL / anchor" value={formatNullableSignedDecimal(realizedPnlPerAnchor, 3)} />
               <MiniStat label="学習データ" value={`${formatInteger(data.run.sourceRows)} rows`} />
+              <MiniStat label="評価 reset" value={translateStateResetMode(data.run.stateResetMode)} />
+              <MiniStat label="operating point" value={operatingPointSummary || '-'} />
+              <MiniStat label="min policy σ" value={formatNullableScientific(data.run.minPolicySigma)} />
+              <MiniStat label="tuning 状態" value={data.run.interruptedTuning ? '中断あり' : '完了'} />
             </div>
 
             <div className="decision-note">
               <strong>評価</strong>
               <p>{reuseNarrative}</p>
+            </div>
+
+            <div className="decision-note decision-note--soft">
+              <strong>Provenance</strong>
+              <p>
+                {translateRunQuality(data.run.runQuality)}。
+                {freshness?.predictionLagHours !== null && freshness?.predictionLagHours !== undefined
+                  ? ` 予測 anchor は ${freshness.predictionLagHours.toFixed(1)} 時間前です。`
+                  : ''}
+                {freshness?.artifactLagHours !== null && freshness?.artifactLagHours !== undefined
+                  ? ` artifact ずれは ${freshness.artifactLagHours.toFixed(1)} 時間です。`
+                  : ''}
+              </p>
             </div>
 
             <div className="insight-list">
@@ -531,6 +590,8 @@ function App() {
             <div className="quality-strip quality-strip--compact tuning-strip">
               <MiniStat label="セッション" value={data.run.tuningSessionId ?? '-'} />
               <MiniStat label="更新" value={formatTimestamp(data.generatedAt)} />
+              <MiniStat label="run quality" value={translateRunQuality(data.run.runQuality)} />
+              <MiniStat label="中断 tuning" value={data.run.interruptedTuning ? 'あり' : 'なし'} />
               <MiniStat label="候補" value={bestParamsSummary} />
               <MiniStat label="Epoch" value={bestParams ? formatInteger(bestParams.epochs) : '-'} />
               <MiniStat label="Batch" value={bestParams ? formatInteger(bestParams.batchSize) : '-'} />
@@ -918,6 +979,14 @@ function formatNullableSignedDecimal(value: number | null | undefined, digits = 
   return `${value >= 0 ? '+' : ''}${value.toFixed(digits)}`
 }
 
+function formatNullableScientific(value: number | null | undefined): string {
+  if (value === null || value === undefined) {
+    return '-'
+  }
+
+  return value.toExponential(2)
+}
+
 function formatInteger(value: number): string {
   return new Intl.NumberFormat('en-US').format(value)
 }
@@ -990,6 +1059,32 @@ function translatePolicyState(value: string): string {
       return '稼働中'
     case 'no-trade':
       return 'ノートレード'
+    default:
+      return value
+  }
+}
+
+function translateStateResetMode(value: string | null | undefined): string {
+  switch (value) {
+    case 'carry_on':
+      return 'carry_on'
+    case 'reset_each_example':
+      return 'example ごと reset'
+    case 'reset_each_session_or_window':
+      return 'session/window ごと reset'
+    default:
+      return value ?? '-'
+  }
+}
+
+function translateRunQuality(value: string): string {
+  switch (value) {
+    case 'fresh':
+      return 'fresh'
+    case 'degraded':
+      return 'degraded'
+    case 'stale':
+      return 'stale'
     default:
       return value
   }

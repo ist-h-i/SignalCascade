@@ -8,7 +8,13 @@ import unittest
 import torch
 
 from signal_cascade_pytorch.application.config import TrainingConfig
-from signal_cascade_pytorch.application.diagnostics_service import export_review_diagnostics
+from signal_cascade_pytorch.application.diagnostics_service import (
+    POLICY_SELECTION_BASIS,
+    POLICY_SELECTION_RULE_VERSION,
+    _annotate_policy_calibration_sweep,
+    _summarize_policy_calibration_sweep,
+    export_review_diagnostics,
+)
 from signal_cascade_pytorch.domain.entities import TrainingExample
 from signal_cascade_pytorch.domain.timeframes import MAIN_TIMEFRAMES, OVERLAY_TIMEFRAMES
 from signal_cascade_pytorch.interfaces.cli import build_parser
@@ -94,6 +100,60 @@ class PolicySweepTests(unittest.TestCase):
         self.assertEqual(
             summary["policy_calibration_summary"]["row_count"],
             len(sweep),
+        )
+        self.assertEqual(
+            summary["policy_calibration_summary"]["selection_rule_version"],
+            POLICY_SELECTION_RULE_VERSION,
+        )
+        self.assertIsNotNone(summary["policy_calibration_summary"]["selected_row_key"])
+        self.assertIsNotNone(summary["policy_calibration_summary"]["policy_calibration_rows_sha256"])
+
+    def test_policy_sweep_selection_is_order_invariant_and_basis_matches_axes(self) -> None:
+        rows = [
+            {
+                "row_key": "state_reset_mode=carry_on|cost_multiplier=1|gamma_multiplier=1|min_policy_sigma=0.0001",
+                "state_reset_mode": "carry_on",
+                "cost_multiplier": 1.0,
+                "gamma_multiplier": 1.0,
+                "min_policy_sigma": 0.0001,
+                "average_log_wealth": 0.012,
+                "turnover": 0.40,
+                "cvar_tail_loss": 0.02,
+                "no_trade_band_hit_rate": 0.10,
+            },
+            {
+                "row_key": "state_reset_mode=reset_each_session_or_window|cost_multiplier=1|gamma_multiplier=1|min_policy_sigma=0.0001",
+                "state_reset_mode": "reset_each_session_or_window",
+                "cost_multiplier": 1.0,
+                "gamma_multiplier": 1.0,
+                "min_policy_sigma": 0.0001,
+                "average_log_wealth": 0.012,
+                "turnover": 0.40,
+                "cvar_tail_loss": 0.02,
+                "no_trade_band_hit_rate": 0.90,
+            },
+        ]
+
+        forward_summary = _summarize_policy_calibration_sweep(_annotate_policy_calibration_sweep(rows))
+        reverse_summary = _summarize_policy_calibration_sweep(
+            _annotate_policy_calibration_sweep(list(reversed(rows)))
+        )
+
+        self.assertEqual(
+            POLICY_SELECTION_BASIS,
+            "pareto_rank_then_average_log_wealth_cvar_tail_loss_turnover_row_key",
+        )
+        self.assertEqual(
+            forward_summary["selected_row_key"],
+            reverse_summary["selected_row_key"],
+        )
+        self.assertEqual(
+            forward_summary["policy_calibration_rows_sha256"],
+            reverse_summary["policy_calibration_rows_sha256"],
+        )
+        self.assertEqual(
+            forward_summary["selected_row_key"],
+            "state_reset_mode=carry_on|cost_multiplier=1|gamma_multiplier=1|min_policy_sigma=0.0001",
         )
 
     def test_parser_accepts_policy_sweep_overrides(self) -> None:

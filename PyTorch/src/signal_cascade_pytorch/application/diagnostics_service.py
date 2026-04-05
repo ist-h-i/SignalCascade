@@ -2,6 +2,8 @@ from __future__ import annotations
 
 import csv
 from datetime import datetime, timezone
+import hashlib
+import json
 from pathlib import Path
 from typing import Sequence
 
@@ -19,7 +21,9 @@ from ..domain.entities import OHLCVBar, TrainingExample
 from ..infrastructure.ml.model import SignalCascadeModel
 from ..infrastructure.persistence import save_json
 
-DIAGNOSTICS_SCHEMA_VERSION = 4
+DIAGNOSTICS_SCHEMA_VERSION = 5
+POLICY_SELECTION_RULE_VERSION = 2
+POLICY_SELECTION_BASIS = "pareto_rank_then_average_log_wealth_cvar_tail_loss_turnover_row_key"
 
 
 def export_review_diagnostics(
@@ -307,6 +311,12 @@ def _build_policy_calibration_sweep(
                     )
                     sweep_rows.append(
                         {
+                            "row_key": _policy_sweep_row_key(
+                                state_reset_mode=state_reset_mode,
+                                cost_multiplier=float(cost_multiplier),
+                                gamma_multiplier=float(gamma_multiplier),
+                                min_policy_sigma=float(min_policy_sigma),
+                            ),
                             "state_reset_mode": state_reset_mode,
                             "cost_multiplier": float(cost_multiplier),
                             "gamma_multiplier": float(gamma_multiplier),
@@ -351,7 +361,7 @@ def _annotate_policy_calibration_sweep(
             -float(item["average_log_wealth"]),
             float(item["cvar_tail_loss"]),
             float(item["turnover"]),
-            -float(item["no_trade_band_hit_rate"]),
+            str(item["row_key"]),
         ),
     )
 
@@ -364,13 +374,11 @@ def _policy_sweep_row_dominates(
         float(left["average_log_wealth"]) >= float(right["average_log_wealth"]),
         float(left["turnover"]) <= float(right["turnover"]),
         float(left["cvar_tail_loss"]) <= float(right["cvar_tail_loss"]),
-        float(left["no_trade_band_hit_rate"]) >= float(right["no_trade_band_hit_rate"]),
     )
     strictly_better = (
         float(left["average_log_wealth"]) > float(right["average_log_wealth"])
         or float(left["turnover"]) < float(right["turnover"])
         or float(left["cvar_tail_loss"]) < float(right["cvar_tail_loss"])
-        or float(left["no_trade_band_hit_rate"]) > float(right["no_trade_band_hit_rate"])
     )
     return all(comparisons) and strictly_better
 
@@ -379,13 +387,47 @@ def _summarize_policy_calibration_sweep(
     sweep_rows: Sequence[dict[str, object]],
 ) -> dict[str, object]:
     pareto_rows = [dict(row) for row in sweep_rows if not bool(row.get("dominated", False))]
-    best_row = pareto_rows[0] if pareto_rows else (dict(sweep_rows[0]) if sweep_rows else None)
+    selected_row = pareto_rows[0] if pareto_rows else (dict(sweep_rows[0]) if sweep_rows else None)
     return {
         "row_count": len(sweep_rows),
         "pareto_optimal_count": len(pareto_rows),
         "dominated_count": max(len(sweep_rows) - len(pareto_rows), 0),
-        "best_row": best_row,
+        "policy_calibration_rows_sha256": _policy_sweep_rows_sha256(sweep_rows),
+        "selection_basis": POLICY_SELECTION_BASIS,
+        "selection_rule_version": POLICY_SELECTION_RULE_VERSION,
+        "selected_row": selected_row,
+        "selected_row_key": None if selected_row is None else selected_row.get("row_key"),
+        "best_row": selected_row,
     }
+
+
+def _policy_sweep_row_key(
+    *,
+    state_reset_mode: str,
+    cost_multiplier: float,
+    gamma_multiplier: float,
+    min_policy_sigma: float,
+) -> str:
+    return "|".join(
+        (
+            f"state_reset_mode={state_reset_mode}",
+            f"cost_multiplier={cost_multiplier:.12g}",
+            f"gamma_multiplier={gamma_multiplier:.12g}",
+            f"min_policy_sigma={min_policy_sigma:.12g}",
+        )
+    )
+
+
+def _policy_sweep_rows_sha256(sweep_rows: Sequence[dict[str, object]]) -> str | None:
+    row_keys = sorted(
+        str(row["row_key"])
+        for row in sweep_rows
+        if row.get("row_key") is not None
+    )
+    if not row_keys:
+        return None
+    encoded = json.dumps(row_keys, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
+    return hashlib.sha256(encoded).hexdigest()
 
 
 def _write_csv(path: Path, rows: Sequence[dict[str, object]]) -> None:

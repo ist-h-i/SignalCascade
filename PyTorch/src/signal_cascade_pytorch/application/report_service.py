@@ -9,7 +9,7 @@ from ..infrastructure.persistence import load_json, save_json
 JST = timezone(timedelta(hours=9))
 UTC = timezone.utc
 METRICS_SCHEMA_VERSION = 4
-ANALYSIS_SCHEMA_VERSION = 4
+ANALYSIS_SCHEMA_VERSION = 5
 
 
 def generate_research_report(
@@ -25,7 +25,17 @@ def generate_research_report(
         if (output_dir / "validation_summary.json").exists()
         else {}
     )
-    analysis = _build_analysis(output_dir, metrics, prediction, config, diagnostics_summary)
+    source_payload = (
+        load_json(output_dir / "source.json") if (output_dir / "source.json").exists() else {}
+    )
+    analysis = _build_analysis(
+        output_dir,
+        metrics,
+        prediction,
+        config,
+        diagnostics_summary,
+        source_payload,
+    )
     save_json(output_dir / "analysis.json", analysis)
 
     markdown = _render_markdown_report(analysis)
@@ -44,6 +54,7 @@ def _build_analysis(
     prediction: dict[str, object],
     config: dict[str, object],
     diagnostics_summary: dict[str, object],
+    source_payload: dict[str, object],
 ) -> dict[str, object]:
     validation = dict(metrics.get("validation_metrics", {}))
     generated_at_utc = datetime.now(UTC)
@@ -80,6 +91,7 @@ def _build_analysis(
         "generated_at_utc": generated_at_utc.isoformat(),
         "generated_at_jst": generated_at_utc.astimezone(JST).isoformat(),
         "artifact_dir": str(output_dir),
+        "artifact_provenance": _summarize_artifact_provenance(source_payload),
         "artifact_versions": {
             "metrics": int(metrics.get("schema_version", 0)),
             "prediction": int(prediction.get("schema_version", 0)),
@@ -149,16 +161,48 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
     dataset = analysis["dataset"]
     training = analysis["training"]
     validation = analysis["validation_metrics"]
+    artifact_provenance = analysis.get("artifact_provenance", {})
     stateful_evaluation = analysis["stateful_evaluation"]
     policy_calibration_sweep = analysis["policy_calibration_sweep"]
     policy_calibration_summary = analysis["policy_calibration_summary"]
     forecast = analysis["forecast"]
     rows = forecast["rows"]
-    best_sweep_row = (
-        dict(policy_calibration_summary.get("best_row", {}))
-        if policy_calibration_summary.get("best_row") is not None
+    selected_sweep_row = (
+        dict(policy_calibration_summary.get("selected_row", {}))
+        if policy_calibration_summary.get("selected_row") is not None
         else None
     )
+    artifact_lines = [
+        "## Artifact",
+        f"- kind: `{artifact_provenance.get('artifact_kind', 'legacy')}`",
+        f"- artifact id: `{artifact_provenance.get('artifact_id', '-')}`",
+        f"- source kind / path: `{artifact_provenance.get('source_kind', '-')}` / `{artifact_provenance.get('source_path', '-')}`",
+        f"- config origin: `{artifact_provenance.get('config_origin', '-')}`",
+    ]
+    if artifact_provenance.get("parent_artifact_dir") is not None:
+        artifact_lines.append(
+            f"- parent artifact dir: `{artifact_provenance['parent_artifact_dir']}`"
+        )
+    if artifact_provenance.get("parent_artifact_id") is not None:
+        artifact_lines.append(
+            f"- parent artifact id: `{artifact_provenance['parent_artifact_id']}`"
+        )
+    if artifact_provenance.get("git_head") is not None:
+        artifact_lines.append(
+            f"- git head / dirty: `{artifact_provenance['git_head']}` / `{artifact_provenance.get('git_dirty', False)}`"
+        )
+    if artifact_provenance.get("git_tree_sha") is not None:
+        artifact_lines.append(
+            f"- git tree sha: `{artifact_provenance['git_tree_sha']}`"
+        )
+    if artifact_provenance.get("data_snapshot_sha256") is not None:
+        artifact_lines.append(
+            f"- data snapshot sha256: `{artifact_provenance['data_snapshot_sha256'][:16]}`"
+        )
+    if artifact_provenance.get("sub_artifact_materialization") is not None:
+        artifact_lines.append(
+            f"- sub-artifact lineage: `{artifact_provenance['sub_artifact_materialization']}`"
+        )
     row_lines = "\n".join(
         f"- h={int(row['horizon_4h'])}: expected_log_return={float(row['expected_log_return']):.4f}, "
         f"expected_return_pct={float(row['expected_return_pct']):.4f}, "
@@ -172,6 +216,8 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             "",
             f"- Generated (JST): `{analysis['generated_at_jst']}`",
             f"- Policy mode: `{analysis['policy_mode']}`",
+            "",
+            *artifact_lines,
             "",
             "## Dataset",
             f"- sample_count: `{dataset['sample_count']}`",
@@ -217,14 +263,24 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f"- policy sweep rows / pareto_optimal: "
             f"`{int(policy_calibration_summary.get('row_count', len(policy_calibration_sweep)))}` / "
             f"`{int(policy_calibration_summary.get('pareto_optimal_count', 0))}`",
+            f"- policy sweep selection basis / version: "
+            f"`{policy_calibration_summary.get('selection_basis', '-')}` / "
+            f"`{policy_calibration_summary.get('selection_rule_version', '-')}`",
             (
-                f"- best policy sweep: reset=`{best_sweep_row['state_reset_mode']}`, "
-                f"cost x`{float(best_sweep_row['cost_multiplier']):.2f}`, "
-                f"gamma x`{float(best_sweep_row['gamma_multiplier']):.2f}`, "
-                f"min_sigma=`{float(best_sweep_row['min_policy_sigma']):.6f}`, "
-                f"log_wealth=`{float(best_sweep_row['average_log_wealth']):.6f}`"
-                if best_sweep_row is not None
-                else "- best policy sweep: none"
+                f"- selected policy sweep: reset=`{selected_sweep_row['state_reset_mode']}`, "
+                f"cost x`{float(selected_sweep_row['cost_multiplier']):.2f}`, "
+                f"gamma x`{float(selected_sweep_row['gamma_multiplier']):.2f}`, "
+                f"min_sigma=`{float(selected_sweep_row['min_policy_sigma']):.6f}`, "
+                f"log_wealth=`{float(selected_sweep_row['average_log_wealth']):.6f}`"
+                if selected_sweep_row is not None
+                else "- selected policy sweep: none"
+            ),
+            f"- selected row key: `{policy_calibration_summary.get('selected_row_key', '-')}`",
+            (
+                f"- policy sweep rows sha256: "
+                f"`{str(policy_calibration_summary.get('policy_calibration_rows_sha256'))[:16]}`"
+                if policy_calibration_summary.get("policy_calibration_rows_sha256") is not None
+                else "- policy sweep rows sha256: `-`"
             ),
             "",
             "## Forecast",
@@ -242,3 +298,38 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f"- {analysis['project_assessment']['summary']}",
         ]
     )
+
+
+def _summarize_artifact_provenance(source_payload: dict[str, object]) -> dict[str, object]:
+    git_payload = source_payload.get("git")
+    git = git_payload if isinstance(git_payload, dict) else {}
+    sub_artifacts_payload = source_payload.get("sub_artifacts")
+    sub_artifacts = sub_artifacts_payload if isinstance(sub_artifacts_payload, dict) else {}
+    materialization = ", ".join(
+        f"{name}:{details.get('materialization', '-')}"
+        for name, details in sorted(sub_artifacts.items())
+        if isinstance(details, dict)
+    )
+    return {
+        "artifact_schema_version": source_payload.get("artifact_schema_version"),
+        "artifact_kind": source_payload.get("artifact_kind"),
+        "artifact_id": source_payload.get("artifact_id"),
+        "artifact_dir": source_payload.get("artifact_dir"),
+        "parent_artifact_dir": source_payload.get("parent_artifact_dir"),
+        "parent_artifact_id": source_payload.get("parent_artifact_id"),
+        "source_kind": source_payload.get("kind"),
+        "source_path": source_payload.get("path"),
+        "data_snapshot_sha256": source_payload.get("data_snapshot_sha256"),
+        "config_sha256": source_payload.get("config_sha256"),
+        "config_origin": source_payload.get("config_origin"),
+        "state_reset_boundary_spec_version": source_payload.get(
+            "state_reset_boundary_spec_version"
+        ),
+        "git_head": git.get("head"),
+        "git_head": git.get("head", git.get("git_commit_sha", git.get("commit_sha"))),
+        "git_commit_sha": git.get("git_commit_sha", git.get("commit_sha", git.get("head"))),
+        "git_tree_sha": git.get("git_tree_sha", git.get("tree_sha")),
+        "git_dirty": git.get("git_dirty", git.get("dirty")),
+        "git_dirty_patch_sha256": git.get("dirty_patch_sha256"),
+        "sub_artifact_materialization": materialization or None,
+    }

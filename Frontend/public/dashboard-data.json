@@ -1,6 +1,6 @@
 {
   "schemaVersion": 4,
-  "generatedAt": "2026-03-27T06:28:13.255Z",
+  "generatedAt": "2026-03-27T09:55:05.081Z",
   "instrument": "金 / XAUUSD",
   "artifacts": {
     "metricsSchemaVersion": 4,
@@ -10,8 +10,23 @@
   "provenance": {
     "rawRows": 2834,
     "sourcePath": "/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/live/xauusd_m30_latest.csv",
-    "start": "2025-12-30T11:00:00.000Z",
-    "end": "2026-03-27T05:30:00.000Z"
+    "start": "2025-12-30T13:00:00.000Z",
+    "end": "2026-03-27T07:30:00.000Z",
+    "manifestGeneratedAt": "2026-03-27T04:18:04.395085+00:00",
+    "diagnosticsGeneratedAt": "2026-03-27T06:27:55.599148+00:00",
+    "forecastGeneratedAt": null,
+    "predictionAnchorTime": "2026-03-24T20:00:00+00:00",
+    "freshness": {
+      "dashboardGeneratedAt": "2026-03-27T09:55:05.081Z",
+      "manifestGeneratedAt": "2026-03-27T04:18:04.395085+00:00",
+      "diagnosticsGeneratedAt": "2026-03-27T06:27:55.599148+00:00",
+      "forecastGeneratedAt": null,
+      "predictionAnchorTime": "2026-03-24T20:00:00+00:00",
+      "artifactLagHours": 61.92,
+      "forecastAgeHours": null,
+      "diagnosticsAgeHours": 3.45,
+      "predictionLagHours": 61.92
+    }
   },
   "run": {
     "anchorTime": "2026-03-24T20:00:00.000Z",
@@ -21,6 +36,12 @@
     "position": 0.18051757675864127,
     "overlayAction": "reduce",
     "policyStatus": "active",
+    "stateResetMode": "carry_on",
+    "costMultiplier": 1,
+    "gammaMultiplier": 1,
+    "minPolicySigma": 0.0001,
+    "interruptedTuning": true,
+    "runQuality": "degraded",
     "trainSamples": 129,
     "validationSamples": 32,
     "sampleCount": 164,
@@ -1784,6 +1805,9 @@
       "exactSmoothUtilityRegret": 0.0070845208398817375,
       "logWealthClampHitRate": 0,
       "stateResetMode": "carry_on",
+      "costMultiplier": 1,
+      "gammaMultiplier": 1,
+      "minPolicySigma": null,
       "turnover": 8.776042206270933,
       "maxDrawdown": 0.05190163901661479,
       "utilityScore": 0.6694646927362589

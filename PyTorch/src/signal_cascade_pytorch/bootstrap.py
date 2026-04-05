@@ -1,8 +1,14 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import datetime, timedelta
 from pathlib import Path
 
+from .application.artifact_provenance import (
+    build_artifact_source_payload,
+    build_subartifact_lineage,
+    materialize_artifact_source,
+)
 from .application.config import TrainingConfig
 from .application.diagnostics_service import export_review_diagnostics
 from .application.dataset_service import (
@@ -27,6 +33,8 @@ from .infrastructure.data.synthetic_source import SyntheticMarketDataSource
 from .infrastructure.ml.model import SignalCascadeModel
 from .infrastructure.persistence import ensure_directory, load_checkpoint, load_json, save_json
 
+OVERLAY_MANIFEST_SCHEMA_VERSION = 1
+
 
 def train_command(args) -> int:
     config = _build_config(args)
@@ -45,6 +53,11 @@ def train_command(args) -> int:
         examples = build_training_examples_from_bars(base_bars, config)
     else:
         examples = build_training_examples(source, config)
+    artifact_source_payload = materialize_artifact_source(
+        source_payload,
+        output_dir,
+        base_bars=base_bars if source_payload["kind"] == "csv" else None,
+    )
 
     model, summary = train_model(examples, config, output_dir)
     prediction = predict_latest(
@@ -56,13 +69,12 @@ def train_command(args) -> int:
 
     summary["sample_count"] = len(examples)
     summary["effective_sample_count"] = summary["train_samples"] + summary["validation_samples"]
-    summary["source"] = source_payload
+    summary["source"] = artifact_source_payload
     summary["schema_version"] = METRICS_SCHEMA_VERSION
     if source_rows_original is not None and source_rows_used is not None:
         summary["source_rows_original"] = source_rows_original
         summary["source_rows_used"] = source_rows_used
     save_json(output_dir / "config.json", config.to_dict())
-    save_json(output_dir / "source.json", source_payload)
     save_json(output_dir / "metrics.json", summary)
     save_json(output_dir / "prediction.json", serialize_prediction_result(prediction))
     _save_forecast_summary(output_dir, prediction, config)
@@ -71,12 +83,45 @@ def train_command(args) -> int:
         model=model,
         examples=examples,
         config=config,
-        source_payload=source_payload,
+        source_payload=artifact_source_payload,
         source_rows_original=source_rows_original,
         source_rows_used=source_rows_used,
         base_bars=base_bars if source_payload["kind"] == "csv" else None,
     )
+    train_sub_artifacts = {
+        "analysis.json": "regenerated",
+        "config.json": "generated",
+        "forecast_summary.json": "generated",
+        "horizon_diag.csv": "generated",
+        "metrics.json": "generated",
+        "policy_summary.csv": "generated",
+        "prediction.json": "generated",
+        "research_report.md": "regenerated",
+        "source.json": "generated",
+        "validation_rows.csv": "generated",
+        "validation_summary.json": "generated",
+    }
+    if artifact_source_payload["kind"] == "csv":
+        train_sub_artifacts["data_snapshot.csv"] = "generated"
+    save_json(
+        output_dir / "source.json",
+        build_artifact_source_payload(
+            artifact_source_payload,
+            output_dir,
+            artifact_kind="training_run",
+            sub_artifacts=build_subartifact_lineage(train_sub_artifacts),
+        ),
+    )
     generate_research_report(output_dir)
+    save_json(
+        output_dir / "source.json",
+        build_artifact_source_payload(
+            artifact_source_payload,
+            output_dir,
+            artifact_kind="training_run",
+            sub_artifacts=build_subartifact_lineage(train_sub_artifacts),
+        ),
+    )
 
     print(f"trained samples: {summary['train_samples']}")
     print(f"validation samples: {summary['validation_samples']}")
@@ -134,10 +179,9 @@ def predict_command(args) -> int:
 
 def export_diagnostics_command(args) -> int:
     artifact_dir = Path(args.output_dir).expanduser().resolve()
-    diagnostics_output_dir = (
-        ensure_directory(Path(args.diagnostics_output_dir).expanduser().resolve())
-        if getattr(args, "diagnostics_output_dir", None)
-        else artifact_dir
+    diagnostics_output_dir = _resolve_diagnostics_output_dir(
+        artifact_dir,
+        getattr(args, "diagnostics_output_dir", None),
     )
     config = _load_config_with_overrides(artifact_dir, args)
     source_payload = _resolve_source_payload(args, artifact_dir)
@@ -154,6 +198,11 @@ def export_diagnostics_command(args) -> int:
         examples = build_training_examples_from_bars(base_bars, config)
     else:
         examples = build_training_examples(source, config)
+    artifact_source_payload = materialize_artifact_source(
+        source_payload,
+        diagnostics_output_dir,
+        base_bars=base_bars if source_payload["kind"] == "csv" else None,
+    )
 
     model = _build_model_from_example(examples[0], config)
     load_checkpoint(artifact_dir / "model.pt", model)
@@ -162,19 +211,29 @@ def export_diagnostics_command(args) -> int:
         model=model,
         examples=examples,
         config=config,
-        source_payload=source_payload,
+        source_payload=artifact_source_payload,
         source_rows_original=source_rows_original,
         source_rows_used=source_rows_used,
         base_bars=base_bars,
     )
+    _materialize_replay_artifact(
+        artifact_dir=artifact_dir,
+        diagnostics_output_dir=diagnostics_output_dir,
+        config=config,
+        source_payload=artifact_source_payload,
+        validation_summary=summary,
+    )
 
     print(f"artifact dir: {artifact_dir}")
-    print(f"diagnostics dir: {diagnostics_output_dir}")
+    print(f"diagnostics overlay dir: {diagnostics_output_dir}")
     print(f"validation rows: {diagnostics_output_dir / 'validation_rows.csv'}")
     print(f"policy summary: {diagnostics_output_dir / 'policy_summary.csv'}")
     print(f"horizon diagnostics: {diagnostics_output_dir / 'horizon_diag.csv'}")
     print(f"summary: {diagnostics_output_dir / 'validation_summary.json'}")
-    print(f"validation executed trades: {summary['validation']['executed_trade_count']}")
+    print(
+        "validation average_log_wealth: "
+        f"{float(summary['validation']['average_log_wealth']):.6f}"
+    )
     return 0
 
 
@@ -222,6 +281,145 @@ def _save_forecast_summary(output_dir: Path, prediction, config: TrainingConfig)
         output_dir / "forecast_summary.json",
         build_forecast_summary_payload(prediction, config),
     )
+
+
+def _overlay_sub_artifacts(source_payload: dict[str, object]) -> dict[str, str]:
+    entries = {
+        "analysis.json": "regenerated",
+        "config.json": "regenerated",
+        "forecast_summary.json": "copied",
+        "horizon_diag.csv": "regenerated",
+        "manifest.json": "generated",
+        "metrics.json": "regenerated",
+        "policy_summary.csv": "regenerated",
+        "prediction.json": "copied",
+        "source.json": "regenerated",
+        "validation_rows.csv": "regenerated",
+        "validation_summary.json": "regenerated",
+    }
+    if source_payload["kind"] == "csv":
+        entries["data_snapshot.csv"] = "generated"
+    return entries
+
+
+def _materialize_replay_artifact(
+    artifact_dir: Path,
+    diagnostics_output_dir: Path,
+    config: TrainingConfig,
+    source_payload: dict[str, object],
+    validation_summary: dict[str, object],
+) -> None:
+    resolved_config = replace(config, output_dir=str(diagnostics_output_dir))
+    save_json(diagnostics_output_dir / "config.json", resolved_config.to_dict())
+
+    metrics_path = artifact_dir / "metrics.json"
+    if metrics_path.exists():
+        metrics_payload = load_json(metrics_path)
+        metrics_payload["validation_metrics"] = dict(validation_summary["validation"])
+        metrics_payload["schema_version"] = METRICS_SCHEMA_VERSION
+        save_json(diagnostics_output_dir / "metrics.json", metrics_payload)
+
+    for name in ("prediction.json", "forecast_summary.json"):
+        source_path = artifact_dir / name
+        if source_path.exists():
+            save_json(diagnostics_output_dir / name, load_json(source_path))
+
+    save_json(
+        diagnostics_output_dir / "manifest.json",
+        _build_overlay_manifest(
+            artifact_dir=artifact_dir,
+            diagnostics_output_dir=diagnostics_output_dir,
+            source_payload=source_payload,
+            validation_summary=validation_summary,
+        ),
+    )
+
+    save_json(
+        diagnostics_output_dir / "source.json",
+        build_artifact_source_payload(
+            source_payload,
+            diagnostics_output_dir,
+            artifact_kind="diagnostic_replay_overlay",
+            parent_artifact_dir=artifact_dir,
+            generated_at_utc=str(validation_summary["generated_at_utc"]),
+            sub_artifacts=build_subartifact_lineage(
+                _overlay_sub_artifacts(source_payload),
+                source_artifact_dir=artifact_dir,
+            ),
+        ),
+    )
+
+    if (diagnostics_output_dir / "metrics.json").exists() and (diagnostics_output_dir / "prediction.json").exists():
+        generate_research_report(diagnostics_output_dir)
+        save_json(
+            diagnostics_output_dir / "source.json",
+            build_artifact_source_payload(
+                source_payload,
+                diagnostics_output_dir,
+                artifact_kind="diagnostic_replay_overlay",
+                parent_artifact_dir=artifact_dir,
+                generated_at_utc=str(validation_summary["generated_at_utc"]),
+                sub_artifacts=build_subartifact_lineage(
+                    _overlay_sub_artifacts(source_payload),
+                    source_artifact_dir=artifact_dir,
+                ),
+            ),
+        )
+
+
+def _resolve_diagnostics_output_dir(
+    artifact_dir: Path,
+    diagnostics_output_dir: str | None,
+) -> Path:
+    resolved_artifact_dir = artifact_dir.expanduser().resolve()
+    resolved_output_dir = (
+        ensure_directory(Path(diagnostics_output_dir).expanduser().resolve())
+        if diagnostics_output_dir is not None
+        else ensure_directory(
+            resolved_artifact_dir.parent / f"{resolved_artifact_dir.name}_diagnostic_replay_overlay"
+        )
+    )
+    if resolved_output_dir == resolved_artifact_dir:
+        raise ValueError(
+            "diagnostic replay overlay must not overwrite the source artifact directory"
+        )
+    return resolved_output_dir
+
+
+def _build_overlay_manifest(
+    *,
+    artifact_dir: Path,
+    diagnostics_output_dir: Path,
+    source_payload: dict[str, object],
+    validation_summary: dict[str, object],
+) -> dict[str, object]:
+    parent_manifest = (
+        load_json(artifact_dir / "manifest.json") if (artifact_dir / "manifest.json").exists() else {}
+    )
+    parent_source = (
+        load_json(artifact_dir / "source.json") if (artifact_dir / "source.json").exists() else {}
+    )
+    return {
+        "schema_version": OVERLAY_MANIFEST_SCHEMA_VERSION,
+        "artifact_kind": "diagnostic_replay_overlay",
+        "generated_at": str(validation_summary["generated_at_utc"]),
+        "artifact_dir": str(diagnostics_output_dir),
+        "parent_artifact_dir": str(artifact_dir),
+        "parent_artifact_id": parent_source.get("artifact_id"),
+        "parent_manifest_path": (
+            str(artifact_dir / "manifest.json") if (artifact_dir / "manifest.json").exists() else None
+        ),
+        "source_path": source_payload.get("path"),
+        "source_origin_path": source_payload.get("source_origin_path"),
+        "lookback_days": source_payload.get("lookback_days"),
+        "tuning_session_id": parent_manifest.get("session_id"),
+        "source_rows_original": parent_manifest.get("source_rows_original"),
+        "source_rows_used": parent_manifest.get("source_rows_used"),
+        "metrics_path": str(diagnostics_output_dir / "metrics.json"),
+        "prediction_path": str(diagnostics_output_dir / "prediction.json"),
+        "forecast_summary_path": str(diagnostics_output_dir / "forecast_summary.json"),
+        "validation_summary_path": str(diagnostics_output_dir / "validation_summary.json"),
+    }
 
 
 def _build_config(args) -> TrainingConfig:

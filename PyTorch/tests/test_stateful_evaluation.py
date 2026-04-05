@@ -61,12 +61,12 @@ class _StaticPolicyModel(torch.nn.Module):
 
 
 class StatefulEvaluationTests(unittest.TestCase):
-    def test_default_primary_state_reset_mode_prefers_session_boundaries(self) -> None:
+    def test_default_primary_state_reset_mode_preserves_carry_on(self) -> None:
         config = TrainingConfig()
 
-        self.assertEqual(config.training_state_reset_mode, "reset_each_session_or_window")
-        self.assertEqual(config.evaluation_state_reset_mode, "reset_each_session_or_window")
-        self.assertEqual(config.diagnostic_state_reset_modes[0], "reset_each_session_or_window")
+        self.assertEqual(config.training_state_reset_mode, "carry_on")
+        self.assertEqual(config.evaluation_state_reset_mode, "carry_on")
+        self.assertEqual(config.diagnostic_state_reset_modes[0], "carry_on")
 
     def test_state_reset_modes_change_turnover_semantics(self) -> None:
         config = TrainingConfig(horizons=(1,))
@@ -91,6 +91,10 @@ class StatefulEvaluationTests(unittest.TestCase):
         )
 
         self.assertEqual(carry_on["state_reset_mode"], "carry_on")
+        self.assertEqual(carry_on["state_reset_boundary_spec_version"], 1)
+        self.assertEqual(carry_on["state_reset_count"], 1)
+        self.assertEqual(carry_on["session_count"], 2)
+        self.assertEqual(carry_on["window_count"], 1)
         self.assertLess(float(carry_on["turnover"]), float(reset_each_example["turnover"]))
         self.assertAlmostEqual(
             float(reset_each_example["turnover"]),
