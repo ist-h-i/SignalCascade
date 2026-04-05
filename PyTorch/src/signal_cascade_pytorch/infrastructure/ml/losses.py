@@ -20,7 +20,7 @@ def total_loss(
         outputs["sigma"],
         batch["returns"],
     )
-    shape_loss = main_shape_loss(outputs["shape_predictions"], batch["shape_targets"])
+    shape_loss = main_shape_loss(outputs["main_shape_predictions"], batch["shape_targets"])
     profit_loss, policy_metrics = profit_objective_loss(
         outputs=outputs,
         batch=batch,

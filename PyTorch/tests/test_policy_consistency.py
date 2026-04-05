@@ -24,7 +24,7 @@ def _example(anchor_offset_hours: int = 0) -> TrainingExample:
         main_sequences=main_sequences,
         overlay_sequences=overlay_sequences,
         main_shape_targets=main_shape_targets,
-        state_features=(1.0, 0.0, 0.0, 0.1, 0.2, 0.02, 0.03, 0.1, 0.25, 0.4),
+        state_features=(1.0, 0.0, 0.0, 0.1, 0.25, 0.02, 0.03, 0.1, 0.25, 0.4),
         returns_target=(0.02, 0.01),
         long_mae=(0.0, 0.0),
         short_mae=(0.0, 0.0),
@@ -38,7 +38,7 @@ def _example(anchor_offset_hours: int = 0) -> TrainingExample:
         overlay_target=0,
         current_close=100.0,
         regime_id="asia|low|trend",
-        regime_features=(1.0, 0.0, 0.0, 0.1, 0.2),
+        regime_features=(1.0, 0.0, 0.0, 0.1, 0.25),
         realized_volatility=0.02,
         trend_strength=0.25,
     )
@@ -47,16 +47,20 @@ def _example(anchor_offset_hours: int = 0) -> TrainingExample:
 class _StaticPolicyModel(torch.nn.Module):
     def forward(self, main_sequences, overlay_sequences, state_features, previous_state=None):
         batch_size = state_features.shape[0]
+        shape_posterior = torch.tensor(
+            [[0.5, 0.2, 0.1, 0.1, 0.05, 0.05]],
+            dtype=torch.float32,
+        ).repeat(batch_size, 1)
+        memory_state = torch.zeros(batch_size, 4, dtype=torch.float32)
         return {
             "mu": torch.tensor([[0.03, 0.01]], dtype=torch.float32).repeat(batch_size, 1),
             "sigma": torch.tensor([[0.02, 0.04]], dtype=torch.float32).repeat(batch_size, 1),
             "tradeability_gate": torch.tensor([1.0], dtype=torch.float32).repeat(batch_size),
             "shape_entropy": torch.tensor([0.2], dtype=torch.float32).repeat(batch_size),
-            "shape_probs": torch.tensor(
-                [[0.5, 0.2, 0.1, 0.1, 0.05, 0.05]],
-                dtype=torch.float32,
-            ).repeat(batch_size, 1),
-            "next_state": torch.zeros(batch_size, 4, dtype=torch.float32),
+            "shape_posterior": shape_posterior,
+            "shape_probs": shape_posterior,
+            "memory_state": memory_state,
+            "next_state": memory_state,
         }
 
 
@@ -80,11 +84,25 @@ class PolicyConsistencyTests(unittest.TestCase):
         self.assertIn("smooth_policy_horizon", row)
         self.assertIn("exact_smooth_position_abs_error", row)
         self.assertIn("exact_smooth_utility_regret", row)
+        self.assertIn("selected_g_t", row)
+        self.assertIn("selected_mu_t_tilde", row)
+        self.assertIn("q_t", row)
 
         validation_row = diagnostics["validation_rows"][0]
+        self.assertIn("g_t", validation_row)
+        self.assertIn("mu_t_tilde", validation_row)
+        self.assertIn("sigma_t_sq", validation_row)
+        self.assertIn("policy_horizon_selected", validation_row)
         self.assertIn("smooth_policy_horizon", validation_row)
         self.assertIn("smooth_position", validation_row)
         self.assertIn("smooth_no_trade_band", validation_row)
+
+        horizon_diag = diagnostics["horizon_diag"][0]
+        self.assertIn("policy_horizon_share", horizon_diag)
+
+        state_vector_summary = diagnostics["state_vector_summary"]
+        self.assertIn("shape_posterior_mean", state_vector_summary)
+        self.assertIn("shape_posterior_top_class_share", state_vector_summary)
 
 
 if __name__ == "__main__":

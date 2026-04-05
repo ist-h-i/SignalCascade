@@ -97,13 +97,13 @@ def build_parser() -> argparse.ArgumentParser:
         "--selection-score-source",
         choices=selection_score_sources,
         default=None,
-        help="Override the saved config threshold score source for diagnostics or replay.",
+        help="Deprecated compatibility option. New policy path always uses profit utility.",
     )
     predict_parser.set_defaults(handler=predict_command)
 
     export_parser = subparsers.add_parser(
         "export-diagnostics",
-        help="Export validation rows and threshold diagnostics from an existing artifact directory.",
+        help="Export validation rows and policy-path diagnostics from an existing artifact directory.",
     )
     export_parser.add_argument("--output-dir", default="artifacts/demo")
     export_parser.add_argument(
@@ -125,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
         choices=("auto", "stored", "replay", "none"),
         default="auto",
         help=(
-            "Legacy compatibility option. New policy diagnostics ignore threshold replay."
+            "Deprecated compatibility option. New policy diagnostics ignore threshold replay."
         ),
     )
     export_parser.add_argument(
@@ -138,7 +138,7 @@ def build_parser() -> argparse.ArgumentParser:
         "--selection-score-source",
         choices=selection_score_sources,
         default=None,
-        help="Override the saved config threshold score source for validation replay.",
+        help="Deprecated compatibility option. New policy path always uses profit utility.",
     )
     export_parser.set_defaults(handler=export_diagnostics_command)
 

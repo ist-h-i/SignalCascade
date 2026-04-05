@@ -94,6 +94,22 @@ def train_model(
     purged_samples = max(len(examples) - len(train_examples) - len(valid_examples), 0)
     summary = {
         "policy_mode": "shape_aware_profit_maximization",
+        "loss_contract": {
+            "primary_objective": "profit_objective_log_wealth_minus_cvar",
+            "primary_metric": "profit_loss",
+            "auxiliary_objectives": {
+                "return": "heteroscedastic_huber",
+                "shape": "main_shape_smooth_l1",
+            },
+            "weights": {
+                "profit_loss_weight": float(config.profit_loss_weight),
+                "warmup_profit_loss_weight": float(config.profit_loss_weight * 0.35),
+                "return_loss_weight": float(config.return_loss_weight),
+                "shape_loss_weight": float(config.shape_loss_weight),
+                "cvar_weight": float(config.cvar_weight),
+                "cvar_alpha": float(config.cvar_alpha),
+            },
+        },
         "train_samples": len(train_examples),
         "validation_samples": len(valid_examples),
         "purged_samples": purged_samples,
@@ -197,7 +213,7 @@ def evaluate_model(
                 config=effective_config,
                 previous_position=previous_position,
                 tradeability_gate=gate,
-                shape_probs=outputs["shape_probs"][0].tolist(),
+                shape_probs=outputs["shape_posterior"][0].tolist(),
                 cost_multiplier=cost_multiplier,
                 gamma_multiplier=gamma_multiplier,
             )
@@ -255,7 +271,7 @@ def evaluate_model(
                 0.0,
             )
             previous_position = float(decision["position"])
-            previous_state = outputs["next_state"].detach()
+            previous_state = outputs["memory_state"].detach()
             previous_example = example
 
     average_log_wealth = sum(log_wealth_values) / max(total_samples, 1)
@@ -300,14 +316,18 @@ def evaluate_model(
         "log_wealth_clamp_hit_rate": log_wealth_clamp_hits / max(total_samples, 1),
         "expert_entropy": expert_entropy,
         "shape_gate_usage": shape_gate_usage,
+        "g_t_mean": shape_gate_usage,
         "mu_calibration": mu_calibration,
+        "mu_t_calibration": mu_calibration,
         "sigma_calibration": sigma_calibration,
+        "sigma_t_calibration": sigma_calibration,
         "directional_accuracy": direction_accuracy,
         "exact_smooth_horizon_agreement": exact_smooth_horizon_matches / max(total_samples, 1),
         "exact_smooth_no_trade_agreement": exact_smooth_no_trade_matches / max(total_samples, 1),
         "exact_smooth_position_mae": exact_smooth_position_abs_error / max(total_samples, 1),
         "exact_smooth_utility_regret": exact_smooth_utility_regret / max(total_samples, 1),
         "policy_score_mean": sum(policy_scores) / max(total_samples, 1),
+        "policy_utility_mean": sum(policy_scores) / max(total_samples, 1),
         "utility_score": utility_score,
         "project_value_score": project_value_score,
         "state_reset_mode": resolved_state_reset_mode,
@@ -461,7 +481,7 @@ def _run_epoch(
         for key, value in metrics.items():
             totals[key] += value
         batches += 1
-        previous_state = outputs["next_state"].detach()
+        previous_state = outputs["memory_state"].detach()
         previous_position = policy_metrics["selected_position"].detach().reshape(1)
         previous_example = example
 

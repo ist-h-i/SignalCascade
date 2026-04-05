@@ -14,6 +14,12 @@
 
 対象は `PyTorch/src/signal_cascade_pytorch` 配下の実装、関連ドキュメント、artifact contract、評価系です。
 
+日付付きの実行順、issue / PR 粒度の分解、依存関係は
+
+- `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/profit_maximization_execution_schedule.md`
+
+を参照してください。
+
 ## 1. 現在地
 
 現状の reference implementation は次を持っています。

@@ -21,7 +21,7 @@ from ..domain.entities import OHLCVBar, TrainingExample
 from ..infrastructure.ml.model import SignalCascadeModel
 from ..infrastructure.persistence import save_json
 
-DIAGNOSTICS_SCHEMA_VERSION = 5
+DIAGNOSTICS_SCHEMA_VERSION = 6
 POLICY_SELECTION_RULE_VERSION = 2
 POLICY_SELECTION_BASIS = "pareto_rank_then_average_log_wealth_cvar_tail_loss_turnover_row_key"
 
@@ -91,6 +91,7 @@ def export_review_diagnostics(
             "base_bar_count": None if base_bars is None else len(base_bars),
         },
         "validation": diagnostics["summary"],
+        "state_vector_summary": diagnostics.get("state_vector_summary", {}),
         "stateful_evaluation": stateful_evaluation,
         "policy_calibration_sweep": policy_calibration_sweep,
         "policy_calibration_summary": _summarize_policy_calibration_sweep(policy_calibration_sweep),
@@ -132,6 +133,10 @@ def build_validation_diagnostics(
         }
         for horizon in config.horizons
     }
+    state_component_dims: dict[str, int] = {}
+    state_component_norm_sums: dict[str, float] = {}
+    shape_posterior_sum: torch.Tensor | None = None
+    shape_posterior_top_class_counts: dict[str, int] = {}
     sample_id = 0
 
     with torch.no_grad():
@@ -169,7 +174,7 @@ def build_validation_diagnostics(
                 config=config,
                 previous_position=previous_position,
                 tradeability_gate=gate,
-                shape_probs=outputs["shape_probs"][0].tolist(),
+                shape_probs=outputs["shape_posterior"][0].tolist(),
             )
             selected_row = dict(decision["selected_row"])
             selected_horizon = int(selected_row["horizon"])
@@ -177,6 +182,29 @@ def build_validation_diagnostics(
             realized_return = float(example.returns_target[selected_index])
             trade_cost = float(selected_row["cost"]) * abs(float(decision["trade_delta"]))
             pnl = (float(decision["position"]) * realized_return) - trade_cost
+            if not state_component_dims and "state_vector_component_dims" in outputs:
+                state_component_dims = {
+                    str(key): int(value)
+                    for key, value in dict(outputs["state_vector_component_dims"]).items()
+                }
+            state_components = outputs.get("state_vector_components")
+            if isinstance(state_components, dict):
+                for name, tensor in state_components.items():
+                    state_component_norm_sums[str(name)] = state_component_norm_sums.get(str(name), 0.0) + (
+                        float(torch.linalg.vector_norm(tensor[0], ord=2).item())
+                    )
+            shape_posterior = outputs.get("shape_posterior", outputs.get("shape_probs"))
+            if isinstance(shape_posterior, torch.Tensor):
+                if shape_posterior_sum is None:
+                    shape_posterior_sum = torch.zeros(
+                        shape_posterior.size(-1),
+                        dtype=torch.float64,
+                    )
+                shape_posterior_sum += shape_posterior[0].detach().to(dtype=torch.float64).cpu()
+                top_class = str(int(torch.argmax(shape_posterior[0]).item()))
+                shape_posterior_top_class_counts[top_class] = (
+                    shape_posterior_top_class_counts.get(top_class, 0) + 1
+                )
             smooth_selected_index = int(smooth_policy["selected_horizon_index"][0].item())
             smooth_selected_horizon = int(config.horizons[smooth_selected_index])
             smooth_selected_position = float(smooth_policy["selected_position"][0].item())
@@ -207,11 +235,18 @@ def build_validation_diagnostics(
                         "regime_id": example.regime_id,
                         "horizon": int(row["horizon"]),
                         "y_raw": actual_return,
+                        "mu_t": float(row["mean"]),
                         "mu_raw": float(row["mean"]),
+                        "sigma_t": float(row["sigma"]),
                         "sigma_raw": float(row["sigma"]),
+                        "sigma_t_sq": float(row["sigma_sq"]),
+                        "g_t": float(row["g_t"]),
+                        "mu_t_tilde": float(row["mu_t_tilde"]),
                         "gated_mean": float(row["gated_mean"]),
                         "cost": float(row["cost"]),
+                        "selected_policy_utility": float(row["policy_utility"]),
                         "policy_utility": float(row["policy_utility"]),
+                        "q_t_candidate": float(row["position"]),
                         "position_if_chosen": float(row["position"]),
                         "tradeability_gate": gate,
                         "shape_entropy": entropy,
@@ -220,6 +255,7 @@ def build_validation_diagnostics(
                         "smooth_policy_horizon": smooth_selected_horizon,
                         "smooth_position": smooth_selected_position,
                         "smooth_no_trade_band": int(smooth_selected_no_trade),
+                        "policy_horizon_selected": int(int(row["horizon"]) == selected_horizon),
                         "selected": int(int(row["horizon"]) == selected_horizon),
                         "no_trade_band": int(bool(row["no_trade_band"])),
                     }
@@ -232,8 +268,11 @@ def build_validation_diagnostics(
                     "regime_id": example.regime_id,
                     "policy_horizon": decision["policy_horizon"],
                     "executed_horizon": decision["executed_horizon"],
+                    "q_t_prev": float(decision["previous_position"]),
                     "previous_position": float(decision["previous_position"]),
+                    "q_t": float(decision["position"]),
                     "position": float(decision["position"]),
+                    "q_t_trade_delta": float(decision["trade_delta"]),
                     "trade_delta": float(decision["trade_delta"]),
                     "no_trade_band_hit": int(bool(decision["no_trade_band_hit"])),
                     "smooth_policy_horizon": smooth_selected_horizon,
@@ -250,6 +289,12 @@ def build_validation_diagnostics(
                         float(selected_row["policy_utility"]) - float(smooth_reference_utility),
                         0.0,
                     ),
+                    "selected_g_t": float(selected_row["g_t"]),
+                    "selected_mu_t": float(selected_row["mean"]),
+                    "selected_sigma_t": float(selected_row["sigma"]),
+                    "selected_sigma_t_sq": float(selected_row["sigma_sq"]),
+                    "selected_mu_t_tilde": float(selected_row["mu_t_tilde"]),
+                    "selected_policy_utility": float(decision["selection_score"]),
                     "policy_score": float(decision["selection_score"]),
                     "tradeability_gate": gate,
                     "shape_entropy": entropy,
@@ -258,7 +303,7 @@ def build_validation_diagnostics(
                 }
             )
             previous_position = float(decision["position"])
-            previous_state = outputs["next_state"].detach()
+            previous_state = outputs["memory_state"].detach()
             previous_example = example
             sample_id += 1
 
@@ -266,6 +311,7 @@ def build_validation_diagnostics(
         {
             "horizon": int(horizon),
             "sample_count": int(stats["count"]),
+            "policy_horizon_share": int(stats["selected"]) / max(int(stats["count"]), 1),
             "selection_rate": int(stats["selected"]) / max(int(stats["count"]), 1),
             "mean_policy_utility": float(stats["utility_sum"]) / max(int(stats["count"]), 1),
             "mean_position": float(stats["position_sum"]) / max(int(stats["count"]), 1),
@@ -273,10 +319,18 @@ def build_validation_diagnostics(
         }
         for horizon, stats in sorted(horizon_stats.items(), key=lambda item: int(item[0]))
     ]
+    state_vector_summary = _build_state_vector_summary(
+        sample_count=sample_id,
+        state_component_dims=state_component_dims,
+        state_component_norm_sums=state_component_norm_sums,
+        shape_posterior_sum=shape_posterior_sum,
+        shape_posterior_top_class_counts=shape_posterior_top_class_counts,
+    )
     return {
         "validation_rows": validation_rows,
         "policy_summary": policy_summary,
         "horizon_diag": horizon_diag,
+        "state_vector_summary": state_vector_summary,
         "summary": summary,
     }
 
@@ -428,6 +482,39 @@ def _policy_sweep_rows_sha256(sweep_rows: Sequence[dict[str, object]]) -> str | 
         return None
     encoded = json.dumps(row_keys, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()
+
+
+def _build_state_vector_summary(
+    *,
+    sample_count: int,
+    state_component_dims: dict[str, int],
+    state_component_norm_sums: dict[str, float],
+    shape_posterior_sum: torch.Tensor | None,
+    shape_posterior_top_class_counts: dict[str, int],
+) -> dict[str, object]:
+    denominator = max(sample_count, 1)
+    component_l2_mean = {
+        str(name): float(total) / denominator
+        for name, total in state_component_norm_sums.items()
+    }
+    shape_posterior_mean = (
+        {
+            str(index): float(value)
+            for index, value in enumerate((shape_posterior_sum / denominator).tolist())
+        }
+        if shape_posterior_sum is not None
+        else {}
+    )
+    return {
+        "sample_count": int(sample_count),
+        "component_dims": dict(state_component_dims),
+        "component_l2_mean": component_l2_mean,
+        "shape_posterior_mean": shape_posterior_mean,
+        "shape_posterior_top_class_share": {
+            str(index): float(count) / denominator
+            for index, count in sorted(shape_posterior_top_class_counts.items(), key=lambda item: int(item[0]))
+        },
+    }
 
 
 def _write_csv(path: Path, rows: Sequence[dict[str, object]]) -> None:

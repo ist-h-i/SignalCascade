@@ -72,7 +72,7 @@ def apply_selection_policy(
         rows,
         key=lambda row: (
             float(row["policy_utility"]),
-            abs(float(row["gated_mean"])),
+            abs(float(row["mu_t_tilde"])),
             -int(row["horizon"]),
         ),
     )
@@ -183,39 +183,55 @@ def build_exact_policy_rows(
     cost_multiplier: float = 1.0,
     gamma_multiplier: float = 1.0,
 ) -> list[dict[str, object]]:
+    path_terms = build_policy_path_terms(
+        mean=torch.tensor([list(mean)], dtype=torch.float32),
+        sigma=torch.tensor([list(sigma)], dtype=torch.float32),
+        costs=torch.tensor([list(costs)], dtype=torch.float32),
+        tradeability_gate=torch.tensor([float(tradeability_gate)], dtype=torch.float32),
+        previous_position=torch.tensor([float(previous_position)], dtype=torch.float32),
+        config=config,
+        cost_multiplier=cost_multiplier,
+        gamma_multiplier=gamma_multiplier,
+    )
     rows: list[dict[str, object]] = []
     for horizon_index, horizon in enumerate(config.horizons):
-        mean_value = float(mean[horizon_index])
-        sigma_value = max(float(sigma[horizon_index]), config.min_policy_sigma)
-        cost_value = float(costs[horizon_index]) * float(cost_multiplier)
-        gated_mean = float(tradeability_gate) * mean_value
-        position, no_trade = solve_exact_policy_position(
-            gated_mean=gated_mean,
-            sigma=sigma_value,
+        mean_value = float(path_terms["mean"][0, horizon_index].item())
+        sigma_sq_value = float(path_terms["sigma_sq"][0, horizon_index].item())
+        sigma_value = math.sqrt(sigma_sq_value)
+        cost_value = float(path_terms["costs"][0, horizon_index].item())
+        g_t = float(path_terms["g_t"][0, horizon_index].item())
+        mu_t_tilde = float(path_terms["mu_t_tilde"][0, horizon_index].item())
+        effective_gamma = float(path_terms["effective_gamma"][0, horizon_index].item())
+        margin = float(path_terms["margin"][0, horizon_index].item())
+        position, no_trade = solve_exact_policy_position_from_terms(
+            mu_t_tilde=mu_t_tilde,
+            sigma_sq=sigma_sq_value,
             previous_position=previous_position,
             cost=cost_value,
-            config=config,
-            gamma_multiplier=gamma_multiplier,
+            effective_gamma=effective_gamma,
+            q_max=config.q_max,
         )
         utility = policy_utility(
             position=position,
             previous_position=previous_position,
-            gated_mean=gated_mean,
+            gated_mean=mu_t_tilde,
             sigma=sigma_value,
             cost=cost_value,
             config=config,
             gamma_multiplier=gamma_multiplier,
         )
-        effective_gamma = float(config.risk_aversion_gamma) * float(gamma_multiplier)
         rows.append(
             {
                 "horizon": int(horizon),
                 "mean": mean_value,
                 "sigma": sigma_value,
+                "sigma_sq": sigma_sq_value,
                 "cost": cost_value,
-                "gated_mean": gated_mean,
-                "margin": gated_mean
-                - (effective_gamma * (sigma_value**2) * float(previous_position)),
+                "g_t": g_t,
+                "mu_t_tilde": mu_t_tilde,
+                "gated_mean": mu_t_tilde,
+                "effective_gamma": effective_gamma,
+                "margin": margin,
                 "position": position,
                 "predicted_sign": _sign_from_value(mean_value),
                 "policy_utility": utility,
@@ -235,17 +251,35 @@ def solve_exact_policy_position(
 ) -> tuple[float, bool]:
     sigma_sq = max(float(sigma) ** 2, config.min_policy_sigma**2)
     effective_gamma = float(config.risk_aversion_gamma) * float(gamma_multiplier)
-    margin = float(gated_mean) - (effective_gamma * sigma_sq * float(previous_position))
+    return solve_exact_policy_position_from_terms(
+        mu_t_tilde=float(gated_mean),
+        sigma_sq=sigma_sq,
+        previous_position=previous_position,
+        cost=cost,
+        effective_gamma=effective_gamma,
+        q_max=config.q_max,
+    )
+
+
+def solve_exact_policy_position_from_terms(
+    mu_t_tilde: float,
+    sigma_sq: float,
+    previous_position: float,
+    cost: float,
+    effective_gamma: float,
+    q_max: float,
+) -> tuple[float, bool]:
+    margin = float(mu_t_tilde) - (float(effective_gamma) * float(sigma_sq) * float(previous_position))
     if abs(margin) <= float(cost):
         position = float(previous_position)
         no_trade = True
     elif margin > 0.0:
-        position = (float(gated_mean) - float(cost)) / (effective_gamma * sigma_sq)
+        position = (float(mu_t_tilde) - float(cost)) / (float(effective_gamma) * float(sigma_sq))
         no_trade = False
     else:
-        position = (float(gated_mean) + float(cost)) / (effective_gamma * sigma_sq)
+        position = (float(mu_t_tilde) + float(cost)) / (float(effective_gamma) * float(sigma_sq))
         no_trade = False
-    position = max(-config.q_max, min(config.q_max, position))
+    position = max(-float(q_max), min(float(q_max), position))
     return position, no_trade
 
 
@@ -259,13 +293,23 @@ def smooth_policy_distribution(
     cost_multiplier: float = 1.0,
     gamma_multiplier: float = 1.0,
 ) -> dict[str, torch.Tensor]:
-    effective_gamma = float(config.risk_aversion_gamma) * float(gamma_multiplier)
-    sigma_sq = sigma.pow(2).clamp_min(config.min_policy_sigma**2)
-    gated_mean = tradeability_gate.unsqueeze(-1) * mean
-    scaled_costs = costs * float(cost_multiplier)
-    margin = gated_mean - (
-        effective_gamma * sigma_sq * previous_position.unsqueeze(-1)
+    path_terms = build_policy_path_terms(
+        mean=mean,
+        sigma=sigma,
+        costs=costs,
+        tradeability_gate=tradeability_gate,
+        previous_position=previous_position,
+        config=config,
+        cost_multiplier=cost_multiplier,
+        gamma_multiplier=gamma_multiplier,
     )
+    effective_gamma = path_terms["effective_gamma"]
+    sigma_sq = path_terms["sigma_sq"]
+    g_t = path_terms["g_t"]
+    mu_t_tilde = path_terms["mu_t_tilde"]
+    scaled_costs = path_terms["costs"]
+    margin = path_terms["margin"]
+    previous_position_matrix = path_terms["previous_position"]
     abs_margin = torch.abs(margin)
     smooth_excess = functional.softplus(
         abs_margin - scaled_costs,
@@ -275,14 +319,14 @@ def smooth_policy_distribution(
     delta_position = direction * smooth_excess / (
         effective_gamma * sigma_sq
     )
-    raw_position = previous_position.unsqueeze(-1) + delta_position
+    raw_position = previous_position_matrix + delta_position
     horizon_positions = config.q_max * torch.tanh(raw_position / max(config.q_max, 1e-6))
     turnover = torch.sqrt(
-        (horizon_positions - previous_position.unsqueeze(-1)).pow(2)
+        (horizon_positions - previous_position_matrix).pow(2)
         + config.policy_abs_epsilon
     )
     utilities = (
-        gated_mean * horizon_positions
+        mu_t_tilde * horizon_positions
         - (0.5 * effective_gamma * sigma_sq * horizon_positions.pow(2))
         - (scaled_costs * turnover)
     )
@@ -306,7 +350,9 @@ def smooth_policy_distribution(
         index=selected_horizon_index.unsqueeze(-1),
     ).squeeze(-1)
     return {
-        "gated_mean": gated_mean,
+        "g_t": g_t,
+        "mu_t_tilde": mu_t_tilde,
+        "gated_mean": mu_t_tilde,
         "sigma_sq": sigma_sq,
         "margin": margin,
         "horizon_positions": horizon_positions,
@@ -319,6 +365,37 @@ def smooth_policy_distribution(
         "selected_position": selected_position,
         "selected_utility": selected_utility,
         "selected_no_trade": selected_no_trade,
+    }
+
+
+def build_policy_path_terms(
+    mean: torch.Tensor,
+    sigma: torch.Tensor,
+    costs: torch.Tensor,
+    tradeability_gate: torch.Tensor,
+    previous_position: torch.Tensor,
+    config: TrainingConfig,
+    cost_multiplier: float = 1.0,
+    gamma_multiplier: float = 1.0,
+) -> dict[str, torch.Tensor]:
+    effective_gamma_value = float(config.risk_aversion_gamma) * float(gamma_multiplier)
+    sigma_sq = sigma.pow(2).clamp_min(config.min_policy_sigma**2)
+    previous_position_matrix = previous_position.unsqueeze(-1).expand_as(mean)
+    g_t = tradeability_gate.unsqueeze(-1).expand_as(mean)
+    mu_t_tilde = g_t * mean
+    scaled_costs = costs * float(cost_multiplier)
+    margin = mu_t_tilde - (effective_gamma_value * sigma_sq * previous_position_matrix)
+    effective_gamma = torch.full_like(mean, effective_gamma_value)
+    return {
+        "mean": mean,
+        "sigma": sigma,
+        "sigma_sq": sigma_sq,
+        "costs": scaled_costs,
+        "g_t": g_t,
+        "mu_t_tilde": mu_t_tilde,
+        "effective_gamma": effective_gamma,
+        "previous_position": previous_position_matrix,
+        "margin": margin,
     }
 
 

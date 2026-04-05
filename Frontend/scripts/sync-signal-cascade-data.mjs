@@ -328,6 +328,8 @@ function refreshLatestCsv(targetDateJst) {
   }
 
   fs.mkdirSync(liveDataDir, { recursive: true })
+  const npmCacheDir = path.join(os.tmpdir(), 'signal-cascade-npm-cache')
+  fs.mkdirSync(npmCacheDir, { recursive: true })
 
   const rawDownloadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'signal-cascade-xauusd-'))
   const rawBaseName = 'xauusd_m30_dukascopy'
@@ -360,6 +362,10 @@ function refreshLatestCsv(targetDateJst) {
     {
       cwd: repoRoot,
       encoding: 'utf8',
+      env: {
+        ...process.env,
+        npm_config_cache: npmCacheDir,
+      },
     },
   )
 
@@ -657,8 +663,14 @@ function buildChartRows({ rawRows, anchorTime, anchorBar, horizonRows, bars4h, a
       low: row.low,
       forecastBase: null,
       forecastLower: null,
+      forecastInnerLower: null,
+      forecastInnerSpread: null,
       forecastUpper: null,
       forecastSpread: null,
+      forecastOuterLowerBase: null,
+      forecastOuterLowerSpread: null,
+      forecastOuterUpperBase: null,
+      forecastOuterUpperSpread: null,
       actualClose: null,
       actualRangeStart: null,
       actualRangeEnd: null,
@@ -681,8 +693,14 @@ function buildChartRows({ rawRows, anchorTime, anchorBar, horizonRows, bars4h, a
     low: null,
     forecastBase: row.base,
     forecastLower: row.lower,
+    forecastInnerLower: row.innerLower,
+    forecastInnerSpread: row.innerUpper - row.innerLower,
     forecastUpper: row.upper,
     forecastSpread: row.upper - row.lower,
+    forecastOuterLowerBase: row.lower,
+    forecastOuterLowerSpread: row.innerLower - row.lower,
+    forecastOuterUpperBase: row.innerUpper,
+    forecastOuterUpperSpread: row.upper - row.innerUpper,
     actualClose: row.actual,
     actualRangeStart: row.actualRangeStart,
     actualRangeEnd: row.actualRangeEnd,
@@ -760,8 +778,11 @@ function interpolateForecast({ anchorBar, horizonRows, bars4h, anchorIndex, hist
     const ratio = (step - prev.step) / span
     const logBase = prev.logBase + (next.logBase - prev.logBase) * ratio
     const sigma = prev.sigma + (next.sigma - prev.sigma) * ratio
+    const halfSigma = sigma * 0.5
     const base = anchorBar.close * Math.exp(logBase)
     const lower = base * Math.exp(-sigma)
+    const innerLower = base * Math.exp(-halfSigma)
+    const innerUpper = base * Math.exp(halfSigma)
     const upper = base * Math.exp(sigma)
     const actualBar = bars4h[anchorIndex + step] ?? null
     const actualPoint = horizonActuals.get(step) ?? actualBar?.close ?? null
@@ -772,6 +793,8 @@ function interpolateForecast({ anchorBar, horizonRows, bars4h, anchorIndex, hist
         historyEndTs + step * 4 * 60 * 60 * 1000,
       base,
       lower,
+      innerLower,
+      innerUpper,
       upper,
       actual: actualPoint,
       actualRangeStart: actualBar?.firstTs ?? null,

@@ -6,6 +6,7 @@ import torch
 from torch import nn
 from torch.nn import functional as functional
 
+from ...domain.entities import STATE_VECTOR_COMPONENT_NAMES
 from ...domain.timeframes import MAIN_TIMEFRAMES, OVERLAY_TIMEFRAMES
 
 
@@ -127,6 +128,12 @@ class SignalCascadeModel(nn.Module):
         )
         self.memory_input = nn.Linear(fused_dim + shape_classes + hidden_dim, state_dim)
         self.memory_transition = nn.Linear(state_dim, state_dim, bias=False)
+        self.state_vector_component_dims = {
+            "h_t": fused_dim,
+            "s_t": shape_classes,
+            "z_t": hidden_dim,
+            "m_t": state_dim,
+        }
         state_vector_dim = fused_dim + shape_classes + hidden_dim + state_dim
         self.expert_mean_head = nn.Linear(state_vector_dim, num_horizons * shape_classes)
         self.expert_logvar_head = nn.Linear(state_vector_dim, num_horizons * shape_classes)
@@ -165,57 +172,88 @@ class SignalCascadeModel(nn.Module):
                 dim=1,
             )
         )
-        shape_logits = self.shape_head(fused_latent)
-        shape_probs = functional.softmax(shape_logits, dim=-1)
-        projected_state_features = self.state_feature_projection(state_features)
-        memory_input = torch.cat([fused_latent, shape_probs, projected_state_features], dim=1)
-        next_state = torch.tanh(self.memory_input(memory_input) + self.memory_transition(previous_state))
+        shape_feature = fused_latent
+        shape_posterior_logits = self.shape_head(shape_feature)
+        shape_posterior = functional.softmax(shape_posterior_logits, dim=-1)
+        state_projection = self.state_feature_projection(state_features)
+        memory_input = torch.cat([shape_feature, shape_posterior, state_projection], dim=1)
+        memory_state = torch.tanh(
+            self.memory_input(memory_input) + self.memory_transition(previous_state)
+        )
+        state_vector_components = {
+            "h_t": shape_feature,
+            "s_t": shape_posterior,
+            "z_t": state_projection,
+            "m_t": memory_state,
+        }
         state_vector = torch.cat(
-            [fused_latent, shape_probs, projected_state_features, next_state],
+            [state_vector_components[name] for name in STATE_VECTOR_COMPONENT_NAMES],
             dim=1,
         )
 
-        expert_mean = self.expert_mean_head(state_vector).view(
+        expert_mu_by_shape = self.expert_mean_head(state_vector).view(
             batch_size,
             self.num_horizons,
             self.shape_classes,
         )
-        expert_sigma = functional.softplus(
+        expert_sigma_by_shape = functional.softplus(
             self.expert_logvar_head(state_vector).view(
                 batch_size,
                 self.num_horizons,
                 self.shape_classes,
             )
         ) + 1e-4
-        mixture_weights = shape_probs.unsqueeze(1)
-        mean = torch.sum(expert_mean * mixture_weights, dim=-1)
+        mixture_weights = shape_posterior.unsqueeze(1)
+        mean = torch.sum(expert_mu_by_shape * mixture_weights, dim=-1)
         second_moment = torch.sum(
-            mixture_weights * (expert_sigma.pow(2) + expert_mean.pow(2)),
+            mixture_weights * (expert_sigma_by_shape.pow(2) + expert_mu_by_shape.pow(2)),
             dim=-1,
         )
         variance = torch.clamp(second_moment - mean.pow(2), min=1e-6)
         sigma = torch.sqrt(variance)
         tradeability_weights = torch.sigmoid(self.tradeability_logits)
-        tradeability_gate = torch.sum(shape_probs * tradeability_weights.unsqueeze(0), dim=-1)
-        entropy = -torch.sum(shape_probs * torch.log(shape_probs.clamp_min(1e-6)), dim=-1)
+        tradeability_gate = torch.sum(
+            shape_posterior * tradeability_weights.unsqueeze(0),
+            dim=-1,
+        )
+        entropy = -torch.sum(
+            shape_posterior * torch.log(shape_posterior.clamp_min(1e-6)),
+            dim=-1,
+        )
         normalized_entropy = entropy / math.log(max(self.shape_classes, 2))
+        main_shape_predictions = {
+            timeframe: self.main_shape_heads[timeframe](main_latents[timeframe])
+            for timeframe in MAIN_TIMEFRAMES
+        }
 
         return {
             "mu": mean,
             "sigma": sigma,
-            "shape_logits": shape_logits,
-            "shape_probs": shape_probs,
+            "shape_feature": shape_feature,
+            "shape_posterior_logits": shape_posterior_logits,
+            "shape_posterior": shape_posterior,
             "shape_entropy": normalized_entropy,
             "tradeability_gate": tradeability_gate,
             "tradeability_weights": tradeability_weights,
+            "state_projection": state_projection,
             "state_vector": state_vector,
-            "state_features_projected": projected_state_features,
-            "internal_state": next_state,
-            "next_state": next_state,
-            "expert_mu": expert_mean,
-            "expert_sigma": expert_sigma,
-            "shape_predictions": {
-                timeframe: self.main_shape_heads[timeframe](main_latents[timeframe])
-                for timeframe in MAIN_TIMEFRAMES
+            "state_vector_components": state_vector_components,
+            "state_vector_component_dims": dict(self.state_vector_component_dims),
+            "memory_state": memory_state,
+            "expert_mu_by_shape": expert_mu_by_shape,
+            "expert_sigma_by_shape": expert_sigma_by_shape,
+            "shape_conditioned_experts": {
+                "mu_by_shape": expert_mu_by_shape,
+                "sigma_by_shape": expert_sigma_by_shape,
+                "mixture_weights": mixture_weights,
             },
+            "main_shape_predictions": main_shape_predictions,
+            "shape_logits": shape_posterior_logits,
+            "shape_probs": shape_posterior,
+            "state_features_projected": state_projection,
+            "internal_state": memory_state,
+            "next_state": memory_state,
+            "expert_mu": expert_mu_by_shape,
+            "expert_sigma": expert_sigma_by_shape,
+            "shape_predictions": main_shape_predictions,
         }

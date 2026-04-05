@@ -1,9 +1,70 @@
-@import url('https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&family=Space+Grotesk:wght@500;700&display=swap');
+@import url('https://fonts.googleapis.com/css2?family=IBM+Plex+Sans:wght@400;500;600;700&family=IBM+Plex+Mono:wght@400;500;600&family=Space+Grotesk:wght@500;700&display=swap');
 
 :root {
-  color: #171311;
-  background: #f3eee2;
-  font-family: 'Manrope', sans-serif;
+  --font-display: 'Space Grotesk', sans-serif;
+  --font-body: 'IBM Plex Sans', sans-serif;
+  --font-mono: 'IBM Plex Mono', monospace;
+  --page-bg-glow-sand: rgba(229, 201, 140, 0.06);
+  --page-bg-glow-cyan: rgba(98, 223, 255, 0.06);
+  --page-bg-top: #0d0f13;
+  --page-bg-bottom: #111419;
+  --page-bg:
+    radial-gradient(circle at 18% 0%, var(--page-bg-glow-sand), transparent 24%),
+    radial-gradient(circle at 82% 12%, var(--page-bg-glow-cyan), transparent 22%),
+    linear-gradient(180deg, var(--page-bg-top) 0%, var(--page-bg-bottom) 100%);
+  --panel-bg: rgba(22, 24, 29, 0.98);
+  --panel-line: rgba(255, 255, 255, 0.06);
+  --surface-bg-0: rgba(255, 255, 255, 0.03);
+  --surface-bg-1: rgba(255, 255, 255, 0.04);
+  --surface-bg-2: rgba(255, 255, 255, 0.05);
+  --surface-bg-3: rgba(255, 255, 255, 0.08);
+  --surface-bg-4: rgba(255, 255, 255, 0.09);
+  --surface-bg-hero-top: rgba(25, 28, 34, 0.98);
+  --surface-bg-hero-bottom: rgba(18, 20, 25, 0.98);
+  --surface-bg-panel-top: rgba(29, 32, 38, 0.98);
+  --surface-bg-panel-bottom: rgba(23, 25, 30, 0.98);
+  --surface-bg-chart: rgba(8, 11, 15, 0.72);
+  --surface-bg-tooltip: rgba(18, 20, 24, 0.96);
+  --surface-bg-cta-top: rgba(229, 201, 140, 0.96);
+  --surface-bg-cta-bottom: rgba(199, 171, 112, 0.96);
+  --surface-border-soft: rgba(255, 255, 255, 0.06);
+  --surface-border-mid: rgba(255, 255, 255, 0.08);
+  --surface-border-anchor: rgba(255, 255, 255, 0.16);
+  --surface-border-strong: rgba(255, 255, 255, 0.18);
+  --surface-border-bright: rgba(255, 255, 255, 0.24);
+  --text-strong: #f0f4f8;
+  --text-soft: #dfe6ed;
+  --text-muted: rgba(220, 228, 236, 0.68);
+  --text-dim: rgba(183, 194, 205, 0.62);
+  --text-contrast: #101215;
+  --text-axis: rgba(224, 230, 237, 0.7);
+  --text-axis-subtle: rgba(224, 230, 237, 0.54);
+  --text-axis-strong: rgba(224, 230, 237, 0.74);
+  --text-history: rgba(176, 186, 196, 0.72);
+  --accent-cyan: #62dfff;
+  --accent-cyan-soft: #b8f3ff;
+  --accent-sand: #e5c98c;
+  --accent-clay: #c58977;
+  --accent-cyan-bg-soft: rgba(98, 223, 255, 0.08);
+  --accent-cyan-bg: rgba(98, 223, 255, 0.12);
+  --accent-cyan-bg-strong: rgba(98, 223, 255, 0.14);
+  --accent-cyan-line: rgba(98, 223, 255, 0.28);
+  --accent-cyan-fill: rgba(98, 223, 255, 0.72);
+  --accent-sand-bg-soft: rgba(229, 201, 140, 0.06);
+  --accent-sand-bg: rgba(229, 201, 140, 0.1);
+  --accent-sand-bg-strong: rgba(229, 201, 140, 0.08);
+  --accent-sand-fill: rgba(229, 201, 140, 0.72);
+  --accent-sand-shadow: rgba(229, 201, 140, 0.18);
+  --accent-clay-bg: rgba(197, 137, 119, 0.1);
+  --accent-clay-bg-strong: rgba(197, 137, 119, 0.14);
+  --accent-clay-fill: rgba(197, 137, 119, 0.72);
+  --shadow-overlay: rgba(0, 0, 0, 0.24);
+  --focus-ring: rgba(152, 237, 255, 0.52);
+  --focus-ring-soft: rgba(152, 237, 255, 0.18);
+  --shadow-panel: 0 1.375rem 2.625rem rgba(0, 0, 0, 0.28);
+  color: var(--text-strong);
+  background: var(--page-bg-top);
+  font-family: var(--font-body);
   line-height: 1.5;
   font-weight: 500;
   font-synthesis: none;
@@ -18,11 +79,14 @@
 
 html {
   scrollbar-gutter: stable;
+  scroll-behavior: smooth;
 }
 
 body {
+  min-width: 20rem;
   margin: 0;
-  min-width: 320px;
+  background: var(--page-bg);
+  color: var(--text-strong);
 }
 
 button,

@@ -7,7 +7,12 @@ from datetime import datetime, timedelta, timezone
 from .config import TrainingConfig
 from .ports import MarketDataSource
 from ..domain.close_anchor import build_close_anchor_features
-from ..domain.entities import OHLCVBar, TimeframeFeatureRow, TrainingExample
+from ..domain.entities import (
+    OHLCVBar,
+    TimeframeFeatureRow,
+    TrainingExample,
+    build_state_feature_vector,
+)
 from ..domain.timeframes import ALL_TIMEFRAMES, MAIN_TIMEFRAMES, OVERLAY_TIMEFRAMES, resample_bars
 
 OVERLAY_LABELS = ("reduce", "hold")
@@ -483,14 +488,13 @@ def _build_state_features(
     anchor_vector = rows_30m[index_30m].vector
     volatility_ratio = realized_volatility / max(baseline_volatility, 1e-6)
     clipped_volatility_ratio = max(-2.0, min(2.0, volatility_ratio - 1.0))
-    return (
-        *tuple(float(value) for value in regime["features"]),
-        float(realized_volatility),
-        float(baseline_volatility),
-        float(clipped_volatility_ratio),
-        float(trend_strength),
-        float(anchor_vector[4]),
-        float(anchor_vector[5]),
+    return build_state_feature_vector(
+        regime_features=tuple(float(value) for value in regime["features"]),
+        realized_volatility=float(realized_volatility),
+        baseline_volatility=float(baseline_volatility),
+        volatility_ratio_offset=float(clipped_volatility_ratio),
+        anchor_volume_anomaly=float(anchor_vector[4]),
+        anchor_ema_deviation=float(anchor_vector[5]),
     )
 
 

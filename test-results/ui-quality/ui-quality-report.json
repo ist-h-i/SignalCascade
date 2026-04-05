@@ -1,0 +1,112 @@
+{
+  "version": "portable-static-v1",
+  "runType": "pr",
+  "timestamp": "2026-04-05T19:13:04.687Z",
+  "overallScore": 86.07,
+  "gate": "warn",
+  "hardFails": [],
+  "aggregationMode": "portable-static-heuristic",
+  "targetCount": 1,
+  "warnOnly": false,
+  "categoryScores": {
+    "spacing": 30,
+    "density": 20,
+    "visual": 9.6,
+    "color": 20,
+    "responsive": 6.47
+  },
+  "ruleTotals": {
+    "S1": 0,
+    "D1": 0,
+    "D2": 0,
+    "V2": 10.4,
+    "V4": 0,
+    "C2": 0,
+    "R2": 3.53
+  },
+  "normalizedRuleTotals": {
+    "S1": 0,
+    "D1": 0,
+    "D2": 0,
+    "V2": 10.4,
+    "V4": 0,
+    "C2": 0,
+    "R2": 3.53
+  },
+  "legacyRuleTotals": {
+    "S1": 0,
+    "D1": 0,
+    "D2": 0,
+    "V2": 10.4,
+    "V4": 0,
+    "C2": 0,
+    "R2": 3.53
+  },
+  "routeSummaries": [
+    {
+      "route": "/global",
+      "score": 95,
+      "fileCount": 11,
+      "topDeductions": [
+        {
+          "rule": "V2",
+          "deduction": 10.4
+        },
+        {
+          "rule": "R2",
+          "deduction": 3.53
+        },
+        {
+          "rule": "S1",
+          "deduction": 0
+        }
+      ]
+    }
+  ],
+  "ruleResults": [
+    {
+      "rule": "V2",
+      "deduction": 10.4,
+      "severity": "high"
+    },
+    {
+      "rule": "R2",
+      "deduction": 3.53,
+      "severity": "low"
+    },
+    {
+      "rule": "S1",
+      "deduction": 0,
+      "severity": "low"
+    },
+    {
+      "rule": "D1",
+      "deduction": 0,
+      "severity": "low"
+    },
+    {
+      "rule": "D2",
+      "deduction": 0,
+      "severity": "low"
+    },
+    {
+      "rule": "V4",
+      "deduction": 0,
+      "severity": "low"
+    },
+    {
+      "rule": "C2",
+      "deduction": 0,
+      "severity": "low"
+    }
+  ],
+  "scanStats": {
+    "scannedFiles": 11,
+    "styleFiles": 2,
+    "templateFiles": 4,
+    "borderUsage": 7,
+    "borderedContainers": 0,
+    "dividerMarkers": 0,
+    "nestedBorderChains": 0
+  }
+}

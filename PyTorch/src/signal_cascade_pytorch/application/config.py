@@ -3,6 +3,12 @@ from __future__ import annotations
 from dataclasses import dataclass, field
 
 from ..domain.close_anchor import TimeframeParameters
+from ..domain.entities import (
+    STATE_FEATURE_NAMES,
+    STATE_VECTOR_COMPONENT_NAMES,
+    TIMEFRAME_FEATURE_NAMES,
+    TRAINING_EXAMPLE_CONTRACT_VERSION,
+)
 from ..domain.timeframes import HORIZONS
 
 
@@ -11,11 +17,23 @@ LEGACY_CONFIG_SCHEMA_VERSION = 1
 
 
 def _default_main_windows() -> dict[str, int]:
-    return {"4h": 48, "1d": 21, "1w": 8}
+    return {"4h": 48, "1d": 21, "1w": 6}
 
 
 def _default_overlay_windows() -> dict[str, int]:
     return {"1h": 48, "30m": 96}
+
+
+def _default_timeframe_feature_names() -> tuple[str, ...]:
+    return TIMEFRAME_FEATURE_NAMES
+
+
+def _default_state_feature_names() -> tuple[str, ...]:
+    return STATE_FEATURE_NAMES
+
+
+def _default_state_vector_component_names() -> tuple[str, ...]:
+    return STATE_VECTOR_COMPONENT_NAMES
 
 
 def _default_timeframe_parameters() -> dict[str, TimeframeParameters]:
@@ -115,6 +133,12 @@ class TrainingConfig:
     horizons: tuple[int, ...] = HORIZONS
     main_windows: dict[str, int] = field(default_factory=_default_main_windows)
     overlay_windows: dict[str, int] = field(default_factory=_default_overlay_windows)
+    feature_contract_version: int = TRAINING_EXAMPLE_CONTRACT_VERSION
+    timeframe_feature_names: tuple[str, ...] = field(default_factory=_default_timeframe_feature_names)
+    state_feature_names: tuple[str, ...] = field(default_factory=_default_state_feature_names)
+    state_vector_component_names: tuple[str, ...] = field(
+        default_factory=_default_state_vector_component_names
+    )
     timeframe_parameters: dict[str, TimeframeParameters] = field(
         default_factory=_default_timeframe_parameters
     )
@@ -180,6 +204,10 @@ class TrainingConfig:
             "horizons": list(self.horizons),
             "main_windows": dict(self.main_windows),
             "overlay_windows": dict(self.overlay_windows),
+            "feature_contract_version": self.feature_contract_version,
+            "timeframe_feature_names": list(self.timeframe_feature_names),
+            "state_feature_names": list(self.state_feature_names),
+            "state_vector_component_names": list(self.state_vector_component_names),
             "timeframe_parameters": {
                 key: value.to_dict() for key, value in self.timeframe_parameters.items()
             },
@@ -250,6 +278,30 @@ class TrainingConfig:
                     list(_legacy_policy_sweep_state_reset_modes()),
                 )
             )
+        feature_contract_version = int(
+            payload.get("feature_contract_version", TRAINING_EXAMPLE_CONTRACT_VERSION)
+        )
+        timeframe_feature_names = tuple(
+            str(value)
+            for value in payload.get(
+                "timeframe_feature_names",
+                list(_default_timeframe_feature_names()),
+            )
+        )
+        state_feature_names = tuple(
+            str(value)
+            for value in payload.get(
+                "state_feature_names",
+                list(_default_state_feature_names()),
+            )
+        )
+        state_vector_component_names = tuple(
+            str(value)
+            for value in payload.get(
+                "state_vector_component_names",
+                list(_default_state_vector_component_names()),
+            )
+        )
         return cls(
             seed=int(payload["seed"]),
             synthetic_bars=int(payload["synthetic_bars"]),
@@ -300,5 +352,9 @@ class TrainingConfig:
             overlay_windows={
                 key: int(value) for key, value in dict(payload["overlay_windows"]).items()
             },
+            feature_contract_version=feature_contract_version,
+            timeframe_feature_names=timeframe_feature_names,
+            state_feature_names=state_feature_names,
+            state_vector_component_names=state_vector_component_names,
             timeframe_parameters=timeframe_parameters,
         )

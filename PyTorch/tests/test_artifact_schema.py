@@ -26,7 +26,14 @@ from signal_cascade_pytorch.application.inference_service import (
     serialize_prediction_result,
 )
 from signal_cascade_pytorch.application.report_service import ANALYSIS_SCHEMA_VERSION, generate_research_report
-from signal_cascade_pytorch.domain.entities import OHLCVBar, PredictionResult
+from signal_cascade_pytorch.domain.entities import (
+    OHLCVBar,
+    PredictionResult,
+    STATE_FEATURE_NAMES,
+    STATE_VECTOR_COMPONENT_NAMES,
+    TIMEFRAME_FEATURE_NAMES,
+    TRAINING_EXAMPLE_CONTRACT_VERSION,
+)
 
 
 def _prediction() -> PredictionResult:
@@ -242,6 +249,17 @@ class ArtifactSchemaTests(unittest.TestCase):
             ("carry_on", "reset_each_session_or_window"),
         )
         self.assertEqual(restored.policy_sweep_min_policy_sigmas, (5e-5, 1e-4, 2e-4))
+        self.assertEqual(payload["feature_contract_version"], TRAINING_EXAMPLE_CONTRACT_VERSION)
+        self.assertEqual(tuple(payload["timeframe_feature_names"]), TIMEFRAME_FEATURE_NAMES)
+        self.assertEqual(tuple(payload["state_feature_names"]), STATE_FEATURE_NAMES)
+        self.assertEqual(
+            tuple(payload["state_vector_component_names"]),
+            STATE_VECTOR_COMPONENT_NAMES,
+        )
+        self.assertEqual(restored.feature_contract_version, TRAINING_EXAMPLE_CONTRACT_VERSION)
+        self.assertEqual(restored.timeframe_feature_names, TIMEFRAME_FEATURE_NAMES)
+        self.assertEqual(restored.state_feature_names, STATE_FEATURE_NAMES)
+        self.assertEqual(restored.state_vector_component_names, STATE_VECTOR_COMPONENT_NAMES)
 
     def test_legacy_config_payload_keeps_legacy_state_reset_semantics(self) -> None:
         legacy_payload = {
@@ -421,6 +439,10 @@ class ArtifactSchemaTests(unittest.TestCase):
 
         self.assertEqual(payload["schema_version"], PREDICTION_SCHEMA_VERSION)
         self.assertEqual(payload["predicted_close_semantics"], "median_from_log_return")
+        self.assertEqual(payload["g_t"], 0.8)
+        self.assertEqual(payload["selected_policy_utility"], 0.05)
+        self.assertEqual(payload["mu_t"]["3"], 0.02)
+        self.assertAlmostEqual(payload["sigma_t_sq"]["3"], 0.0004, places=9)
         self.assertEqual(payload["median_predicted_closes"]["3"], 102.0)
 
     def test_report_analysis_tracks_artifact_versions(self) -> None:
@@ -431,6 +453,10 @@ class ArtifactSchemaTests(unittest.TestCase):
 
         self.assertEqual(forecast_payload["schema_version"], FORECAST_SCHEMA_VERSION)
         self.assertIn("median_predicted_close", forecast_payload["forecast_rows"][0])
+        self.assertIn("mu_t", forecast_payload["forecast_rows"][0])
+        self.assertIn("sigma_t_sq", forecast_payload["forecast_rows"][0])
+        self.assertEqual(forecast_payload["g_t"], 0.8)
+        self.assertEqual(forecast_payload["selected_policy_utility"], 0.05)
 
         with TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
@@ -555,6 +581,10 @@ class ArtifactSchemaTests(unittest.TestCase):
         self.assertIn("carry_on", analysis["stateful_evaluation"])
         self.assertEqual(analysis["policy_calibration_summary"]["pareto_optimal_count"], 1)
         self.assertEqual(analysis["policy_calibration_summary"]["selection_rule_version"], 2)
+        self.assertEqual(analysis["forecast"]["g_t"], 0.8)
+        self.assertEqual(analysis["forecast"]["selected_policy_utility"], 0.05)
+        self.assertEqual(analysis["forecast"]["mu_t"]["3"], 0.02)
+        self.assertAlmostEqual(analysis["forecast"]["sigma_t_sq"]["3"], 0.0004, places=9)
         self.assertEqual(
             analysis["policy_calibration_summary"]["selected_row"]["state_reset_mode"],
             "reset_each_session_or_window",

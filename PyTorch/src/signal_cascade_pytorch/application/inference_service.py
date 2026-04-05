@@ -11,8 +11,8 @@ from .training_service import examples_to_batch
 from ..domain.entities import PredictionResult, TrainingExample
 from ..infrastructure.ml.model import SignalCascadeModel
 
-PREDICTION_SCHEMA_VERSION = 4
-FORECAST_SCHEMA_VERSION = 4
+PREDICTION_SCHEMA_VERSION = 5
+FORECAST_SCHEMA_VERSION = 5
 
 
 def predict_latest(
@@ -55,7 +55,7 @@ def predict_from_example(
         config=config,
         previous_position=previous_position,
         tradeability_gate=tradeability_gate,
-        shape_probs=outputs["shape_probs"][0].tolist(),
+        shape_probs=outputs["shape_posterior"][0].tolist(),
     )
 
     predicted_closes = {
@@ -78,7 +78,7 @@ def predict_from_example(
     }
     shape_probabilities = {
         str(index): float(value)
-        for index, value in enumerate(outputs["shape_probs"][0].tolist())
+        for index, value in enumerate(outputs["shape_posterior"][0].tolist())
     }
 
     return PredictionResult(
@@ -104,6 +104,10 @@ def predict_from_example(
 
 
 def serialize_prediction_result(prediction: PredictionResult) -> dict[str, object]:
+    sigma_t_sq = {
+        str(horizon): float(value) ** 2
+        for horizon, value in prediction.uncertainties.items()
+    }
     return {
         "schema_version": PREDICTION_SCHEMA_VERSION,
         "predicted_close_semantics": "median_from_log_return",
@@ -111,19 +115,29 @@ def serialize_prediction_result(prediction: PredictionResult) -> dict[str, objec
         "current_close": prediction.current_close,
         "policy_horizon": prediction.policy_horizon,
         "executed_horizon": prediction.executed_horizon,
+        "q_t_prev": prediction.previous_position,
         "previous_position": prediction.previous_position,
+        "q_t": prediction.position,
         "position": prediction.position,
+        "q_t_trade_delta": prediction.trade_delta,
         "trade_delta": prediction.trade_delta,
         "no_trade_band_hit": prediction.no_trade_band_hit,
+        "g_t": prediction.tradeability_gate,
         "tradeability_gate": prediction.tradeability_gate,
         "shape_entropy": prediction.shape_entropy,
+        "selected_policy_utility": prediction.policy_score,
         "policy_score": prediction.policy_score,
+        "mu_t": dict(prediction.expected_log_returns),
         "expected_log_returns": dict(prediction.expected_log_returns),
+        "median_predicted_close_by_horizon": dict(prediction.predicted_closes),
         "predicted_closes": dict(prediction.predicted_closes),
         "median_predicted_closes": dict(prediction.predicted_closes),
+        "sigma_t": dict(prediction.uncertainties),
+        "sigma_t_sq": sigma_t_sq,
         "uncertainties": dict(prediction.uncertainties),
         "horizon_utilities": dict(prediction.horizon_utilities),
         "horizon_positions": dict(prediction.horizon_positions),
+        "shape_posterior": dict(prediction.shape_probabilities),
         "shape_probabilities": dict(prediction.shape_probabilities),
         "regime_id": prediction.regime_id,
     }
@@ -136,6 +150,10 @@ def build_forecast_summary_payload(
     best_params: dict[str, object] | None = None,
 ) -> dict[str, object]:
     anchor_close = float(prediction.current_close)
+    sigma_t_sq = {
+        str(horizon): float(value) ** 2
+        for horizon, value in prediction.uncertainties.items()
+    }
     return {
         "schema_version": FORECAST_SCHEMA_VERSION,
         "predicted_close_semantics": "median_from_log_return",
@@ -143,19 +161,29 @@ def build_forecast_summary_payload(
         "anchor_close": anchor_close,
         "policy_horizon": prediction.policy_horizon,
         "executed_horizon": prediction.executed_horizon,
+        "q_t_prev": prediction.previous_position,
         "previous_position": prediction.previous_position,
+        "q_t": prediction.position,
         "position": prediction.position,
+        "q_t_trade_delta": prediction.trade_delta,
         "trade_delta": prediction.trade_delta,
         "no_trade_band_hit": prediction.no_trade_band_hit,
+        "g_t": prediction.tradeability_gate,
         "tradeability_gate": prediction.tradeability_gate,
         "shape_entropy": prediction.shape_entropy,
+        "selected_policy_utility": prediction.policy_score,
         "policy_score": prediction.policy_score,
+        "mu_t": dict(prediction.expected_log_returns),
         "expected_log_returns": dict(prediction.expected_log_returns),
+        "median_predicted_close_by_horizon": dict(prediction.predicted_closes),
         "predicted_closes": dict(prediction.predicted_closes),
         "median_predicted_closes": dict(prediction.predicted_closes),
+        "sigma_t": dict(prediction.uncertainties),
+        "sigma_t_sq": sigma_t_sq,
         "uncertainties": dict(prediction.uncertainties),
         "horizon_utilities": dict(prediction.horizon_utilities),
         "horizon_positions": dict(prediction.horizon_positions),
+        "shape_posterior": dict(prediction.shape_probabilities),
         "shape_probabilities": dict(prediction.shape_probabilities),
         "forecast_rows": [
             {
@@ -163,10 +191,14 @@ def build_forecast_summary_payload(
                 "forecast_time_utc": (
                     datetime.fromisoformat(prediction.anchor_time) + timedelta(hours=4 * horizon)
                 ).isoformat(),
+                "mu_t": prediction.expected_log_returns[str(horizon)],
                 "expected_log_return": prediction.expected_log_returns[str(horizon)],
+                "g_t": prediction.tradeability_gate,
                 "expected_return_pct": prediction.predicted_closes[str(horizon)] / max(anchor_close, 1e-6) - 1.0,
                 "median_predicted_close": prediction.predicted_closes[str(horizon)],
                 "predicted_close": prediction.predicted_closes[str(horizon)],
+                "sigma_t": prediction.uncertainties[str(horizon)],
+                "sigma_t_sq": sigma_t_sq[str(horizon)],
                 "uncertainty": prediction.uncertainties[str(horizon)],
                 "one_sigma_low_close": anchor_close
                 * math.exp(

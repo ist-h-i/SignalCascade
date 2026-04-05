@@ -9,7 +9,7 @@ from ..infrastructure.persistence import load_json, save_json
 JST = timezone(timedelta(hours=9))
 UTC = timezone.utc
 METRICS_SCHEMA_VERSION = 4
-ANALYSIS_SCHEMA_VERSION = 5
+ANALYSIS_SCHEMA_VERSION = 6
 
 
 def generate_research_report(
@@ -60,11 +60,18 @@ def _build_analysis(
     generated_at_utc = datetime.now(UTC)
     current_close = float(prediction.get("current_close", 0.0))
     policy_horizon = int(prediction.get("policy_horizon", prediction.get("proposed_horizon", 0)))
-    expected_log_returns = dict(prediction.get("expected_log_returns", {}))
+    expected_log_returns = dict(prediction.get("mu_t", prediction.get("expected_log_returns", {})))
     predicted_closes = dict(
-        prediction.get("median_predicted_closes", prediction.get("predicted_closes", {}))
+        prediction.get(
+            "median_predicted_close_by_horizon",
+            prediction.get("median_predicted_closes", prediction.get("predicted_closes", {})),
+        )
     )
-    uncertainties = dict(prediction.get("uncertainties", {}))
+    uncertainties = dict(prediction.get("sigma_t", prediction.get("uncertainties", {})))
+    uncertainties_sq = dict(prediction.get("sigma_t_sq", {}))
+    shape_posterior = dict(
+        prediction.get("shape_posterior", prediction.get("shape_probabilities", {}))
+    )
     stateful_evaluation = dict(diagnostics_summary.get("stateful_evaluation", {}))
     policy_calibration_sweep = list(diagnostics_summary.get("policy_calibration_sweep", []))
     policy_calibration_summary = dict(diagnostics_summary.get("policy_calibration_summary", {}))
@@ -79,9 +86,14 @@ def _build_analysis(
             {
                 "horizon_4h": horizon,
                 "forecast_time_utc": (anchor_time + timedelta(hours=4 * horizon)).isoformat(),
+                "mu_t": expected_log_return,
                 "expected_log_return": expected_log_return,
                 "expected_return_pct": math.exp(expected_log_return) - 1.0,
                 "predicted_close": predicted_close,
+                "sigma_t": uncertainty,
+                "sigma_t_sq": float(
+                    uncertainties_sq.get(horizon_key, uncertainty * uncertainty)
+                ),
                 "uncertainty": uncertainty,
             }
         )
@@ -125,13 +137,30 @@ def _build_analysis(
             "anchor_close": current_close,
             "policy_horizon": policy_horizon,
             "executed_horizon": prediction.get("executed_horizon"),
+            "q_t_prev": float(prediction.get("q_t_prev", prediction.get("previous_position", 0.0))),
             "previous_position": float(prediction.get("previous_position", 0.0)),
+            "q_t": float(prediction.get("q_t", prediction.get("position", 0.0))),
             "position": float(prediction.get("position", 0.0)),
+            "q_t_trade_delta": float(prediction.get("q_t_trade_delta", prediction.get("trade_delta", 0.0))),
             "trade_delta": float(prediction.get("trade_delta", 0.0)),
             "no_trade_band_hit": bool(prediction.get("no_trade_band_hit", False)),
+            "g_t": float(prediction.get("g_t", prediction.get("tradeability_gate", 0.0))),
             "tradeability_gate": float(prediction.get("tradeability_gate", 0.0)),
             "shape_entropy": float(prediction.get("shape_entropy", 0.0)),
+            "selected_policy_utility": float(
+                prediction.get("selected_policy_utility", prediction.get("policy_score", 0.0))
+            ),
             "policy_score": float(prediction.get("policy_score", 0.0)),
+            "mu_t": expected_log_returns,
+            "sigma_t": uncertainties,
+            "sigma_t_sq": {
+                str(key): float(value)
+                for key, value in (
+                    uncertainties_sq
+                    or {horizon: float(sigma) ** 2 for horizon, sigma in uncertainties.items()}
+                ).items()
+            },
+            "shape_posterior": shape_posterior,
             "rows": rows,
         },
         "project_assessment": {
@@ -144,6 +173,10 @@ def _build_summary(
     validation: dict[str, object],
     prediction: dict[str, object],
 ) -> str:
+    g_t = float(prediction.get("g_t", prediction.get("tradeability_gate", 0.0)))
+    selected_policy_utility = float(
+        prediction.get("selected_policy_utility", prediction.get("policy_score", 0.0))
+    )
     return (
         "新 spec の主経路は threshold policy ではなく "
         "`shape -> return distribution -> q_t*` です。"
@@ -152,8 +185,9 @@ def _build_summary(
         f" cvar_tail_loss={float(validation.get('cvar_tail_loss', 0.0)):.4f},"
         f" no_trade_band_hit_rate={float(validation.get('no_trade_band_hit_rate', 0.0)):.4f}。"
         f" latest policy_horizon={int(prediction.get('policy_horizon', 0))},"
-        f" position={float(prediction.get('position', 0.0)):.4f},"
-        f" tradeability_gate={float(prediction.get('tradeability_gate', 0.0)):.4f}。"
+        f" q_t={float(prediction.get('q_t', prediction.get('position', 0.0))):.4f},"
+        f" g_t={g_t:.4f},"
+        f" selected_policy_utility={selected_policy_utility:.4f}。"
     )
 
 
@@ -204,10 +238,10 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f"- sub-artifact lineage: `{artifact_provenance['sub_artifact_materialization']}`"
         )
     row_lines = "\n".join(
-        f"- h={int(row['horizon_4h'])}: expected_log_return={float(row['expected_log_return']):.4f}, "
+        f"- h={int(row['horizon_4h'])}: mu_t={float(row['mu_t']):.4f}, "
         f"expected_return_pct={float(row['expected_return_pct']):.4f}, "
         f"predicted_close={float(row['predicted_close']):.4f}, "
-        f"uncertainty={float(row['uncertainty']):.4f}"
+        f"sigma_t={float(row['sigma_t']):.4f}"
         for row in rows
     )
     return "\n".join(
@@ -290,8 +324,8 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f"- previous_position / position / trade_delta: "
             f"`{float(forecast['previous_position']):.4f}` / `{float(forecast['position']):.4f}` / `{float(forecast['trade_delta']):.4f}`",
             f"- no_trade_band_hit: `{forecast['no_trade_band_hit']}`",
-            f"- tradeability_gate / shape_entropy / policy_score: "
-            f"`{float(forecast['tradeability_gate']):.4f}` / `{float(forecast['shape_entropy']):.4f}` / `{float(forecast['policy_score']):.4f}`",
+            f"- g_t / shape_entropy / selected_policy_utility: "
+            f"`{float(forecast['g_t']):.4f}` / `{float(forecast['shape_entropy']):.4f}` / `{float(forecast['selected_policy_utility']):.4f}`",
             row_lines or "- forecast rows: none",
             "",
             "## Assessment",

@@ -33,7 +33,7 @@ def _example(index: int) -> TrainingExample:
         main_sequences=main_sequences,
         overlay_sequences=overlay_sequences,
         main_shape_targets=main_shape_targets,
-        state_features=(1.0, 0.0, 0.0, 0.1, 0.2, 0.02, 0.03, 0.1, 0.25, 0.4),
+        state_features=(1.0, 0.0, 0.0, 0.1, 0.25, 0.02, 0.03, 0.1, 0.25, 0.4),
         returns_target=(0.02, 0.015),
         long_mae=(0.0, 0.0),
         short_mae=(0.0, 0.0),
@@ -47,7 +47,7 @@ def _example(index: int) -> TrainingExample:
         overlay_target=0,
         current_close=100.0,
         regime_id="asia|low|trend",
-        regime_features=(1.0, 0.0, 0.0, 0.1, 0.2),
+        regime_features=(1.0, 0.0, 0.0, 0.1, 0.25),
         realized_volatility=0.02,
         trend_strength=0.25,
     )
@@ -56,16 +56,20 @@ def _example(index: int) -> TrainingExample:
 class _StaticPolicyModel(torch.nn.Module):
     def forward(self, main_sequences, overlay_sequences, state_features, previous_state=None):
         batch_size = state_features.shape[0]
+        shape_posterior = torch.tensor(
+            [[0.45, 0.2, 0.15, 0.1, 0.05, 0.05]],
+            dtype=torch.float32,
+        ).repeat(batch_size, 1)
+        memory_state = torch.zeros(batch_size, 4, dtype=torch.float32)
         return {
             "mu": torch.tensor([[0.03, 0.012]], dtype=torch.float32).repeat(batch_size, 1),
             "sigma": torch.tensor([[0.02, 0.03]], dtype=torch.float32).repeat(batch_size, 1),
             "tradeability_gate": torch.tensor([0.9], dtype=torch.float32).repeat(batch_size),
             "shape_entropy": torch.tensor([0.25], dtype=torch.float32).repeat(batch_size),
-            "shape_probs": torch.tensor(
-                [[0.45, 0.2, 0.15, 0.1, 0.05, 0.05]],
-                dtype=torch.float32,
-            ).repeat(batch_size, 1),
-            "next_state": torch.zeros(batch_size, 4, dtype=torch.float32),
+            "shape_posterior": shape_posterior,
+            "shape_probs": shape_posterior,
+            "memory_state": memory_state,
+            "next_state": memory_state,
         }
 
 
