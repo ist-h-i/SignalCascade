@@ -11,7 +11,11 @@ from signal_cascade_pytorch.application.artifact_provenance import (
     build_subartifact_lineage,
     materialize_artifact_source,
 )
-from signal_cascade_pytorch.bootstrap import _resolve_diagnostics_output_dir
+from signal_cascade_pytorch.bootstrap import (
+    _build_artifact_entrypoints,
+    _build_artifact_manifest,
+    _resolve_diagnostics_output_dir,
+)
 from signal_cascade_pytorch.application.config import TrainingConfig
 from signal_cascade_pytorch.application.diagnostics_service import DIAGNOSTICS_SCHEMA_VERSION
 from signal_cascade_pytorch.application.inference_service import (
@@ -48,6 +52,177 @@ def _prediction() -> PredictionResult:
 
 
 class ArtifactSchemaTests(unittest.TestCase):
+    def test_training_manifest_matches_source_identity_and_relative_entrypoints(self) -> None:
+        config = TrainingConfig(output_dir="artifacts/demo")
+        bars = [
+            OHLCVBar(
+                timestamp=datetime(2026, 3, 24, hour, 0, tzinfo=timezone.utc),
+                open=100.0 + hour,
+                high=101.0 + hour,
+                low=99.0 + hour,
+                close=100.5 + hour,
+                volume=10.0 + hour,
+            )
+            for hour in (0, 4)
+        ]
+
+        with TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir)
+            (output_dir / "config.json").write_text(json.dumps(config.to_dict()), encoding="utf-8")
+            for relative_path in (
+                "analysis.json",
+                "forecast_summary.json",
+                "horizon_diag.csv",
+                "metrics.json",
+                "model.pt",
+                "policy_summary.csv",
+                "prediction.json",
+                "research_report.md",
+                "validation_rows.csv",
+                "validation_summary.json",
+            ):
+                (output_dir / relative_path).write_text("{}", encoding="utf-8")
+
+            source_payload = materialize_artifact_source(
+                {"kind": "csv", "path": "/tmp/live.csv"},
+                output_dir,
+                base_bars=bars,
+            )
+            source = build_artifact_source_payload(
+                source_payload,
+                output_dir,
+                artifact_kind="training_run",
+                generated_at_utc="2026-04-05T10:00:00+00:00",
+                sub_artifacts=build_subartifact_lineage(
+                    {
+                        "analysis.json": "regenerated",
+                        "config.json": "generated",
+                        "data_snapshot.csv": "generated",
+                        "forecast_summary.json": "generated",
+                        "horizon_diag.csv": "generated",
+                        "manifest.json": "generated",
+                        "metrics.json": "generated",
+                        "prediction.json": "generated",
+                        "research_report.md": "regenerated",
+                        "source.json": "generated",
+                        "validation_rows.csv": "generated",
+                        "validation_summary.json": "generated",
+                    }
+                ),
+            )
+            (output_dir / "source.json").write_text(json.dumps(source), encoding="utf-8")
+            manifest = _build_artifact_manifest(
+                artifact_kind="training_run",
+                artifact_id=str(source["artifact_id"]),
+                parent_artifact_id=None,
+                generated_at_utc="2026-04-05T10:00:00+00:00",
+                entrypoints=_build_artifact_entrypoints(source_payload, include_model=True),
+            )
+            self.assertEqual(manifest["schema_version"], 1)
+            self.assertEqual(manifest["artifact_kind"], source["artifact_kind"])
+            self.assertEqual(manifest["artifact_id"], source["artifact_id"])
+            self.assertIsNone(manifest["parent_artifact_id"])
+            self.assertEqual(manifest["generated_at"], "2026-04-05T10:00:00+00:00")
+            self.assertEqual(manifest["generated_at_utc"], "2026-04-05T10:00:00+00:00")
+            self.assertEqual(manifest["entrypoints"]["source"], "source.json")
+            self.assertEqual(manifest["entrypoints"]["config"], "config.json")
+            self.assertEqual(manifest["entrypoints"]["validation_summary"], "validation_summary.json")
+            self.assertEqual(manifest["entrypoints"]["metrics"], "metrics.json")
+            self.assertEqual(manifest["entrypoints"]["prediction"], "prediction.json")
+            self.assertEqual(manifest["entrypoints"]["model"], "model.pt")
+            self.assertEqual(manifest["entrypoints"]["data_snapshot"], "data_snapshot.csv")
+            for relative_path in manifest["entrypoints"].values():
+                self.assertFalse(Path(relative_path).is_absolute())
+                self.assertTrue((output_dir / relative_path).exists())
+
+    def test_overlay_manifest_matches_source_identity_and_relative_entrypoints(self) -> None:
+        config = TrainingConfig(output_dir="artifacts/demo")
+        bars = [
+            OHLCVBar(
+                timestamp=datetime(2026, 3, 24, hour, 0, tzinfo=timezone.utc),
+                open=100.0 + hour,
+                high=101.0 + hour,
+                low=99.0 + hour,
+                close=100.5 + hour,
+                volume=10.0 + hour,
+            )
+            for hour in (0, 4)
+        ]
+
+        with TemporaryDirectory() as temp_dir, TemporaryDirectory() as parent_dir:
+            output_dir = Path(temp_dir)
+            parent_artifact_dir = Path(parent_dir)
+            (output_dir / "config.json").write_text(json.dumps(config.to_dict()), encoding="utf-8")
+            for relative_path in (
+                "analysis.json",
+                "forecast_summary.json",
+                "horizon_diag.csv",
+                "metrics.json",
+                "policy_summary.csv",
+                "prediction.json",
+                "research_report.md",
+                "validation_rows.csv",
+                "validation_summary.json",
+            ):
+                (output_dir / relative_path).write_text("{}", encoding="utf-8")
+            (parent_artifact_dir / "source.json").write_text(
+                json.dumps({"artifact_id": "parent-artifact-id"}),
+                encoding="utf-8",
+            )
+
+            source_payload = materialize_artifact_source(
+                {"kind": "csv", "path": "/tmp/live.csv"},
+                output_dir,
+                base_bars=bars,
+            )
+            source = build_artifact_source_payload(
+                source_payload,
+                output_dir,
+                artifact_kind="diagnostic_replay_overlay",
+                parent_artifact_dir=parent_artifact_dir,
+                generated_at_utc="2026-04-05T10:05:00+00:00",
+                sub_artifacts=build_subartifact_lineage(
+                    {
+                        "analysis.json": "regenerated",
+                        "config.json": "generated",
+                        "data_snapshot.csv": "generated",
+                        "forecast_summary.json": "copied",
+                        "horizon_diag.csv": "regenerated",
+                        "manifest.json": "generated",
+                        "metrics.json": "regenerated",
+                        "policy_summary.csv": "regenerated",
+                        "prediction.json": "copied",
+                        "research_report.md": "regenerated",
+                        "source.json": "regenerated",
+                        "validation_rows.csv": "regenerated",
+                        "validation_summary.json": "regenerated",
+                    },
+                    source_artifact_dir=parent_artifact_dir,
+                ),
+            )
+            (output_dir / "source.json").write_text(json.dumps(source), encoding="utf-8")
+            manifest = _build_artifact_manifest(
+                artifact_kind="diagnostic_replay_overlay",
+                artifact_id=str(source["artifact_id"]),
+                parent_artifact_id=str(source["parent_artifact_id"]),
+                generated_at_utc="2026-04-05T10:05:00+00:00",
+                entrypoints=_build_artifact_entrypoints(source_payload),
+            )
+            self.assertEqual(manifest["schema_version"], 1)
+            self.assertEqual(manifest["artifact_kind"], source["artifact_kind"])
+            self.assertEqual(manifest["artifact_id"], source["artifact_id"])
+            self.assertEqual(manifest["parent_artifact_id"], "parent-artifact-id")
+            self.assertEqual(manifest["entrypoints"]["source"], "source.json")
+            self.assertEqual(manifest["entrypoints"]["config"], "config.json")
+            self.assertEqual(manifest["entrypoints"]["validation_summary"], "validation_summary.json")
+            self.assertEqual(manifest["entrypoints"]["metrics"], "metrics.json")
+            self.assertEqual(manifest["entrypoints"]["prediction"], "prediction.json")
+            self.assertNotIn("model", manifest["entrypoints"])
+            self.assertEqual(manifest["entrypoints"]["data_snapshot"], "data_snapshot.csv")
+            for relative_path in manifest["entrypoints"].values():
+                self.assertFalse(Path(relative_path).is_absolute())
+                self.assertTrue((output_dir / relative_path).exists())
+
     def test_config_round_trip_materializes_versioned_state_reset_contract(self) -> None:
         config = TrainingConfig()
 

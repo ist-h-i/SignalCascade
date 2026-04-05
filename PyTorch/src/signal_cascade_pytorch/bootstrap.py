@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from dataclasses import replace
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
 from .application.artifact_provenance import (
@@ -33,7 +33,7 @@ from .infrastructure.data.synthetic_source import SyntheticMarketDataSource
 from .infrastructure.ml.model import SignalCascadeModel
 from .infrastructure.persistence import ensure_directory, load_checkpoint, load_json, save_json
 
-OVERLAY_MANIFEST_SCHEMA_VERSION = 1
+ARTIFACT_MANIFEST_SCHEMA_VERSION = 1
 
 
 def train_command(args) -> int:
@@ -58,6 +58,7 @@ def train_command(args) -> int:
         output_dir,
         base_bars=base_bars if source_payload["kind"] == "csv" else None,
     )
+    generated_at_utc = datetime.now(timezone.utc).isoformat()
 
     model, summary = train_model(examples, config, output_dir)
     prediction = predict_latest(
@@ -88,28 +89,26 @@ def train_command(args) -> int:
         source_rows_used=source_rows_used,
         base_bars=base_bars if source_payload["kind"] == "csv" else None,
     )
-    train_sub_artifacts = {
-        "analysis.json": "regenerated",
-        "config.json": "generated",
-        "forecast_summary.json": "generated",
-        "horizon_diag.csv": "generated",
-        "metrics.json": "generated",
-        "policy_summary.csv": "generated",
-        "prediction.json": "generated",
-        "research_report.md": "regenerated",
-        "source.json": "generated",
-        "validation_rows.csv": "generated",
-        "validation_summary.json": "generated",
-    }
-    if artifact_source_payload["kind"] == "csv":
-        train_sub_artifacts["data_snapshot.csv"] = "generated"
+    train_sub_artifacts = _training_sub_artifacts(artifact_source_payload)
+    training_source_payload = build_artifact_source_payload(
+        artifact_source_payload,
+        output_dir,
+        artifact_kind="training_run",
+        generated_at_utc=generated_at_utc,
+        sub_artifacts=build_subartifact_lineage(train_sub_artifacts),
+    )
+    save_json(output_dir / "source.json", training_source_payload)
     save_json(
-        output_dir / "source.json",
-        build_artifact_source_payload(
-            artifact_source_payload,
-            output_dir,
+        output_dir / "manifest.json",
+        _build_artifact_manifest(
             artifact_kind="training_run",
-            sub_artifacts=build_subartifact_lineage(train_sub_artifacts),
+            artifact_id=str(training_source_payload["artifact_id"]),
+            parent_artifact_id=None,
+            generated_at_utc=generated_at_utc,
+            entrypoints=_build_artifact_entrypoints(
+                artifact_source_payload,
+                include_model=True,
+            ),
         ),
     )
     generate_research_report(output_dir)
@@ -119,6 +118,7 @@ def train_command(args) -> int:
             artifact_source_payload,
             output_dir,
             artifact_kind="training_run",
+            generated_at_utc=generated_at_utc,
             sub_artifacts=build_subartifact_lineage(train_sub_artifacts),
         ),
     )
@@ -283,6 +283,25 @@ def _save_forecast_summary(output_dir: Path, prediction, config: TrainingConfig)
     )
 
 
+def _training_sub_artifacts(source_payload: dict[str, object]) -> dict[str, str]:
+    entries = {
+        "analysis.json": "regenerated",
+        "config.json": "generated",
+        "forecast_summary.json": "generated",
+        "horizon_diag.csv": "generated",
+        "manifest.json": "generated",
+        "metrics.json": "generated",
+        "prediction.json": "generated",
+        "research_report.md": "regenerated",
+        "source.json": "generated",
+        "validation_rows.csv": "generated",
+        "validation_summary.json": "generated",
+    }
+    if source_payload["kind"] == "csv":
+        entries["data_snapshot.csv"] = "generated"
+    return entries
+
+
 def _overlay_sub_artifacts(source_payload: dict[str, object]) -> dict[str, str]:
     entries = {
         "analysis.json": "regenerated",
@@ -309,6 +328,7 @@ def _materialize_replay_artifact(
     source_payload: dict[str, object],
     validation_summary: dict[str, object],
 ) -> None:
+    generated_at_utc = str(validation_summary["generated_at_utc"])
     resolved_config = replace(config, output_dir=str(diagnostics_output_dir))
     save_json(diagnostics_output_dir / "config.json", resolved_config.to_dict())
 
@@ -324,30 +344,34 @@ def _materialize_replay_artifact(
         if source_path.exists():
             save_json(diagnostics_output_dir / name, load_json(source_path))
 
+    overlay_sub_artifacts = _overlay_sub_artifacts(source_payload)
+    overlay_source_payload = build_artifact_source_payload(
+        source_payload,
+        diagnostics_output_dir,
+        artifact_kind="diagnostic_replay_overlay",
+        parent_artifact_dir=artifact_dir,
+        generated_at_utc=generated_at_utc,
+        sub_artifacts=build_subartifact_lineage(
+            overlay_sub_artifacts,
+            source_artifact_dir=artifact_dir,
+        ),
+    )
     save_json(
         diagnostics_output_dir / "manifest.json",
-        _build_overlay_manifest(
-            artifact_dir=artifact_dir,
-            diagnostics_output_dir=diagnostics_output_dir,
-            source_payload=source_payload,
-            validation_summary=validation_summary,
+        _build_artifact_manifest(
+            artifact_kind="diagnostic_replay_overlay",
+            artifact_id=str(overlay_source_payload["artifact_id"]),
+            parent_artifact_id=(
+                None
+                if overlay_source_payload.get("parent_artifact_id") is None
+                else str(overlay_source_payload["parent_artifact_id"])
+            ),
+            generated_at_utc=generated_at_utc,
+            entrypoints=_build_artifact_entrypoints(source_payload),
         ),
     )
 
-    save_json(
-        diagnostics_output_dir / "source.json",
-        build_artifact_source_payload(
-            source_payload,
-            diagnostics_output_dir,
-            artifact_kind="diagnostic_replay_overlay",
-            parent_artifact_dir=artifact_dir,
-            generated_at_utc=str(validation_summary["generated_at_utc"]),
-            sub_artifacts=build_subartifact_lineage(
-                _overlay_sub_artifacts(source_payload),
-                source_artifact_dir=artifact_dir,
-            ),
-        ),
-    )
+    save_json(diagnostics_output_dir / "source.json", overlay_source_payload)
 
     if (diagnostics_output_dir / "metrics.json").exists() and (diagnostics_output_dir / "prediction.json").exists():
         generate_research_report(diagnostics_output_dir)
@@ -358,9 +382,9 @@ def _materialize_replay_artifact(
                 diagnostics_output_dir,
                 artifact_kind="diagnostic_replay_overlay",
                 parent_artifact_dir=artifact_dir,
-                generated_at_utc=str(validation_summary["generated_at_utc"]),
+                generated_at_utc=generated_at_utc,
                 sub_artifacts=build_subartifact_lineage(
-                    _overlay_sub_artifacts(source_payload),
+                    overlay_sub_artifacts,
                     source_artifact_dir=artifact_dir,
                 ),
             ),
@@ -386,39 +410,47 @@ def _resolve_diagnostics_output_dir(
     return resolved_output_dir
 
 
-def _build_overlay_manifest(
-    *,
-    artifact_dir: Path,
-    diagnostics_output_dir: Path,
+def _build_artifact_entrypoints(
     source_payload: dict[str, object],
-    validation_summary: dict[str, object],
+    *,
+    include_model: bool = False,
+) -> dict[str, str]:
+    entrypoints = {
+        "analysis": "analysis.json",
+        "config": "config.json",
+        "forecast_summary": "forecast_summary.json",
+        "horizon_diagnostics": "horizon_diag.csv",
+        "metrics": "metrics.json",
+        "policy_summary": "policy_summary.csv",
+        "prediction": "prediction.json",
+        "research_report": "research_report.md",
+        "source": "source.json",
+        "validation_rows": "validation_rows.csv",
+        "validation_summary": "validation_summary.json",
+    }
+    if include_model:
+        entrypoints["model"] = "model.pt"
+    if source_payload["kind"] == "csv":
+        entrypoints["data_snapshot"] = "data_snapshot.csv"
+    return dict(sorted(entrypoints.items()))
+
+
+def _build_artifact_manifest(
+    *,
+    artifact_kind: str,
+    artifact_id: str,
+    parent_artifact_id: str | None,
+    generated_at_utc: str,
+    entrypoints: dict[str, str],
 ) -> dict[str, object]:
-    parent_manifest = (
-        load_json(artifact_dir / "manifest.json") if (artifact_dir / "manifest.json").exists() else {}
-    )
-    parent_source = (
-        load_json(artifact_dir / "source.json") if (artifact_dir / "source.json").exists() else {}
-    )
     return {
-        "schema_version": OVERLAY_MANIFEST_SCHEMA_VERSION,
-        "artifact_kind": "diagnostic_replay_overlay",
-        "generated_at": str(validation_summary["generated_at_utc"]),
-        "artifact_dir": str(diagnostics_output_dir),
-        "parent_artifact_dir": str(artifact_dir),
-        "parent_artifact_id": parent_source.get("artifact_id"),
-        "parent_manifest_path": (
-            str(artifact_dir / "manifest.json") if (artifact_dir / "manifest.json").exists() else None
-        ),
-        "source_path": source_payload.get("path"),
-        "source_origin_path": source_payload.get("source_origin_path"),
-        "lookback_days": source_payload.get("lookback_days"),
-        "tuning_session_id": parent_manifest.get("session_id"),
-        "source_rows_original": parent_manifest.get("source_rows_original"),
-        "source_rows_used": parent_manifest.get("source_rows_used"),
-        "metrics_path": str(diagnostics_output_dir / "metrics.json"),
-        "prediction_path": str(diagnostics_output_dir / "prediction.json"),
-        "forecast_summary_path": str(diagnostics_output_dir / "forecast_summary.json"),
-        "validation_summary_path": str(diagnostics_output_dir / "validation_summary.json"),
+        "schema_version": ARTIFACT_MANIFEST_SCHEMA_VERSION,
+        "artifact_kind": artifact_kind,
+        "artifact_id": artifact_id,
+        "parent_artifact_id": parent_artifact_id,
+        "generated_at": generated_at_utc,
+        "generated_at_utc": generated_at_utc,
+        "entrypoints": dict(sorted(entrypoints.items())),
     }
 
 
