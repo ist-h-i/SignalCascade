@@ -40,6 +40,7 @@ ARTIFACT_MANIFEST_SCHEMA_VERSION = 1
 
 
 def train_command(args) -> int:
+    _emit_cli_compat_warnings(args)
     config = _build_config(args)
     output_dir = ensure_directory(Path(config.output_dir))
     source_payload = _build_source_payload(args, config)
@@ -143,11 +144,14 @@ def train_command(args) -> int:
     )
     print(f"latest policy horizon: {prediction.policy_horizon}")
     print(f"latest position: {prediction.position:.4f}")
+    print(f"latest g_t: {prediction.tradeability_gate:.4f}")
+    print(f"latest selected policy utility: {prediction.policy_score:.6f}")
     print(f"latest no-trade-band hit: {prediction.no_trade_band_hit}")
     return 0
 
 
 def predict_command(args) -> int:
+    _emit_cli_compat_warnings(args)
     output_dir = Path(args.output_dir)
     config = _load_config_with_overrides(output_dir, args)
     source_payload = _resolve_source_payload(args, output_dir)
@@ -176,11 +180,14 @@ def predict_command(args) -> int:
     print(f"executed horizon: {prediction.executed_horizon}")
     print(f"position: {prediction.position:.4f}")
     print(f"trade delta: {prediction.trade_delta:.4f}")
+    print(f"g_t: {prediction.tradeability_gate:.4f}")
+    print(f"selected policy utility: {prediction.policy_score:.6f}")
     print(f"no-trade-band hit: {prediction.no_trade_band_hit}")
     return 0
 
 
 def export_diagnostics_command(args) -> int:
+    _emit_cli_compat_warnings(args)
     artifact_dir = Path(args.output_dir).expanduser().resolve()
     diagnostics_output_dir = _resolve_diagnostics_output_dir(
         artifact_dir,
@@ -237,10 +244,16 @@ def export_diagnostics_command(args) -> int:
         "validation average_log_wealth: "
         f"{float(summary['validation']['average_log_wealth']):.6f}"
     )
+    print(f"validation g_t mean: {float(summary['validation'].get('g_t_mean', 0.0)):.6f}")
+    print(
+        "validation policy utility mean: "
+        f"{float(summary['validation'].get('policy_utility_mean', 0.0)):.6f}"
+    )
     return 0
 
 
 def tune_latest_command(args) -> int:
+    _emit_cli_compat_warnings(args)
     artifact_root = Path(args.artifact_root).expanduser().resolve()
     csv_path = (
         Path(args.csv).expanduser().resolve()
@@ -600,6 +613,22 @@ def _config_overrides_from_args(args) -> dict[str, object]:
         overrides["policy_sweep_state_reset_modes"] = sweep_state_reset_modes
 
     return overrides
+
+
+def _emit_cli_compat_warnings(args) -> None:
+    selection_score_source = getattr(args, "selection_score_source", None)
+    if selection_score_source not in (None, "profit_utility"):
+        print(
+            "warning: --selection-score-source is deprecated and ignored; "
+            "the active policy path always uses profit_utility."
+        )
+
+    selection_threshold_mode = getattr(args, "selection_threshold_mode", None)
+    if selection_threshold_mode not in (None, "auto"):
+        print(
+            "warning: --selection-threshold-mode/--acceptance-threshold-mode is deprecated "
+            "and ignored; diagnostics replay now uses the q_t policy path only."
+        )
 
 
 def _parse_horizons(raw_value: str | None) -> tuple[int, ...] | None:
