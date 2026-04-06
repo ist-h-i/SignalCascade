@@ -129,6 +129,9 @@ export type DashboardData = {
   run: {
     anchorTime: string
     anchorClose: number
+    anchorCloseRaw?: number
+    effectivePriceScale: number
+    priceScale?: number
     selectedHorizon: number
     executedHorizon: number | null
     selectedHours: number

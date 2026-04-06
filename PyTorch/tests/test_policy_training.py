@@ -229,6 +229,10 @@ class PolicyAndTrainingTests(unittest.TestCase):
 
         self.assertEqual(tuple(outputs["mu"].shape), (1, 2))
         self.assertEqual(tuple(outputs["sigma"].shape), (1, 2))
+        self.assertEqual(tuple(outputs["forecast_mu"].shape), (1, 2))
+        self.assertEqual(tuple(outputs["forecast_sigma"].shape), (1, 2))
+        self.assertEqual(tuple(outputs["policy_mu"].shape), (1, 2))
+        self.assertEqual(tuple(outputs["policy_sigma"].shape), (1, 2))
         self.assertEqual(tuple(outputs["shape_probs"].shape), (1, 4))
         self.assertAlmostEqual(float(outputs["shape_probs"].sum().item()), 1.0, places=5)
         self.assertTrue(torch.equal(outputs["shape_probs"], outputs["shape_posterior"]))
@@ -412,13 +416,10 @@ class PolicyAndTrainingTests(unittest.TestCase):
                 "signal_cascade_pytorch.application.tuning_service.build_training_examples_from_bars",
                 return_value=[object()],
             ), patch(
-                "signal_cascade_pytorch.application.tuning_service._build_latest_example",
-                return_value=object(),
-            ), patch(
                 "signal_cascade_pytorch.application.tuning_service.train_model",
                 return_value=(object(), summary),
             ), patch(
-                "signal_cascade_pytorch.application.tuning_service.predict_from_example",
+                "signal_cascade_pytorch.application.tuning_service.predict_latest",
                 return_value=prediction,
             ), patch(
                 "signal_cascade_pytorch.application.tuning_service.generate_research_report",
@@ -506,13 +507,10 @@ class PolicyAndTrainingTests(unittest.TestCase):
                 "signal_cascade_pytorch.application.tuning_service.build_training_examples_from_bars",
                 return_value=[object()],
             ), patch(
-                "signal_cascade_pytorch.application.tuning_service._build_latest_example",
-                return_value=object(),
-            ), patch(
                 "signal_cascade_pytorch.application.tuning_service.train_model",
                 return_value=(object(), summary),
             ), patch(
-                "signal_cascade_pytorch.application.tuning_service.predict_from_example",
+                "signal_cascade_pytorch.application.tuning_service.predict_latest",
                 return_value=prediction,
             ), patch(
                 "signal_cascade_pytorch.application.tuning_service.generate_research_report",

@@ -10,6 +10,52 @@ JST = timezone(timedelta(hours=9))
 UTC = timezone.utc
 METRICS_SCHEMA_VERSION = 4
 ANALYSIS_SCHEMA_VERSION = 6
+REQUIRED_LIVE_DIAGNOSTICS_FILES = (
+    "validation_summary.json",
+    "policy_summary.csv",
+    "horizon_diag.csv",
+)
+
+
+def _display_or_missing(value: object, digits: int = 6) -> str:
+    if value is None:
+        return "missing"
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return "missing"
+    return f"{numeric:.{digits}f}"
+
+
+def _display_int_or_missing(value: object) -> str:
+    if value is None:
+        return "missing"
+    try:
+        return str(int(value))
+    except (TypeError, ValueError):
+        return "missing"
+
+
+def load_required_diagnostics_summary(output_dir: Path) -> dict[str, object]:
+    output_dir = output_dir.expanduser().resolve()
+    missing_files = [
+        name for name in REQUIRED_LIVE_DIAGNOSTICS_FILES if not (output_dir / name).exists()
+    ]
+    artifact_label = "current artifact" if output_dir.name == "current" else "artifact"
+    if missing_files:
+        missing = ", ".join(missing_files)
+        raise FileNotFoundError(
+            f"diagnostics unpublished for {artifact_label}: missing {missing} under {output_dir}"
+        )
+
+    diagnostics_summary = load_json(output_dir / "validation_summary.json")
+    generated_at_utc = diagnostics_summary.get("generated_at_utc")
+    if not isinstance(generated_at_utc, str) or not generated_at_utc.strip():
+        raise ValueError(
+            "diagnostics unpublished for "
+            f"{artifact_label}: validation_summary.json is missing generated_at_utc under {output_dir}"
+        )
+    return diagnostics_summary
 
 
 def generate_research_report(
@@ -20,11 +66,7 @@ def generate_research_report(
     metrics = load_json(output_dir / "metrics.json")
     prediction = load_json(output_dir / "prediction.json")
     config = load_json(output_dir / "config.json")
-    diagnostics_summary = (
-        load_json(output_dir / "validation_summary.json")
-        if (output_dir / "validation_summary.json").exists()
-        else {}
-    )
+    diagnostics_summary = load_required_diagnostics_summary(output_dir)
     source_payload = (
         load_json(output_dir / "source.json") if (output_dir / "source.json").exists() else {}
     )
@@ -59,12 +101,23 @@ def _build_analysis(
     validation = dict(metrics.get("validation_metrics", {}))
     generated_at_utc = datetime.now(UTC)
     current_close = float(prediction.get("current_close", 0.0))
+    current_close_raw = float(prediction.get("current_close_raw", current_close))
+    current_close_display = float(prediction.get("current_close_display", current_close))
+    price_scale = float(
+        prediction.get("effective_price_scale", prediction.get("price_scale", 1.0)) or 1.0
+    )
     policy_horizon = int(prediction.get("policy_horizon", prediction.get("proposed_horizon", 0)))
     expected_log_returns = dict(prediction.get("mu_t", prediction.get("expected_log_returns", {})))
     predicted_closes = dict(
         prediction.get(
             "median_predicted_close_by_horizon",
             prediction.get("median_predicted_closes", prediction.get("predicted_closes", {})),
+        )
+    )
+    predicted_closes_display = dict(
+        prediction.get(
+            "median_predicted_close_display_by_horizon",
+            prediction.get("median_predicted_closes_display", predicted_closes),
         )
     )
     uncertainties = dict(prediction.get("sigma_t", prediction.get("uncertainties", {})))
@@ -90,6 +143,9 @@ def _build_analysis(
                 "expected_log_return": expected_log_return,
                 "expected_return_pct": math.exp(expected_log_return) - 1.0,
                 "predicted_close": predicted_close,
+                "predicted_close_display": float(
+                    predicted_closes_display.get(horizon_key, predicted_close)
+                ),
                 "sigma_t": uncertainty,
                 "sigma_t_sq": float(
                     uncertainties_sq.get(horizon_key, uncertainty * uncertainty)
@@ -135,6 +191,9 @@ def _build_analysis(
             "anchor_time_utc": str(prediction["anchor_time"]),
             "anchor_time_jst": anchor_time.astimezone(JST).isoformat(),
             "anchor_close": current_close,
+            "anchor_close_raw": current_close_raw,
+            "anchor_close_display": current_close_display,
+            "price_scale": price_scale,
             "policy_horizon": policy_horizon,
             "executed_horizon": prediction.get("executed_horizon"),
             "q_t_prev": float(prediction.get("q_t_prev", prediction.get("previous_position", 0.0))),
@@ -240,7 +299,7 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
     row_lines = "\n".join(
         f"- h={int(row['horizon_4h'])}: mu_t={float(row['mu_t']):.4f}, "
         f"expected_return_pct={float(row['expected_return_pct']):.4f}, "
-        f"predicted_close={float(row['predicted_close']):.4f}, "
+        f"predicted_close_display={float(row['predicted_close_display']):.4f}, "
         f"sigma_t={float(row['sigma_t']):.4f}"
         for row in rows
     )
@@ -266,37 +325,37 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f"- shape_classes / state_dim: `{training['shape_classes']}` / `{training['state_dim']}`",
             "",
             "## Validation",
-            f"- average_log_wealth: `{float(validation.get('average_log_wealth', 0.0)):.6f}`",
-            f"- realized_pnl_per_anchor: `{float(validation.get('realized_pnl_per_anchor', 0.0)):.6f}`",
-            f"- cvar_tail_loss: `{float(validation.get('cvar_tail_loss', 0.0)):.6f}`",
-            f"- max_drawdown: `{float(validation.get('max_drawdown', 0.0)):.6f}`",
-            f"- no_trade_band_hit_rate: `{float(validation.get('no_trade_band_hit_rate', 0.0)):.6f}`",
+            f"- average_log_wealth: `{_display_or_missing(validation.get('average_log_wealth'))}`",
+            f"- realized_pnl_per_anchor: `{_display_or_missing(validation.get('realized_pnl_per_anchor'))}`",
+            f"- cvar_tail_loss: `{_display_or_missing(validation.get('cvar_tail_loss'))}`",
+            f"- max_drawdown: `{_display_or_missing(validation.get('max_drawdown'))}`",
+            f"- no_trade_band_hit_rate: `{_display_or_missing(validation.get('no_trade_band_hit_rate'))}`",
             f"- exact_smooth_horizon_agreement / no_trade_agreement: "
-            f"`{float(validation.get('exact_smooth_horizon_agreement', 0.0)):.6f}` / "
-            f"`{float(validation.get('exact_smooth_no_trade_agreement', 0.0)):.6f}`",
+            f"`{_display_or_missing(validation.get('exact_smooth_horizon_agreement'))}` / "
+            f"`{_display_or_missing(validation.get('exact_smooth_no_trade_agreement'))}`",
             f"- exact_smooth_position_mae / utility_regret: "
-            f"`{float(validation.get('exact_smooth_position_mae', 0.0)):.6f}` / "
-            f"`{float(validation.get('exact_smooth_utility_regret', 0.0)):.6f}`",
-            f"- shape_gate_usage: `{float(validation.get('shape_gate_usage', 0.0)):.6f}`",
-            f"- expert_entropy: `{float(validation.get('expert_entropy', 0.0)):.6f}`",
+            f"`{_display_or_missing(validation.get('exact_smooth_position_mae'))}` / "
+            f"`{_display_or_missing(validation.get('exact_smooth_utility_regret'))}`",
+            f"- shape_gate_usage: `{_display_or_missing(validation.get('shape_gate_usage'))}`",
+            f"- expert_entropy: `{_display_or_missing(validation.get('expert_entropy'))}`",
             f"- mu_calibration / sigma_calibration: "
-            f"`{float(validation.get('mu_calibration', 0.0)):.6f}` / "
-            f"`{float(validation.get('sigma_calibration', 0.0)):.6f}`",
+            f"`{_display_or_missing(validation.get('mu_calibration'))}` / "
+            f"`{_display_or_missing(validation.get('sigma_calibration'))}`",
             f"- log_wealth_clamp_hit_rate / state_reset_mode: "
-            f"`{float(validation.get('log_wealth_clamp_hit_rate', 0.0)):.6f}` / "
+            f"`{_display_or_missing(validation.get('log_wealth_clamp_hit_rate'))}` / "
             f"`{validation.get('state_reset_mode', '-')}`",
             f"- project_value_score / utility_score: "
-            f"`{float(validation.get('project_value_score', 0.0)):.6f}` / "
-            f"`{float(validation.get('utility_score', 0.0)):.6f}`",
+            f"`{_display_or_missing(validation.get('project_value_score'))}` / "
+            f"`{_display_or_missing(validation.get('utility_score'))}`",
             "",
             "## Evaluation",
-            f"- carry_on average_log_wealth: `{float(stateful_evaluation.get('carry_on', {}).get('average_log_wealth', 0.0)):.6f}`",
-            f"- reset_each_example average_log_wealth: `{float(stateful_evaluation.get('reset_each_example', {}).get('average_log_wealth', 0.0)):.6f}`",
+            f"- carry_on average_log_wealth: `{_display_or_missing(stateful_evaluation.get('carry_on', {}).get('average_log_wealth'))}`",
+            f"- reset_each_example average_log_wealth: `{_display_or_missing(stateful_evaluation.get('reset_each_example', {}).get('average_log_wealth'))}`",
             f"- reset_each_session_or_window average_log_wealth: "
-            f"`{float(stateful_evaluation.get('reset_each_session_or_window', {}).get('average_log_wealth', 0.0)):.6f}`",
+            f"`{_display_or_missing(stateful_evaluation.get('reset_each_session_or_window', {}).get('average_log_wealth'))}`",
             f"- policy sweep rows / pareto_optimal: "
-            f"`{int(policy_calibration_summary.get('row_count', len(policy_calibration_sweep)))}` / "
-            f"`{int(policy_calibration_summary.get('pareto_optimal_count', 0))}`",
+            f"`{_display_int_or_missing(policy_calibration_summary.get('row_count', len(policy_calibration_sweep) if policy_calibration_sweep else None))}` / "
+            f"`{_display_int_or_missing(policy_calibration_summary.get('pareto_optimal_count'))}`",
             f"- policy sweep selection basis / version: "
             f"`{policy_calibration_summary.get('selection_basis', '-')}` / "
             f"`{policy_calibration_summary.get('selection_rule_version', '-')}`",
@@ -319,7 +378,7 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             "",
             "## Forecast",
             f"- anchor_time_utc / jst: `{forecast['anchor_time_utc']}` / `{forecast['anchor_time_jst']}`",
-            f"- anchor_close: `{float(forecast['anchor_close']):.4f}`",
+            f"- anchor_close_display / raw / price_scale: `{float(forecast['anchor_close_display']):.4f}` / `{float(forecast['anchor_close_raw']):.4f}` / `{float(forecast['price_scale']):.4f}`",
             f"- policy_horizon / executed_horizon: `{forecast['policy_horizon']}` / `{forecast['executed_horizon']}`",
             f"- previous_position / position / trade_delta: "
             f"`{float(forecast['previous_position']):.4f}` / `{float(forecast['position']):.4f}` / `{float(forecast['trade_delta']):.4f}`",

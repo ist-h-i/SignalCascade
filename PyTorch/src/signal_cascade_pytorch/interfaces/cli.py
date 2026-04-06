@@ -33,6 +33,7 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser = subparsers.add_parser("train", help="Train the model and emit a latest prediction.")
     train_parser.add_argument("--csv", default=None, help="Path to a 30m OHLCV CSV file.")
     train_parser.add_argument("--csv-lookback-days", type=int, default=None)
+    train_parser.add_argument("--price-scale", type=float, default=None)
     train_parser.add_argument("--output-dir", default="artifacts/demo")
     train_parser.add_argument("--epochs", type=int, default=5)
     train_parser.add_argument("--warmup-epochs", type=int, default=None)
@@ -86,6 +87,7 @@ def build_parser() -> argparse.ArgumentParser:
     predict_parser.add_argument("--output-dir", default="artifacts/demo")
     predict_parser.add_argument("--csv", default=None, help="Override the data source with a CSV file.")
     predict_parser.add_argument("--csv-lookback-days", type=int, default=None)
+    predict_parser.add_argument("--price-scale", type=float, default=None)
     predict_parser.add_argument("--previous-position", type=float, default=0.0)
     predict_parser.add_argument(
         "--allow-no-candidate",
@@ -113,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     export_parser.add_argument("--csv", default=None, help="Override the data source with a CSV file.")
     export_parser.add_argument("--csv-lookback-days", type=int, default=None)
+    export_parser.add_argument("--price-scale", type=float, default=None)
     export_parser.add_argument("--evaluation-state-reset-mode", choices=state_reset_modes, default=None)
     export_parser.add_argument("--diagnostic-state-reset-modes", default=None)
     export_parser.add_argument("--policy-sweep-cost-multipliers", default=None)
@@ -149,6 +152,7 @@ def build_parser() -> argparse.ArgumentParser:
     tune_parser.add_argument("--artifact-root", default="artifacts/gold_xauusd_m30")
     tune_parser.add_argument("--csv", default=None, help="Path to the latest 30m OHLCV CSV file.")
     tune_parser.add_argument("--csv-lookback-days", type=int, default=None)
+    tune_parser.add_argument("--price-scale", type=float, default=None)
     tune_parser.add_argument("--epochs", type=int, default=None)
     tune_parser.add_argument("--batch-size", type=int, default=None)
     tune_parser.add_argument("--learning-rate", type=float, default=None)

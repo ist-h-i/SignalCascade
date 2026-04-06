@@ -1,15 +1,34 @@
 # SignalCascade Review Handoff
 
-最終更新: 2026-04-06 01:45:51 JST
+最終更新: 2026-04-06 17:11:31 JST
 
 ## 0. Reviewer Outcome
 
-- reviewer judgement は `shared-tracked completion`。`shared artifact-byte completion` ではないが、この cycle は shared / upstream 観点でも閉じてよい
-- `1497a93` は artifact provenance commit、`0589e67` は exporter / promotion code commit として分離して扱えば十分で、追加 metadata は不要
-- `current` の local-only alias semantics は `signal-cascade promote-current` と README で十分に codify されている
-- `best_params.json` は non-blocking cleanup、overlay rerun も不要扱いのままでよい
+- reviewer judgement は `closed with P2 cleanup only`。2026-04-06 16:28 JST snapshot では live `current` の diagnostics publication gap は閉じている
+- live review SoT は `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/current` 単体でよく、overlay は derived replay evidence only として扱う
+- canonical live key は `effective_price_scale` / `effectivePriceScale`。`price_scale` / `priceScale` は 1 migration cycle の read-only alias に落とす
+- `Frontend/public/dashboard-data.json` は `schemaVersion=6`、`run.effectivePriceScale=1`、`run.tuningSessionId="20260406T064716Z"` を持ち、live `current` と整合している
+- open item は `current/manifest.json.generated_at_utc` の normalization だけで、review cycle を止める blocker ではない。今回の repo update では next publish 向けの code/test 回帰防止を追加した
 
-このファイルは reviewer に渡した evidence snapshot と、その reviewer judgement を残す review trail として保持する。以下の本文は、judgement 対象になった handoff 内容をそのまま残している。
+このファイルは reviewer に渡した evidence snapshot と、その reviewer judgement を残す review trail として保持する。以下の本文は earlier cycle の handoff を残したもので、上の 2026-04-06 closure state を current live review の authoritative summary とする。
+
+## 0.5 Current Closure Addendum
+
+### Confirmed facts
+
+- `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/current/source.json` は `artifact_id="9f166350117c58735ea53306a8c819f203006efb350a9269cf2f4a861522a4fd"`、`effective_price_scale=1.0`、`price_scale_origin="default"`、`provider_scale_confirmed=false`、`git.git_commit_sha="47ee916cdfc551fc2edc6a89a5133fe22ff24c90"`、`git.git_dirty=true` を持つ
+- `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/current/manifest.json` は `session_id="20260406T064716Z"`、`generated_at="2026-04-06T07:15:09.605152+00:00"`、`generated_at_utc=null`、`effective_price_scale=1.0` を持つ
+- `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/current/validation_summary.json` は `schema_version=6`、`generated_at_utc="2026-04-06T07:11:23.246872+00:00"`、`validation.average_log_wealth=0.0010135983592947807`、`stateful_evaluation.carry_on.average_log_wealth=0.0010135983592947807`、`policy_calibration_summary.row_count=72`、`policy_calibration_summary.pareto_optimal_count=63` を持つ
+- live `current` 直下には `validation_summary.json`、`policy_summary.csv`、`horizon_diag.csv`、`validation_rows.csv` が揃っている
+- `/Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend/public/dashboard-data.json` は `schemaVersion=6`、`provenance.artifactId="9f166350117c58735ea53306a8c819f203006efb350a9269cf2f4a861522a4fd"`、`provenance.diagnosticsGeneratedAt="2026-04-06T07:11:23.246872+00:00"`、`provenance.gitCommitSha="47ee916cdfc551fc2edc6a89a5133fe22ff24c90"`、`provenance.gitDirty=true`、`run.effectivePriceScale=1`、`run.priceScale=1`、`run.tuningSessionId="20260406T064716Z"` を持つ
+
+### Current decision
+
+- live review SoT = `current`
+- overlay = derived replay evidence only
+- canonical live key = `effective_price_scale`
+- `price_scale` = one-cycle read-only alias
+- remaining cleanup = `manifest.generated_at_utc` timestamp normalization（next publish 向けの code/test 回帰防止は追加済み）
 
 ## 1. 依頼時点の質問
 

@@ -1,89 +1,67 @@
-# React + TypeScript + Vite
+# SignalCascade Frontend
 
-This template provides a minimal setup to get React working in Vite with HMR and some ESLint rules.
+この README は、`Frontend/` の責務を `dashboard 開発` と `artifact sync` に限定して説明します。
+Vite / React の汎用テンプレート説明は残しません。
 
-Currently, two official plugins are available:
+## 役割
 
-- [@vitejs/plugin-react](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react) uses [Oxc](https://oxc.rs)
-- [@vitejs/plugin-react-swc](https://github.com/vitejs/vite-plugin-react/blob/main/packages/plugin-react-swc) uses [SWC](https://swc.rs/)
+- `PyTorch/artifacts/gold_xauusd_m30/current` を読み、`public/dashboard-data.json` を再生成する
+- 生成済み payload を使って dashboard を表示する
+- build 前に data contract と alias migration の最低限テストを通す
 
-## React Compiler
-
-The React Compiler is not enabled on this template because of its impact on dev & build performances. To add it, see [this documentation](https://react.dev/learn/react-compiler/installation).
-
-## Expanding the ESLint configuration
-
-If you are developing a production application, we recommend updating the configuration to enable type-aware lint rules:
-
-```js
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-
-      // Remove tseslint.configs.recommended and replace with this
-      tseslint.configs.recommendedTypeChecked,
-      // Alternatively, use this for stricter rules
-      tseslint.configs.strictTypeChecked,
-      // Optionally, add this for stylistic rules
-      tseslint.configs.stylisticTypeChecked,
-
-      // Other configs...
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
-
-## SignalCascade dashboard
+## 主なコマンド
 
 ```bash
 cd /Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend
+npm run dev
 npm run dev:dashboard
+npm run sync:data:fast
+npm run sync:data
+npm run check:data:contract
+npm run test:data-contract
+npm run build
 ```
 
-`dev:dashboard` は既存の `PyTorch/artifacts/gold_xauusd_m30/current` を使って `public/dashboard-data.json` を再生成し、そのまま `http://127.0.0.1:5173/` を起動します。
+## コマンドの使い分け
 
-フルの最新学習まで含めて同期したい場合は、別途 `npm run sync:data` を実行してください。
-`PyTorch` 側で `signal-cascade tune-latest` が accepted candidate を `current` に反映した直後に UI だけ更新したい場合は、`npm run sync:data:fast` で十分です。
+- `npm run dev`
+  - 通常の Vite 開発起動
+- `npm run dev:dashboard`
+  - `current` から `public/dashboard-data.json` を再生成してから dashboard を起動
+- `npm run sync:data:fast`
+  - `PyTorch` 側で accepted candidate がすでに `current` に反映済みの前提で、frontend payload だけを更新
+- `npm run sync:data`
+  - 必要なら `PyTorch` 側の training / tuning を含めて同期
+- `npm run check:data:contract`
+  - `public/dashboard-data.json` と `current` の lineage / schema 整合を検証
+- `npm run test:data-contract`
+  - `effectivePriceScale` canonical / `priceScale` fallback の consumer 振る舞いを検証
+- `npm run build`
+  - contract check、consumer test、TypeScript build、Vite build をまとめて実行
 
-同期スクリプトは `prediction.json` / `forecast_summary.json` の canonical field
-`mu_t`, `sigma_t`, `sigma_t_sq`, `g_t`, `selected_policy_utility`, `q_t_prev`, `q_t_trade_delta`
-を優先して読み、旧 alias は fallback としてのみ扱います。
+## Data contract
 
-You can also install [eslint-plugin-react-x](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-x) and [eslint-plugin-react-dom](https://github.com/Rel1cx/eslint-react/tree/main/packages/plugins/eslint-plugin-react-dom) for React-specific lint rules:
+- generated artifact:
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend/public/dashboard-data.json`
+- canonical key:
+  - `run.effectivePriceScale`
+- legacy alias:
+  - `run.priceScale`
+- sync script は `prediction.json` / `forecast_summary.json` の canonical field
+  - `mu_t`
+  - `sigma_t`
+  - `sigma_t_sq`
+  - `g_t`
+  - `selected_policy_utility`
+  - `q_t_prev`
+  - `q_t_trade_delta`
+  を優先し、旧 alias は fallback としてのみ扱います。
 
-```js
-// eslint.config.js
-import reactX from 'eslint-plugin-react-x'
-import reactDom from 'eslint-plugin-react-dom'
+## 関連文書
 
-export default defineConfig([
-  globalIgnores(['dist']),
-  {
-    files: ['**/*.{ts,tsx}'],
-    extends: [
-      // Other configs...
-      // Enable lint rules for React
-      reactX.configs['recommended-typescript'],
-      // Enable lint rules for React DOM
-      reactDom.configs.recommended,
-    ],
-    languageOptions: {
-      parserOptions: {
-        project: ['./tsconfig.node.json', './tsconfig.app.json'],
-        tsconfigRootDir: import.meta.dirname,
-      },
-      // other options...
-    },
-  },
-])
-```
+- `PyTorch` 運用手順:
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/README.md`
+- 文書全体の整理方針:
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/docs/README.md`
+- UI 実装ルール:
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/docs/UI_UX_DESIGN_RULES.md`

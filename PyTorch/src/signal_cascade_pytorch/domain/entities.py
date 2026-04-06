@@ -149,6 +149,7 @@ class TrainingExample:
     regime_features: RegimeVector
     realized_volatility: float
     trend_strength: float
+    price_scale: float = 1.0
 
     def __post_init__(self) -> None:
         for scope_name, sequences in (
@@ -245,6 +246,10 @@ class PredictionResult:
     horizon_positions: dict[str, float]
     shape_probabilities: dict[str, float]
     regime_id: str
+    policy_log_returns: dict[str, float] | None = None
+    policy_uncertainties: dict[str, float] | None = None
+    inference_context_mode: str = "stateless"
+    price_scale: float = 1.0
 
     @property
     def selected_direction(self) -> int:

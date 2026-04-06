@@ -15,9 +15,11 @@ def total_loss(
     previous_position: torch.Tensor,
     warmup_phase: bool = False,
 ) -> tuple[torch.Tensor, dict[str, float], dict[str, torch.Tensor]]:
+    forecast_mean = outputs.get("forecast_mu", outputs["mu"])
+    forecast_sigma = outputs.get("forecast_sigma", outputs["sigma"])
     return_loss = heteroscedastic_huber_loss(
-        outputs["mu"],
-        outputs["sigma"],
+        forecast_mean,
+        forecast_sigma,
         batch["returns"],
     )
     shape_loss = main_shape_loss(outputs["main_shape_predictions"], batch["shape_targets"])
@@ -44,6 +46,7 @@ def total_loss(
         "mean_position": float(policy_metrics["mean_position"].item()),
         "log_wealth_clamp_hit_rate": float(policy_metrics["log_wealth_clamp_hit_rate"].item()),
         "shape_entropy": float(outputs["shape_entropy"].mean().item()),
+        "forecast_mae": float(torch.mean(torch.abs(batch["returns"] - forecast_mean)).item()),
     }
     return total, metrics, policy_metrics
 
@@ -54,9 +57,11 @@ def profit_objective_loss(
     config: TrainingConfig,
     previous_position: torch.Tensor,
 ) -> tuple[torch.Tensor, dict[str, torch.Tensor]]:
+    policy_mean = outputs.get("policy_mu", outputs["mu"])
+    policy_sigma = outputs.get("policy_sigma", outputs["sigma"])
     policy = smooth_policy_distribution(
-        mean=outputs["mu"],
-        sigma=outputs["sigma"],
+        mean=policy_mean,
+        sigma=policy_sigma,
         costs=batch["horizon_costs"],
         tradeability_gate=outputs["tradeability_gate"],
         previous_position=previous_position,

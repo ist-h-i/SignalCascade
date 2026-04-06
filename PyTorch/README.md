@@ -1,19 +1,22 @@
 # SignalCascade PyTorch Reference
 
-`PyTorch/` 配下には、現在 5 種類の文書があります。
+この README は、`PyTorch/` 配下の運用ガイド兼文書ハブです。
 
-- canonical target spec:
-  - `shape_aware_profit_maximization_model.md`
-- 移行ロードマップ:
-  - `profit_maximization_migration_roadmap.md`
-- 実行スケジュール:
-  - `profit_maximization_execution_schedule.md`
-- 現行実装のロジック説明:
-  - `logic_multiframe_candlestick_model.md`
-- 旧来の要件定義:
-  - `requirements_multiframe_candlestick_model.md`
+## Active docs
 
-現行コードはまだ `shape_aware_profit_maximization_model.md` へ完全移行していません。`profit_maximization_migration_roadmap.md` は完全移行までの実施順を、`profit_maximization_execution_schedule.md` は issue / PR 粒度の実行順と日付計画を、`logic_multiframe_candlestick_model.md` は移行前の reference implementation が現在どう動くかを説明する文書です。
+- `shape_aware_profit_maximization_model.md`
+  - canonical target spec
+- `logic_multiframe_candlestick_model.md`
+  - 現在の実装ロジック説明
+- `README.md`
+  - 契約、CLI、tuning、promotion、frontend sync の運用手順
+
+## Archived task docs
+
+- 完了済みの migration plan、execution schedule、historical requirements、review handoff は
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/docs/implementation-tasks/archive/`
+  に移動しています。
+- active docs の Source of Truth は上の 3 本だけです。
 
 この実装は、以下を最小構成でカバーします。
 
@@ -227,6 +230,15 @@ timestamp,open,high,low,close,volume
 ```bash
 signal-cascade train --csv /absolute/path/to/ohlcv_30m.csv --output-dir artifacts/from_csv
 ```
+
+## 関連文書
+
+- 文書全体の整理方針:
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/docs/README.md`
+- dashboard 開発手順:
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend/README.md`
+- UI 実装ルール:
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/docs/UI_UX_DESIGN_RULES.md`
 
 ## 構成
 

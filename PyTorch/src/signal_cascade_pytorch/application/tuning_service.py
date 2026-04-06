@@ -12,17 +12,21 @@ from .artifact_provenance import (
 )
 from .config import TrainingConfig
 from .dataset_service import (
-    build_latest_inference_example_from_bars,
     build_training_examples_from_bars,
     limit_base_bars_to_lookback_days,
-    trim_base_bars_for_latest_inference,
 )
+from .diagnostics_service import export_review_diagnostics
 from .inference_service import (
     build_forecast_summary_payload,
-    predict_from_example,
+    predict_latest,
     serialize_prediction_result,
 )
-from .report_service import METRICS_SCHEMA_VERSION, generate_research_report
+from .price_scale import normalize_price_scale_payload, price_scale_manifest_fields, resolve_effective_price_scale
+from .report_service import (
+    METRICS_SCHEMA_VERSION,
+    generate_research_report,
+    load_required_diagnostics_summary,
+)
 from .training_service import train_model
 from ..infrastructure.data.csv_source import CsvMarketDataSource
 from ..infrastructure.persistence import ensure_directory, load_json, save_json
@@ -74,15 +78,24 @@ def tune_latest_dataset(
         **static_overrides,
         **tunable_overrides,
     )
-    examples = build_training_examples_from_bars(base_bars, baseline_config)
+    source_payload = {"kind": "csv", "path": str(csv_path)}
+    if lookback_days is not None:
+        source_payload["lookback_days"] = int(lookback_days)
+    source_payload = normalize_price_scale_payload(
+        source_payload,
+        requested_price_scale=static_overrides.get("requested_price_scale"),
+    )
+    price_scale = resolve_effective_price_scale(source_payload)
+    examples = build_training_examples_from_bars(
+        base_bars,
+        baseline_config,
+        price_scale=price_scale,
+    )
     inherited_parameters = _load_parameter_seed(artifact_root)
     inherited_parameters.update(tunable_overrides)
     candidate_parameters = _build_candidate_parameters(inherited_parameters)
     session_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     session_dir = ensure_directory(archive_root / f"session_{session_id}")
-    source_payload = {"kind": "csv", "path": str(csv_path)}
-    if lookback_days is not None:
-        source_payload["lookback_days"] = int(lookback_days)
     leaderboard: list[dict[str, object]] = []
 
     for index, parameters in enumerate(candidate_parameters, start=1):
@@ -90,10 +103,11 @@ def tune_latest_dataset(
         candidate_dir = ensure_directory(session_dir / candidate_name)
         config = TrainingConfig(seed=seed, output_dir=str(candidate_dir), **static_overrides, **parameters)
         model, summary = train_model(examples, config, candidate_dir)
-        latest_example = _build_latest_example(base_bars, config)
-        prediction = predict_from_example(model, latest_example, config)
+        prediction = predict_latest(model, examples, config)
         _write_run_artifacts(
             output_dir=candidate_dir,
+            model=model,
+            examples=examples,
             config=config,
             source_payload=source_payload,
             base_bars=base_bars,
@@ -154,6 +168,7 @@ def tune_latest_dataset(
 
     if accepted_result is not None:
         accepted_candidate_dir = session_dir / str(accepted_result["candidate"])
+        load_required_diagnostics_summary(accepted_candidate_dir)
         archived_current_dir = _archive_existing_current(current_dir, session_dir)
         archived_legacy_root_dirs = _archive_legacy_root_runs(artifact_root, session_dir)
 
@@ -163,9 +178,11 @@ def tune_latest_dataset(
 
     current_dir_payload = str(current_dir) if current_dir.exists() or accepted_result is not None else None
 
+    generated_at_utc = datetime.now(timezone.utc).isoformat()
     manifest = {
         "session_id": session_id,
-        "generated_at": datetime.now(timezone.utc).isoformat(),
+        "generated_at": generated_at_utc,
+        "generated_at_utc": generated_at_utc,
         "artifact_root": str(artifact_root),
         "current_dir": current_dir_payload,
         "archive_session_dir": str(session_dir),
@@ -173,6 +190,7 @@ def tune_latest_dataset(
         "manifest_path": str(session_dir / "manifest.json"),
         "source_path": str(csv_path),
         "lookback_days": lookback_days,
+        **price_scale_manifest_fields(source_payload),
         "sample_count": len(examples),
         "source_rows_original": source_rows_original,
         "source_rows_used": source_rows_used,
@@ -223,7 +241,7 @@ def tune_latest_dataset(
                 materialize_artifact_source(source_payload, current_dir, base_bars=base_bars),
                 current_dir,
                 artifact_kind="training_run",
-                generated_at_utc=manifest["generated_at"],
+                generated_at_utc=manifest["generated_at_utc"],
                 sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=True)),
             ),
         )
@@ -237,20 +255,15 @@ def tune_latest_dataset(
                 materialize_artifact_source(source_payload, current_dir, base_bars=base_bars),
                 current_dir,
                 artifact_kind="training_run",
-                generated_at_utc=manifest["generated_at"],
+                generated_at_utc=manifest["generated_at_utc"],
                 sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=True)),
             ),
         )
     return manifest
-
-
-def _build_latest_example(base_bars, config: TrainingConfig):
-    trimmed_bars = trim_base_bars_for_latest_inference(base_bars, config)
-    return build_latest_inference_example_from_bars(trimmed_bars, config)
-
-
 def _write_run_artifacts(
     output_dir: Path,
+    model,
+    examples,
     config: TrainingConfig,
     source_payload: dict[str, object],
     base_bars,
@@ -293,6 +306,16 @@ def _write_run_artifacts(
             },
         ),
     )
+    export_review_diagnostics(
+        output_dir=output_dir,
+        model=model,
+        examples=examples,
+        config=config,
+        source_payload=artifact_source_payload,
+        source_rows_original=source_rows_original,
+        source_rows_used=source_rows_used,
+        base_bars=base_bars,
+    )
     save_json(
         output_dir / "source.json",
         build_artifact_source_payload(
@@ -308,10 +331,14 @@ def _training_sub_artifacts(*, include_report: bool) -> dict[str, str]:
     entries = {
         "config.json": "generated",
         "forecast_summary.json": "generated",
+        "horizon_diag.csv": "generated",
         "metrics.json": "generated",
+        "policy_summary.csv": "generated",
         "prediction.json": "generated",
         "source.json": "generated",
         "data_snapshot.csv": "generated",
+        "validation_rows.csv": "generated",
+        "validation_summary.json": "generated",
     }
     if include_report:
         entries["analysis.json"] = "regenerated"

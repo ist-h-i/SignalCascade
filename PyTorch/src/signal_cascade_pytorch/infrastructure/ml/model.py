@@ -135,8 +135,10 @@ class SignalCascadeModel(nn.Module):
             "m_t": state_dim,
         }
         state_vector_dim = fused_dim + shape_classes + hidden_dim + state_dim
-        self.expert_mean_head = nn.Linear(state_vector_dim, num_horizons * shape_classes)
-        self.expert_logvar_head = nn.Linear(state_vector_dim, num_horizons * shape_classes)
+        self.forecast_expert_mean_head = nn.Linear(state_vector_dim, num_horizons * shape_classes)
+        self.forecast_expert_logvar_head = nn.Linear(state_vector_dim, num_horizons * shape_classes)
+        self.policy_expert_mean_head = nn.Linear(state_vector_dim, num_horizons * shape_classes)
+        self.policy_expert_logvar_head = nn.Linear(state_vector_dim, num_horizons * shape_classes)
         self.tradeability_logits = nn.Parameter(torch.zeros(shape_classes))
         self.state_vector_dim = state_vector_dim
 
@@ -191,26 +193,48 @@ class SignalCascadeModel(nn.Module):
             dim=1,
         )
 
-        expert_mu_by_shape = self.expert_mean_head(state_vector).view(
+        forecast_mu_by_shape = self.forecast_expert_mean_head(state_vector).view(
             batch_size,
             self.num_horizons,
             self.shape_classes,
         )
-        expert_sigma_by_shape = functional.softplus(
-            self.expert_logvar_head(state_vector).view(
+        forecast_sigma_by_shape = functional.softplus(
+            self.forecast_expert_logvar_head(state_vector).view(
+                batch_size,
+                self.num_horizons,
+                self.shape_classes,
+            )
+        ) + 1e-4
+        policy_mu_by_shape = self.policy_expert_mean_head(state_vector).view(
+            batch_size,
+            self.num_horizons,
+            self.shape_classes,
+        )
+        policy_sigma_by_shape = functional.softplus(
+            self.policy_expert_logvar_head(state_vector).view(
                 batch_size,
                 self.num_horizons,
                 self.shape_classes,
             )
         ) + 1e-4
         mixture_weights = shape_posterior.unsqueeze(1)
-        mean = torch.sum(expert_mu_by_shape * mixture_weights, dim=-1)
-        second_moment = torch.sum(
-            mixture_weights * (expert_sigma_by_shape.pow(2) + expert_mu_by_shape.pow(2)),
+        forecast_mean = torch.sum(forecast_mu_by_shape * mixture_weights, dim=-1)
+        forecast_second_moment = torch.sum(
+            mixture_weights * (forecast_sigma_by_shape.pow(2) + forecast_mu_by_shape.pow(2)),
             dim=-1,
         )
-        variance = torch.clamp(second_moment - mean.pow(2), min=1e-6)
-        sigma = torch.sqrt(variance)
+        forecast_variance = torch.clamp(
+            forecast_second_moment - forecast_mean.pow(2),
+            min=1e-6,
+        )
+        forecast_sigma = torch.sqrt(forecast_variance)
+        policy_mean = torch.sum(policy_mu_by_shape * mixture_weights, dim=-1)
+        policy_second_moment = torch.sum(
+            mixture_weights * (policy_sigma_by_shape.pow(2) + policy_mu_by_shape.pow(2)),
+            dim=-1,
+        )
+        policy_variance = torch.clamp(policy_second_moment - policy_mean.pow(2), min=1e-6)
+        policy_sigma = torch.sqrt(policy_variance)
         tradeability_weights = torch.sigmoid(self.tradeability_logits)
         tradeability_gate = torch.sum(
             shape_posterior * tradeability_weights.unsqueeze(0),
@@ -227,8 +251,12 @@ class SignalCascadeModel(nn.Module):
         }
 
         return {
-            "mu": mean,
-            "sigma": sigma,
+            "mu": forecast_mean,
+            "sigma": forecast_sigma,
+            "forecast_mu": forecast_mean,
+            "forecast_sigma": forecast_sigma,
+            "policy_mu": policy_mean,
+            "policy_sigma": policy_sigma,
             "shape_feature": shape_feature,
             "shape_posterior_logits": shape_posterior_logits,
             "shape_posterior": shape_posterior,
@@ -240,11 +268,25 @@ class SignalCascadeModel(nn.Module):
             "state_vector_components": state_vector_components,
             "state_vector_component_dims": dict(self.state_vector_component_dims),
             "memory_state": memory_state,
-            "expert_mu_by_shape": expert_mu_by_shape,
-            "expert_sigma_by_shape": expert_sigma_by_shape,
+            "expert_mu_by_shape": forecast_mu_by_shape,
+            "expert_sigma_by_shape": forecast_sigma_by_shape,
+            "forecast_expert_mu_by_shape": forecast_mu_by_shape,
+            "forecast_expert_sigma_by_shape": forecast_sigma_by_shape,
+            "policy_expert_mu_by_shape": policy_mu_by_shape,
+            "policy_expert_sigma_by_shape": policy_sigma_by_shape,
             "shape_conditioned_experts": {
-                "mu_by_shape": expert_mu_by_shape,
-                "sigma_by_shape": expert_sigma_by_shape,
+                "mu_by_shape": forecast_mu_by_shape,
+                "sigma_by_shape": forecast_sigma_by_shape,
+                "mixture_weights": mixture_weights,
+            },
+            "forecast_shape_conditioned_experts": {
+                "mu_by_shape": forecast_mu_by_shape,
+                "sigma_by_shape": forecast_sigma_by_shape,
+                "mixture_weights": mixture_weights,
+            },
+            "policy_shape_conditioned_experts": {
+                "mu_by_shape": policy_mu_by_shape,
+                "sigma_by_shape": policy_sigma_by_shape,
                 "mixture_weights": mixture_weights,
             },
             "main_shape_predictions": main_shape_predictions,
@@ -253,7 +295,7 @@ class SignalCascadeModel(nn.Module):
             "state_features_projected": state_projection,
             "internal_state": memory_state,
             "next_state": memory_state,
-            "expert_mu": expert_mu_by_shape,
-            "expert_sigma": expert_sigma_by_shape,
+            "expert_mu": forecast_mu_by_shape,
+            "expert_sigma": forecast_sigma_by_shape,
             "shape_predictions": main_shape_predictions,
         }

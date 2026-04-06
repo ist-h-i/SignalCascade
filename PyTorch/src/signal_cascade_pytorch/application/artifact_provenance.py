@@ -8,6 +8,7 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Sequence
 
+from .price_scale import normalize_price_scale_payload
 from ..domain.entities import OHLCVBar
 
 
@@ -43,9 +44,11 @@ def materialize_artifact_source(
     base_bars: Sequence[OHLCVBar] | None = None,
 ) -> dict[str, object]:
     artifact_dir = artifact_dir.expanduser().resolve()
-    payload = {
-        key: value for key, value in source_payload.items() if key not in _PROVENANCE_FIELDS
-    }
+    payload = normalize_price_scale_payload(
+        {
+            key: value for key, value in source_payload.items() if key not in _PROVENANCE_FIELDS
+        }
+    )
     if (
         str(payload.get("kind")) != "csv"
         or base_bars is None
@@ -79,9 +82,11 @@ def build_artifact_source_payload(
     sub_artifacts: dict[str, dict[str, object]] | None = None,
 ) -> dict[str, object]:
     artifact_dir = artifact_dir.expanduser().resolve()
-    payload = {
-        key: value for key, value in source_payload.items() if key not in _PROVENANCE_FIELDS
-    }
+    payload = normalize_price_scale_payload(
+        {
+            key: value for key, value in source_payload.items() if key not in _PROVENANCE_FIELDS
+        }
+    )
     payload["artifact_schema_version"] = ARTIFACT_SOURCE_SCHEMA_VERSION
     payload["artifact_kind"] = artifact_kind
     payload["artifact_dir"] = str(artifact_dir)
@@ -229,6 +234,7 @@ def _build_artifact_id(payload: dict[str, object]) -> str:
         "parent_artifact_id": payload.get("parent_artifact_id"),
         "source_kind": payload.get("kind"),
         "source_path": payload.get("path"),
+        "price_scale": payload.get("effective_price_scale", payload.get("price_scale")),
     }
     encoded = json.dumps(seed_payload, sort_keys=True, separators=(",", ":")).encode("utf-8")
     return hashlib.sha256(encoded).hexdigest()

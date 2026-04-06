@@ -12,7 +12,7 @@ from ..domain.entities import (
 from ..domain.timeframes import HORIZONS
 
 
-CONFIG_SCHEMA_VERSION = 2
+CONFIG_SCHEMA_VERSION = 4
 LEGACY_CONFIG_SCHEMA_VERSION = 1
 
 
@@ -129,6 +129,11 @@ class TrainingConfig:
     policy_sweep_state_reset_modes: tuple[str, ...] = field(
         default_factory=_default_policy_sweep_state_reset_modes
     )
+    checkpoint_selection_metric: str = "hybrid_exact"
+    checkpoint_selection_forecast_weight: float = 1.0
+    checkpoint_selection_calibration_weight: float = 0.5
+    checkpoint_selection_position_gap_weight: float = 0.25
+    requested_price_scale: float | None = None
     output_dir: str = "artifacts/demo"
     horizons: tuple[int, ...] = HORIZONS
     main_windows: dict[str, int] = field(default_factory=_default_main_windows)
@@ -200,6 +205,11 @@ class TrainingConfig:
             "policy_sweep_gamma_multipliers": list(self.policy_sweep_gamma_multipliers),
             "policy_sweep_min_policy_sigmas": list(self.policy_sweep_min_policy_sigmas),
             "policy_sweep_state_reset_modes": list(self.policy_sweep_state_reset_modes),
+            "checkpoint_selection_metric": self.checkpoint_selection_metric,
+            "checkpoint_selection_forecast_weight": self.checkpoint_selection_forecast_weight,
+            "checkpoint_selection_calibration_weight": self.checkpoint_selection_calibration_weight,
+            "checkpoint_selection_position_gap_weight": self.checkpoint_selection_position_gap_weight,
+            "requested_price_scale": self.requested_price_scale,
             "output_dir": self.output_dir,
             "horizons": list(self.horizons),
             "main_windows": dict(self.main_windows),
@@ -240,6 +250,22 @@ class TrainingConfig:
             policy_sweep_state_reset_modes = tuple(
                 str(value) for value in payload["policy_sweep_state_reset_modes"]
             )
+            checkpoint_selection_metric = str(
+                payload.get("checkpoint_selection_metric", "hybrid_exact")
+            )
+            checkpoint_selection_forecast_weight = float(
+                payload.get("checkpoint_selection_forecast_weight", 1.0)
+            )
+            checkpoint_selection_calibration_weight = float(
+                payload.get("checkpoint_selection_calibration_weight", 0.5)
+            )
+            checkpoint_selection_position_gap_weight = float(
+                payload.get("checkpoint_selection_position_gap_weight", 0.25)
+            )
+            requested_price_scale = payload.get("requested_price_scale")
+            requested_price_scale = (
+                None if requested_price_scale is None else float(requested_price_scale)
+            )
         else:
             training_state_reset_mode = str(payload.get("training_state_reset_mode", "carry_on"))
             evaluation_state_reset_mode = str(payload.get("evaluation_state_reset_mode", "carry_on"))
@@ -277,6 +303,22 @@ class TrainingConfig:
                     "policy_sweep_state_reset_modes",
                     list(_legacy_policy_sweep_state_reset_modes()),
                 )
+            )
+            checkpoint_selection_metric = str(
+                payload.get("checkpoint_selection_metric", "hybrid_exact")
+            )
+            checkpoint_selection_forecast_weight = float(
+                payload.get("checkpoint_selection_forecast_weight", 1.0)
+            )
+            checkpoint_selection_calibration_weight = float(
+                payload.get("checkpoint_selection_calibration_weight", 0.5)
+            )
+            checkpoint_selection_position_gap_weight = float(
+                payload.get("checkpoint_selection_position_gap_weight", 0.25)
+            )
+            requested_price_scale = payload.get("requested_price_scale", payload.get("price_scale"))
+            requested_price_scale = (
+                None if requested_price_scale is None else float(requested_price_scale)
             )
         feature_contract_version = int(
             payload.get("feature_contract_version", TRAINING_EXAMPLE_CONTRACT_VERSION)
@@ -346,6 +388,11 @@ class TrainingConfig:
             policy_sweep_gamma_multipliers=policy_sweep_gamma_multipliers,
             policy_sweep_min_policy_sigmas=policy_sweep_min_policy_sigmas,
             policy_sweep_state_reset_modes=policy_sweep_state_reset_modes,
+            checkpoint_selection_metric=checkpoint_selection_metric,
+            checkpoint_selection_forecast_weight=checkpoint_selection_forecast_weight,
+            checkpoint_selection_calibration_weight=checkpoint_selection_calibration_weight,
+            checkpoint_selection_position_gap_weight=checkpoint_selection_position_gap_weight,
+            requested_price_scale=requested_price_scale,
             output_dir=str(payload["output_dir"]),
             horizons=tuple(int(value) for value in payload["horizons"]),
             main_windows={key: int(value) for key, value in dict(payload["main_windows"]).items()},

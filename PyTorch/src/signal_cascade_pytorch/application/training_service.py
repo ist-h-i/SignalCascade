@@ -114,7 +114,12 @@ def train_model(
         "validation_samples": len(valid_examples),
         "purged_samples": purged_samples,
         "best_validation_loss": fit_summary["best_validation_loss"],
+        "best_selection_score": fit_summary.get(
+            "best_selection_score",
+            fit_summary["best_validation_loss"],
+        ),
         "best_epoch": fit_summary["best_epoch"],
+        "checkpoint_selection_metric": config.checkpoint_selection_metric,
         "history": fit_summary["history"],
         "validation_metrics": validation_metrics,
     }
@@ -193,23 +198,25 @@ def evaluate_model(
                 batch["state_features"],
                 previous_state=previous_state,
             )
-            mean = outputs["mu"][0]
-            sigma = outputs["sigma"][0]
+            forecast_mean = outputs.get("forecast_mu", outputs["mu"])[0]
+            forecast_sigma = outputs.get("forecast_sigma", outputs["sigma"])[0]
+            policy_mean = outputs.get("policy_mu", outputs["mu"])[0]
+            policy_sigma = outputs.get("policy_sigma", outputs["sigma"])[0]
             gate = float(outputs["tradeability_gate"][0].item())
             smooth_policy = smooth_policy_distribution(
-                mean=outputs["mu"],
-                sigma=outputs["sigma"],
+                mean=outputs.get("policy_mu", outputs["mu"]),
+                sigma=outputs.get("policy_sigma", outputs["sigma"]),
                 costs=batch["horizon_costs"],
                 tradeability_gate=outputs["tradeability_gate"],
-                previous_position=torch.tensor([previous_position], dtype=mean.dtype),
+                previous_position=torch.tensor([previous_position], dtype=policy_mean.dtype),
                 config=effective_config,
                 cost_multiplier=cost_multiplier,
                 gamma_multiplier=gamma_multiplier,
             )
             decision = apply_selection_policy(
                 example=example,
-                mean=mean.tolist(),
-                sigma=sigma.tolist(),
+                mean=policy_mean.tolist(),
+                sigma=policy_sigma.tolist(),
                 config=effective_config,
                 previous_position=previous_position,
                 tradeability_gate=gate,
@@ -222,6 +229,8 @@ def evaluate_model(
             selected_horizon = int(selected_row["horizon"])
             selected_index = config.horizons.index(selected_horizon)
             realized_return = float(example.returns_target[selected_index])
+            selected_forecast_mean = float(forecast_mean[selected_index].item())
+            selected_forecast_sigma = float(forecast_sigma[selected_index].item())
             trade_cost = float(selected_row["cost"]) * abs(float(decision["trade_delta"]))
             pnl = (float(decision["position"]) * realized_return) - trade_cost
             equity += pnl
@@ -231,14 +240,14 @@ def evaluate_model(
             pnl_values.append(pnl)
             log_wealth_values.append(math.log1p(max(pnl, -0.95)))
             drawdown_values.append(max_drawdown)
-            mu_errors.append(abs(realized_return - float(selected_row["mean"])))
-            sigma_errors.append(abs(abs(realized_return - float(selected_row["mean"])) - float(selected_row["sigma"])))
+            mu_errors.append(abs(realized_return - selected_forecast_mean))
+            sigma_errors.append(abs(abs(realized_return - selected_forecast_mean) - selected_forecast_sigma))
             tradeability_gates.append(gate)
             shape_entropies.append(float(outputs["shape_entropy"][0].item()))
             policy_scores.append(float(decision["selected_policy_utility"]))
             horizon_counts[str(selected_horizon)] += 1
             direction_correct += int(
-                _sign_from_value(float(selected_row["mean"])) == _sign_from_value(realized_return)
+                _sign_from_value(selected_forecast_mean) == _sign_from_value(realized_return)
             )
             total_samples += 1
             turnover += abs(float(decision["trade_delta"]))
@@ -303,6 +312,14 @@ def evaluate_model(
         no_trade_rate=no_trade_rate,
         shape_gate_usage=shape_gate_usage,
     )
+    forecast_mae = sum(mu_errors) / max(total_samples, 1)
+    checkpoint_selection_score = _checkpoint_selection_score(
+        average_log_wealth=average_log_wealth,
+        forecast_mae=forecast_mae,
+        sigma_calibration=sigma_calibration,
+        exact_smooth_position_mae=exact_smooth_position_abs_error / max(total_samples, 1),
+        config=effective_config,
+    )
 
     return {
         "policy_mode": "shape_aware_profit_maximization",
@@ -330,6 +347,9 @@ def evaluate_model(
         "policy_utility_mean": sum(policy_scores) / max(total_samples, 1),
         "utility_score": utility_score,
         "project_value_score": project_value_score,
+        "forecast_mae": forecast_mae,
+        "checkpoint_selection_metric": effective_config.checkpoint_selection_metric,
+        "checkpoint_selection_score": checkpoint_selection_score,
         "state_reset_mode": resolved_state_reset_mode,
         "state_reset_boundary_spec_version": STATE_RESET_BOUNDARY_SPEC_VERSION,
         "state_reset_count": state_reset_count,
@@ -386,6 +406,7 @@ def _fit_model(
         weight_decay=config.weight_decay,
     )
     best_validation_loss = float("inf")
+    best_selection_score = float("inf")
     best_epoch = 1
     best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
     history: list[dict[str, float]] = []
@@ -405,6 +426,7 @@ def _fit_model(
             optimizer=None,
             warmup_phase=False,
         )
+        exact_metrics = evaluate_model(model, valid_examples, config)
         history.append(
             {
                 "epoch": float(epoch),
@@ -418,9 +440,14 @@ def _fit_model(
                 "validation_shape": valid_metrics["shape_loss"],
                 "train_log_wealth": train_metrics["average_log_wealth"],
                 "validation_log_wealth": valid_metrics["average_log_wealth"],
+                "validation_forecast_mae": valid_metrics.get("forecast_mae", valid_metrics["return_loss"]),
+                "validation_exact_log_wealth": exact_metrics["average_log_wealth"],
+                "validation_exact_forecast_mae": exact_metrics["forecast_mae"],
+                "validation_selection_score": exact_metrics["checkpoint_selection_score"],
             }
         )
-        if valid_metrics["total"] < best_validation_loss:
+        if exact_metrics["checkpoint_selection_score"] < best_selection_score:
+            best_selection_score = exact_metrics["checkpoint_selection_score"]
             best_validation_loss = valid_metrics["total"]
             best_epoch = epoch
             best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
@@ -428,6 +455,7 @@ def _fit_model(
     model.load_state_dict(best_state)
     return model, {
         "best_validation_loss": best_validation_loss,
+        "best_selection_score": best_selection_score,
         "best_epoch": float(best_epoch),
         "history": history,
     }
@@ -498,6 +526,75 @@ def _validate_state_reset_mode(state_reset_mode: str) -> None:
     }
     if state_reset_mode not in allowed:
         raise ValueError(f"Unsupported state reset mode: {state_reset_mode}")
+
+
+def replay_recurrent_context(
+    model: SignalCascadeModel,
+    examples: Sequence[TrainingExample],
+    config: TrainingConfig,
+    initial_previous_position: float = 0.0,
+    state_reset_mode: str | None = None,
+) -> tuple[torch.Tensor | None, float]:
+    resolved_state_reset_mode = state_reset_mode or config.evaluation_state_reset_mode
+    _validate_state_reset_mode(resolved_state_reset_mode)
+    previous_state = None
+    previous_position = float(initial_previous_position)
+    previous_example: TrainingExample | None = None
+    model.eval()
+
+    with torch.no_grad():
+        for example in examples:
+            if _should_reset_recurrent_context(
+                state_reset_mode=resolved_state_reset_mode,
+                current_example=example,
+                previous_example=previous_example,
+            ):
+                previous_state = None
+                previous_position = 0.0
+            batch = examples_to_batch([example], config)
+            outputs = model(
+                batch["main"],
+                batch["overlay"],
+                batch["state_features"],
+                previous_state=previous_state,
+            )
+            policy_mean = outputs.get("policy_mu", outputs["mu"])[0]
+            policy_sigma = outputs.get("policy_sigma", outputs["sigma"])[0]
+            decision = apply_selection_policy(
+                example=example,
+                mean=policy_mean.tolist(),
+                sigma=policy_sigma.tolist(),
+                config=config,
+                previous_position=previous_position,
+                tradeability_gate=float(outputs["tradeability_gate"][0].item()),
+                shape_probs=outputs["shape_posterior"][0].tolist(),
+            )
+            previous_position = float(decision["position"])
+            previous_state = outputs["memory_state"].detach()
+            previous_example = example
+    return previous_state, previous_position
+
+
+def _checkpoint_selection_score(
+    *,
+    average_log_wealth: float,
+    forecast_mae: float,
+    sigma_calibration: float,
+    exact_smooth_position_mae: float,
+    config: TrainingConfig,
+) -> float:
+    if config.checkpoint_selection_metric == "validation_total":
+        return forecast_mae
+    calibration_error = 0.5 * (float(forecast_mae) + float(sigma_calibration))
+    return (
+        -float(average_log_wealth)
+        + (float(config.checkpoint_selection_forecast_weight) * float(forecast_mae))
+        + (float(config.checkpoint_selection_calibration_weight) * calibration_error)
+        + (
+            float(config.checkpoint_selection_position_gap_weight)
+            * float(exact_smooth_position_mae)
+        )
+    )
 
 
 def _should_reset_recurrent_context(

@@ -1,6 +1,8 @@
 import { useEffect, useState } from 'react'
+import { normalizeDashboardData } from './dashboard/data-contract'
 import DashboardPage from './dashboard/DashboardPage'
 import type { DashboardData } from './dashboard/types'
+import type { DashboardDataInput } from './dashboard/data-contract'
 
 function App() {
   const [data, setData] = useState<DashboardData | null>(null)
@@ -16,7 +18,7 @@ function App() {
           throw new Error(`dashboard-data.json の取得に失敗しました: ${response.status}`)
         }
 
-        const payload = (await response.json()) as DashboardData
+        const payload = normalizeDashboardData((await response.json()) as DashboardDataInput)
         if (!cancelled) {
           setData(payload)
         }

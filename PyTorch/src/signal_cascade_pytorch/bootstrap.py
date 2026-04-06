@@ -15,20 +15,25 @@ from .application.artifact_provenance import (
 from .application.config import TrainingConfig
 from .application.diagnostics_service import export_review_diagnostics
 from .application.dataset_service import (
-    build_latest_inference_example,
-    build_latest_inference_example_from_bars,
     build_training_examples,
     build_training_examples_from_bars,
     limit_base_bars_to_lookback_days,
-    trim_base_bars_for_latest_inference,
 )
 from .application.inference_service import (
     build_forecast_summary_payload,
-    predict_from_example,
     predict_latest,
     serialize_prediction_result,
 )
-from .application.report_service import METRICS_SCHEMA_VERSION, generate_research_report
+from .application.price_scale import (
+    normalize_price_scale_payload,
+    price_scale_manifest_fields,
+    resolve_effective_price_scale,
+)
+from .application.report_service import (
+    METRICS_SCHEMA_VERSION,
+    generate_research_report,
+    load_required_diagnostics_summary,
+)
 from .application.training_service import train_model
 from .application.tuning_service import tune_latest_dataset
 from .infrastructure.data.csv_source import CsvMarketDataSource
@@ -44,6 +49,7 @@ def train_command(args) -> int:
     config = _build_config(args)
     output_dir = ensure_directory(Path(config.output_dir))
     source_payload = _build_source_payload(args, config)
+    price_scale = _resolve_price_scale(source_payload)
     source = _create_data_source(source_payload)
     source_rows_original = None
     source_rows_used = None
@@ -54,9 +60,9 @@ def train_command(args) -> int:
         source_rows_original = len(base_bars)
         base_bars = limit_base_bars_to_lookback_days(base_bars, source_payload.get("lookback_days"))
         source_rows_used = len(base_bars)
-        examples = build_training_examples_from_bars(base_bars, config)
+        examples = build_training_examples_from_bars(base_bars, config, price_scale=price_scale)
     else:
-        examples = build_training_examples(source, config)
+        examples = build_training_examples(source, config, price_scale=price_scale)
     artifact_source_payload = materialize_artifact_source(
         source_payload,
         output_dir,
@@ -109,6 +115,7 @@ def train_command(args) -> int:
             artifact_id=str(training_source_payload["artifact_id"]),
             parent_artifact_id=None,
             generated_at_utc=generated_at_utc,
+            source_payload=artifact_source_payload,
             entrypoints=_build_artifact_entrypoints(
                 artifact_source_payload,
                 include_model=True,
@@ -155,26 +162,28 @@ def predict_command(args) -> int:
     output_dir = Path(args.output_dir)
     config = _load_config_with_overrides(output_dir, args)
     source_payload = _resolve_source_payload(args, output_dir)
+    price_scale = _resolve_price_scale(source_payload)
     source = _create_data_source(source_payload)
 
     if source_payload["kind"] == "csv":
         base_bars = source.load_bars()
         base_bars = limit_base_bars_to_lookback_days(base_bars, source_payload.get("lookback_days"))
-        trimmed_bars = trim_base_bars_for_latest_inference(base_bars, config)
-        latest_example = build_latest_inference_example_from_bars(trimmed_bars, config)
+        examples = build_training_examples_from_bars(base_bars, config, price_scale=price_scale)
     else:
-        latest_example = build_latest_inference_example(source, config)
+        examples = build_training_examples(source, config, price_scale=price_scale)
 
-    model = _build_model_from_example(latest_example, config)
+    model = _build_model_from_example(examples[0], config)
     load_checkpoint(output_dir / "model.pt", model)
-    prediction = predict_from_example(
+    prediction = predict_latest(
         model=model,
-        example=latest_example,
+        examples=examples,
         config=config,
         previous_position=float(getattr(args, "previous_position", 0.0) or 0.0),
     )
+    save_json(output_dir / "config.json", config.to_dict())
     save_json(output_dir / "prediction.json", serialize_prediction_result(prediction))
     _save_forecast_summary(output_dir, prediction, config)
+    _merge_artifact_price_scale_metadata(output_dir, source_payload)
 
     print(f"policy horizon: {prediction.policy_horizon}")
     print(f"executed horizon: {prediction.executed_horizon}")
@@ -195,6 +204,7 @@ def export_diagnostics_command(args) -> int:
     )
     config = _load_config_with_overrides(artifact_dir, args)
     source_payload = _resolve_source_payload(args, artifact_dir)
+    price_scale = _resolve_price_scale(source_payload)
     source = _create_data_source(source_payload)
     source_rows_original = None
     source_rows_used = None
@@ -205,9 +215,9 @@ def export_diagnostics_command(args) -> int:
         source_rows_original = len(base_bars)
         base_bars = limit_base_bars_to_lookback_days(base_bars, source_payload.get("lookback_days"))
         source_rows_used = len(base_bars)
-        examples = build_training_examples_from_bars(base_bars, config)
+        examples = build_training_examples_from_bars(base_bars, config, price_scale=price_scale)
     else:
-        examples = build_training_examples(source, config)
+        examples = build_training_examples(source, config, price_scale=price_scale)
     artifact_source_payload = materialize_artifact_source(
         source_payload,
         diagnostics_output_dir,
@@ -413,6 +423,7 @@ def _materialize_replay_artifact(
                 else str(overlay_source_payload["parent_artifact_id"])
             ),
             generated_at_utc=generated_at_utc,
+            source_payload=source_payload,
             entrypoints=_build_artifact_entrypoints(source_payload),
         ),
     )
@@ -479,6 +490,7 @@ def _promote_training_run_to_current(
     source_payload = load_json(source_payload_path)
     if source_payload.get("artifact_kind") != "training_run":
         raise ValueError("current alias can only be promoted from a training_run artifact")
+    load_required_diagnostics_summary(resolved_source_dir)
 
     stage_dir = resolved_artifact_root / f".current_promote_stage_{uuid4().hex}"
     backup_root = Path(mkdtemp(prefix="signalcascade-current-backup-")).resolve()
@@ -534,6 +546,7 @@ def _build_artifact_manifest(
     artifact_id: str,
     parent_artifact_id: str | None,
     generated_at_utc: str,
+    source_payload: dict[str, object],
     entrypoints: dict[str, str],
 ) -> dict[str, object]:
     return {
@@ -543,6 +556,7 @@ def _build_artifact_manifest(
         "parent_artifact_id": parent_artifact_id,
         "generated_at": generated_at_utc,
         "generated_at_utc": generated_at_utc,
+        **price_scale_manifest_fields(source_payload),
         "entrypoints": dict(sorted(entrypoints.items())),
     }
 
@@ -563,20 +577,47 @@ def _load_config_with_overrides(output_dir: Path, args) -> TrainingConfig:
 
 def _build_source_payload(args, config: TrainingConfig) -> dict[str, object]:
     if args.csv:
-        payload = {"kind": "csv", "path": str(Path(args.csv).expanduser().resolve())}
+        payload: dict[str, object] = {"kind": "csv", "path": str(Path(args.csv).expanduser().resolve())}
         if getattr(args, "csv_lookback_days", None) is not None:
             payload["lookback_days"] = int(args.csv_lookback_days)
-        return payload
-    return {"kind": "synthetic", "bars": config.synthetic_bars, "seed": config.seed}
+        return normalize_price_scale_payload(
+            payload,
+            requested_price_scale=config.requested_price_scale,
+        )
+    return normalize_price_scale_payload(
+        {"kind": "synthetic", "bars": config.synthetic_bars, "seed": config.seed},
+        requested_price_scale=config.requested_price_scale,
+    )
 
 
 def _resolve_source_payload(args, output_dir: Path) -> dict[str, object]:
+    saved_payload = (
+        load_json(output_dir / "source.json")
+        if (output_dir / "source.json").exists()
+        else {}
+    )
     if getattr(args, "csv", None):
-        payload = {"kind": "csv", "path": str(Path(args.csv).expanduser().resolve())}
+        payload = {
+            **normalize_price_scale_payload(saved_payload),
+            "kind": "csv",
+            "path": str(Path(args.csv).expanduser().resolve()),
+        }
         if getattr(args, "csv_lookback_days", None) is not None:
             payload["lookback_days"] = int(args.csv_lookback_days)
-        return payload
-    return load_json(output_dir / "source.json")
+        elif "lookback_days" in saved_payload:
+            payload["lookback_days"] = saved_payload["lookback_days"]
+        return normalize_price_scale_payload(
+            payload,
+            requested_price_scale=getattr(args, "price_scale", None),
+        )
+    return normalize_price_scale_payload(
+        saved_payload,
+        requested_price_scale=getattr(args, "price_scale", None),
+    )
+
+
+def _resolve_price_scale(source_payload: dict[str, object]) -> float:
+    return resolve_effective_price_scale(source_payload)
 
 
 def _config_overrides_from_args(args) -> dict[str, object]:
@@ -613,6 +654,7 @@ def _config_overrides_from_args(args) -> dict[str, object]:
     maybe("risk_aversion_gamma", getattr(args, "risk_aversion_gamma", None))
     maybe("q_max", getattr(args, "q_max", None))
     maybe("allow_no_candidate", getattr(args, "allow_no_candidate", None))
+    maybe("requested_price_scale", getattr(args, "price_scale", None))
 
     horizons = _parse_horizons(getattr(args, "horizons", None))
     if horizons is not None:
@@ -631,6 +673,26 @@ def _config_overrides_from_args(args) -> dict[str, object]:
         overrides["policy_sweep_state_reset_modes"] = sweep_state_reset_modes
 
     return overrides
+
+
+def _merge_artifact_price_scale_metadata(output_dir: Path, source_payload: dict[str, object]) -> None:
+    normalized = normalize_price_scale_payload(source_payload)
+    for name in ("source.json", "manifest.json"):
+        path = output_dir / name
+        if not path.exists():
+            continue
+        payload = load_json(path)
+        payload.update(price_scale_manifest_fields(normalized))
+        if name == "source.json":
+            payload["effective_price_scale"] = normalized["effective_price_scale"]
+            payload["price_scale"] = normalized["price_scale"]
+            payload["price_scale_origin"] = normalized["price_scale_origin"]
+            payload["provider_scale_confirmed"] = normalized["provider_scale_confirmed"]
+            if "requested_price_scale" in normalized:
+                payload["requested_price_scale"] = normalized["requested_price_scale"]
+            else:
+                payload.pop("requested_price_scale", None)
+        save_json(path, payload)
 
 
 def _emit_cli_compat_warnings(args) -> None:

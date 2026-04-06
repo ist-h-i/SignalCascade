@@ -21,35 +21,39 @@ OVERLAY_LABELS = ("reduce", "hold")
 def build_training_examples(
     source: MarketDataSource,
     config: TrainingConfig,
+    price_scale: float = 1.0,
 ) -> list[TrainingExample]:
     base_bars = sorted(source.load_bars(), key=lambda bar: bar.timestamp)
-    return build_training_examples_from_bars(base_bars, config)
+    return build_training_examples_from_bars(base_bars, config, price_scale=price_scale)
 
 
 def build_latest_inference_example(
     source: MarketDataSource,
     config: TrainingConfig,
+    price_scale: float = 1.0,
 ) -> TrainingExample:
     base_bars = sorted(source.load_bars(), key=lambda bar: bar.timestamp)
-    return build_latest_inference_example_from_bars(base_bars, config)
+    return build_latest_inference_example_from_bars(base_bars, config, price_scale=price_scale)
 
 
 def build_training_examples_from_bars(
     base_bars: list[OHLCVBar],
     config: TrainingConfig,
+    price_scale: float = 1.0,
 ) -> list[TrainingExample]:
     _validate_base_bars(base_bars, "training set")
     features_by_timeframe = _build_features_by_timeframe(base_bars, config)
-    return _build_examples(features_by_timeframe, config)
+    return _build_examples(features_by_timeframe, config, price_scale=price_scale)
 
 
 def build_latest_inference_example_from_bars(
     base_bars: list[OHLCVBar],
     config: TrainingConfig,
+    price_scale: float = 1.0,
 ) -> TrainingExample:
     _validate_base_bars(base_bars, "inference example")
     features_by_timeframe = _build_features_by_timeframe(base_bars, config)
-    return _build_latest_example(features_by_timeframe, config)
+    return _build_latest_example(features_by_timeframe, config, price_scale=price_scale)
 
 
 def trim_base_bars_for_training(
@@ -140,6 +144,7 @@ def _build_bars_by_timeframe(base_bars: list[OHLCVBar]) -> dict[str, list[OHLCVB
 def _build_examples(
     features_by_timeframe: dict[str, list[TimeframeFeatureRow]],
     config: TrainingConfig,
+    price_scale: float = 1.0,
 ) -> list[TrainingExample]:
     timestamps = {
         timeframe: [row.timestamp for row in rows]
@@ -283,6 +288,7 @@ def _build_examples(
                 horizon_costs=tuple(horizon_costs),
                 overlay_target=overlay_target,
                 current_close=anchor_row.close,
+                price_scale=float(price_scale),
                 regime_id=regime["id"],
                 regime_features=regime["features"],
                 realized_volatility=realized_volatility,
@@ -298,6 +304,7 @@ def _build_examples(
 def _build_latest_example(
     features_by_timeframe: dict[str, list[TimeframeFeatureRow]],
     config: TrainingConfig,
+    price_scale: float = 1.0,
 ) -> TrainingExample:
     timestamps = {
         timeframe: [row.timestamp for row in rows]
@@ -374,6 +381,7 @@ def _build_latest_example(
             horizon_costs=tuple(config.cost_for_horizon(horizon) for horizon in config.horizons),
             overlay_target=0,
             current_close=anchor_row.close,
+            price_scale=float(price_scale),
             regime_id=regime["id"],
             regime_features=regime["features"],
             realized_volatility=realized_volatility,

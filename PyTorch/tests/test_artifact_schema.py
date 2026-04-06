@@ -5,12 +5,14 @@ from datetime import datetime, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
+from unittest.mock import patch
 
 from signal_cascade_pytorch.application.artifact_provenance import (
     build_artifact_source_payload,
     build_subartifact_lineage,
     materialize_artifact_source,
 )
+from signal_cascade_pytorch.application.tuning_service import tune_latest_dataset
 from signal_cascade_pytorch.bootstrap import (
     _build_artifact_entrypoints,
     _build_artifact_manifest,
@@ -56,6 +58,7 @@ def _prediction() -> PredictionResult:
         horizon_positions={"1": 0.1, "3": 0.4},
         shape_probabilities={"0": 0.4, "1": 0.6},
         regime_id="asia|low|trend",
+        price_scale=100.0,
     )
 
 
@@ -124,6 +127,7 @@ class ArtifactSchemaTests(unittest.TestCase):
                 artifact_id=str(source["artifact_id"]),
                 parent_artifact_id=None,
                 generated_at_utc="2026-04-05T10:00:00+00:00",
+                source_payload=source_payload,
                 entrypoints=_build_artifact_entrypoints(source_payload, include_model=True),
             )
             self.assertEqual(manifest["schema_version"], 1)
@@ -132,6 +136,9 @@ class ArtifactSchemaTests(unittest.TestCase):
             self.assertIsNone(manifest["parent_artifact_id"])
             self.assertEqual(manifest["generated_at"], "2026-04-05T10:00:00+00:00")
             self.assertEqual(manifest["generated_at_utc"], "2026-04-05T10:00:00+00:00")
+            self.assertEqual(manifest["effective_price_scale"], 1.0)
+            self.assertEqual(manifest["price_scale_origin"], "default")
+            self.assertFalse(manifest["provider_scale_confirmed"])
             self.assertEqual(manifest["entrypoints"]["source"], "source.json")
             self.assertEqual(manifest["entrypoints"]["config"], "config.json")
             self.assertEqual(manifest["entrypoints"]["validation_summary"], "validation_summary.json")
@@ -214,12 +221,16 @@ class ArtifactSchemaTests(unittest.TestCase):
                 artifact_id=str(source["artifact_id"]),
                 parent_artifact_id=str(source["parent_artifact_id"]),
                 generated_at_utc="2026-04-05T10:05:00+00:00",
+                source_payload=source_payload,
                 entrypoints=_build_artifact_entrypoints(source_payload),
             )
             self.assertEqual(manifest["schema_version"], 1)
             self.assertEqual(manifest["artifact_kind"], source["artifact_kind"])
             self.assertEqual(manifest["artifact_id"], source["artifact_id"])
             self.assertEqual(manifest["parent_artifact_id"], "parent-artifact-id")
+            self.assertEqual(manifest["effective_price_scale"], 1.0)
+            self.assertEqual(manifest["price_scale_origin"], "default")
+            self.assertFalse(manifest["provider_scale_confirmed"])
             self.assertEqual(manifest["entrypoints"]["source"], "source.json")
             self.assertEqual(manifest["entrypoints"]["config"], "config.json")
             self.assertEqual(manifest["entrypoints"]["validation_summary"], "validation_summary.json")
@@ -232,12 +243,12 @@ class ArtifactSchemaTests(unittest.TestCase):
                 self.assertTrue((output_dir / relative_path).exists())
 
     def test_config_round_trip_materializes_versioned_state_reset_contract(self) -> None:
-        config = TrainingConfig()
+        config = TrainingConfig(requested_price_scale=100.0)
 
         payload = config.to_dict()
         restored = TrainingConfig.from_dict(payload)
 
-        self.assertEqual(payload["config_schema_version"], 2)
+        self.assertEqual(payload["config_schema_version"], 4)
         self.assertEqual(restored.training_state_reset_mode, "carry_on")
         self.assertEqual(restored.evaluation_state_reset_mode, "carry_on")
         self.assertEqual(
@@ -256,10 +267,12 @@ class ArtifactSchemaTests(unittest.TestCase):
             tuple(payload["state_vector_component_names"]),
             STATE_VECTOR_COMPONENT_NAMES,
         )
+        self.assertEqual(payload["requested_price_scale"], 100.0)
         self.assertEqual(restored.feature_contract_version, TRAINING_EXAMPLE_CONTRACT_VERSION)
         self.assertEqual(restored.timeframe_feature_names, TIMEFRAME_FEATURE_NAMES)
         self.assertEqual(restored.state_feature_names, STATE_FEATURE_NAMES)
         self.assertEqual(restored.state_vector_component_names, STATE_VECTOR_COMPONENT_NAMES)
+        self.assertEqual(restored.requested_price_scale, 100.0)
 
     def test_legacy_config_payload_keeps_legacy_state_reset_semantics(self) -> None:
         legacy_payload = {
@@ -362,13 +375,16 @@ class ArtifactSchemaTests(unittest.TestCase):
         self.assertEqual(payload["artifact_schema_version"], 2)
         self.assertEqual(payload["artifact_kind"], "diagnostic_replay_overlay")
         self.assertEqual(payload["config_origin"], "explicit_v2")
+        self.assertEqual(payload["effective_price_scale"], 1.0)
+        self.assertEqual(payload["price_scale_origin"], "default")
+        self.assertFalse(payload["provider_scale_confirmed"])
         self.assertEqual(payload["parent_artifact_id"], "parent-artifact-id")
         self.assertEqual(payload["state_reset_boundary_spec_version"], 1)
         self.assertTrue(str(payload["path"]).endswith("data_snapshot.csv"))
         self.assertIsNotNone(payload.get("artifact_id"))
         self.assertIsNotNone(payload.get("config_sha256"))
         self.assertIsNotNone(payload.get("data_snapshot_sha256"))
-        self.assertEqual(payload["sub_artifacts"]["config.json"]["schema_version"], 2)
+        self.assertEqual(payload["sub_artifacts"]["config.json"]["schema_version"], 4)
         self.assertIsNotNone(payload["sub_artifacts"]["data_snapshot.csv"].get("sha256"))
 
     def test_overlay_output_dir_defaults_to_sibling_and_rejects_source_artifact_dir(self) -> None:
@@ -402,6 +418,12 @@ class ArtifactSchemaTests(unittest.TestCase):
                 encoding="utf-8",
             )
             (source_dir / "config.json").write_text("{}", encoding="utf-8")
+            (source_dir / "validation_summary.json").write_text(
+                json.dumps({"generated_at_utc": "2026-04-06T04:40:00+00:00"}),
+                encoding="utf-8",
+            )
+            (source_dir / "policy_summary.csv").write_text("horizon\n1\n", encoding="utf-8")
+            (source_dir / "horizon_diag.csv").write_text("horizon\n1\n", encoding="utf-8")
             (source_dir / "marker.txt").write_text("accepted", encoding="utf-8")
             (current_dir / "source.json").write_text(
                 json.dumps({"artifact_kind": "legacy"}),
@@ -434,6 +456,152 @@ class ArtifactSchemaTests(unittest.TestCase):
             with self.assertRaises(ValueError):
                 _promote_training_run_to_current(artifact_root, source_dir)
 
+    def test_promote_training_run_to_current_requires_published_diagnostics(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            source_dir = artifact_root / "reruns" / "candidate"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            (source_dir / "source.json").write_text(
+                json.dumps({"artifact_kind": "training_run", "artifact_id": "artifact-123"}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                FileNotFoundError,
+                "diagnostics unpublished for artifact",
+            ):
+                _promote_training_run_to_current(artifact_root, source_dir)
+
+    def test_tune_latest_materializes_current_diagnostics_artifacts(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir) / "artifacts"
+            artifact_root.mkdir(parents=True, exist_ok=True)
+            csv_path = Path(temp_dir) / "xauusd.csv"
+            csv_path.write_text(
+                "\n".join(
+                    [
+                        "timestamp,open,high,low,close,volume",
+                        "2026-03-24T00:00:00+00:00,100,101,99,100.5,10",
+                        "2026-03-24T00:30:00+00:00,100.5,101.5,100,101,11",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            validation_metrics = {
+                "project_value_score": 0.12,
+                "utility_score": 0.08,
+                "average_log_wealth": 0.01,
+                "realized_pnl_per_anchor": 0.02,
+                "cvar_tail_loss": 0.01,
+                "max_drawdown": 0.05,
+                "no_trade_band_hit_rate": 0.1,
+                "mu_calibration": 0.01,
+                "sigma_calibration": 0.02,
+                "directional_accuracy": 0.6,
+            }
+            summary = {
+                "train_samples": 3,
+                "validation_samples": 1,
+                "best_validation_loss": -0.1,
+                "validation_metrics": validation_metrics,
+            }
+            diagnostics_summary = {
+                "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+                "generated_at_utc": "2026-04-06T04:40:00+00:00",
+                "validation": validation_metrics,
+            }
+
+            def fake_export_review_diagnostics(*, output_dir, **_kwargs):
+                (output_dir / "validation_rows.csv").write_text("sample_id\n0\n", encoding="utf-8")
+                (output_dir / "policy_summary.csv").write_text("horizon\n1\n", encoding="utf-8")
+                (output_dir / "horizon_diag.csv").write_text("horizon\n1\n", encoding="utf-8")
+                (output_dir / "validation_summary.json").write_text(
+                    json.dumps(diagnostics_summary),
+                    encoding="utf-8",
+                )
+                return diagnostics_summary
+
+            def fake_generate_research_report(output_dir, report_path=None):
+                (Path(output_dir) / "analysis.json").write_text("{}", encoding="utf-8")
+                target_report = (
+                    Path(report_path)
+                    if report_path is not None
+                    else Path(output_dir) / "research_report.md"
+                )
+                target_report.parent.mkdir(parents=True, exist_ok=True)
+                target_report.write_text("# report\n", encoding="utf-8")
+                return {}
+
+            with (
+                patch(
+                    "signal_cascade_pytorch.application.tuning_service.build_training_examples_from_bars",
+                    return_value=[object()],
+                ),
+                patch(
+                    "signal_cascade_pytorch.application.tuning_service.train_model",
+                    return_value=(object(), summary),
+                ),
+                patch(
+                    "signal_cascade_pytorch.application.tuning_service.predict_latest",
+                    return_value=_prediction(),
+                ),
+                patch(
+                    "signal_cascade_pytorch.application.tuning_service.export_review_diagnostics",
+                    side_effect=fake_export_review_diagnostics,
+                ),
+                patch(
+                    "signal_cascade_pytorch.application.tuning_service._build_candidate_parameters",
+                    return_value=[
+                        {
+                            "epochs": 12,
+                            "batch_size": 16,
+                            "learning_rate": 5e-4,
+                            "hidden_dim": 48,
+                            "dropout": 0.1,
+                            "weight_decay": 5e-5,
+                        }
+                    ],
+                ),
+                patch(
+                    "signal_cascade_pytorch.application.tuning_service.generate_research_report",
+                    side_effect=fake_generate_research_report,
+                ),
+            ):
+                manifest = tune_latest_dataset(
+                    csv_path=csv_path,
+                    artifact_root=artifact_root,
+                    config_overrides={"horizons": (1, 3)},
+                )
+
+            self.assertTrue(manifest["current_updated"])
+            self.assertEqual(manifest["generated_at_utc"], manifest["generated_at"])
+            current_dir = artifact_root / "current"
+            for relative_path in (
+                "horizon_diag.csv",
+                "policy_summary.csv",
+                "validation_rows.csv",
+                "validation_summary.json",
+            ):
+                self.assertTrue((current_dir / relative_path).exists(), relative_path)
+
+            source_payload = json.loads((current_dir / "source.json").read_text(encoding="utf-8"))
+            current_manifest = json.loads((current_dir / "manifest.json").read_text(encoding="utf-8"))
+            archived_manifest = json.loads(
+                (Path(manifest["manifest_path"]).read_text(encoding="utf-8"))
+            )
+            self.assertEqual(current_manifest["generated_at_utc"], current_manifest["generated_at"])
+            self.assertEqual(current_manifest["generated_at_utc"], source_payload["generated_at_utc"])
+            self.assertEqual(archived_manifest["generated_at_utc"], archived_manifest["generated_at"])
+            for relative_path in (
+                "horizon_diag.csv",
+                "policy_summary.csv",
+                "validation_rows.csv",
+                "validation_summary.json",
+            ):
+                self.assertIn(relative_path, source_payload["sub_artifacts"])
+
     def test_prediction_serializer_adds_schema_and_median_semantics(self) -> None:
         payload = serialize_prediction_result(_prediction())
 
@@ -444,6 +612,10 @@ class ArtifactSchemaTests(unittest.TestCase):
         self.assertEqual(payload["mu_t"]["3"], 0.02)
         self.assertAlmostEqual(payload["sigma_t_sq"]["3"], 0.0004, places=9)
         self.assertEqual(payload["median_predicted_closes"]["3"], 102.0)
+        self.assertEqual(payload["effective_price_scale"], 100.0)
+        self.assertEqual(payload["price_scale"], 100.0)
+        self.assertEqual(payload["current_close_display"], 1.0)
+        self.assertAlmostEqual(payload["median_predicted_close_display_by_horizon"]["3"], 1.02, places=9)
 
     def test_report_analysis_tracks_artifact_versions(self) -> None:
         prediction = _prediction()
@@ -453,10 +625,13 @@ class ArtifactSchemaTests(unittest.TestCase):
 
         self.assertEqual(forecast_payload["schema_version"], FORECAST_SCHEMA_VERSION)
         self.assertIn("median_predicted_close", forecast_payload["forecast_rows"][0])
+        self.assertIn("median_predicted_close_display", forecast_payload["forecast_rows"][0])
         self.assertIn("mu_t", forecast_payload["forecast_rows"][0])
         self.assertIn("sigma_t_sq", forecast_payload["forecast_rows"][0])
         self.assertEqual(forecast_payload["g_t"], 0.8)
         self.assertEqual(forecast_payload["selected_policy_utility"], 0.05)
+        self.assertEqual(forecast_payload["effective_price_scale"], 100.0)
+        self.assertAlmostEqual(forecast_payload["anchor_close_display"], 1.0, places=9)
 
         with TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
@@ -522,6 +697,7 @@ class ArtifactSchemaTests(unittest.TestCase):
                 json.dumps(
                     {
                         "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+                        "generated_at_utc": "2026-04-06T04:40:00+00:00",
                         "primary_state_reset_mode": "reset_each_session_or_window",
                         "stateful_evaluation": {"carry_on": {"average_log_wealth": 0.01}},
                         "policy_calibration_summary": {
@@ -567,6 +743,8 @@ class ArtifactSchemaTests(unittest.TestCase):
                 ),
                 encoding="utf-8",
             )
+            (output_dir / "policy_summary.csv").write_text("horizon\n1\n", encoding="utf-8")
+            (output_dir / "horizon_diag.csv").write_text("horizon\n1\n", encoding="utf-8")
 
             analysis = generate_research_report(output_dir)
 
@@ -589,6 +767,30 @@ class ArtifactSchemaTests(unittest.TestCase):
             analysis["policy_calibration_summary"]["selected_row"]["state_reset_mode"],
             "reset_each_session_or_window",
         )
+
+    def test_generate_research_report_requires_published_current_diagnostics(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "current"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            config = TrainingConfig(horizons=(1, 3), output_dir=str(output_dir))
+            (output_dir / "metrics.json").write_text(
+                json.dumps({"schema_version": 4, "validation_metrics": {}}),
+                encoding="utf-8",
+            )
+            (output_dir / "prediction.json").write_text(
+                json.dumps(serialize_prediction_result(_prediction())),
+                encoding="utf-8",
+            )
+            (output_dir / "config.json").write_text(
+                json.dumps(config.to_dict()),
+                encoding="utf-8",
+            )
+
+            with self.assertRaisesRegex(
+                FileNotFoundError,
+                "diagnostics unpublished for current artifact",
+            ):
+                generate_research_report(output_dir)
 
 
 if __name__ == "__main__":

@@ -155,22 +155,24 @@ def build_validation_diagnostics(
                 batch["state_features"],
                 previous_state=previous_state,
             )
-            mean = outputs["mu"][0]
-            sigma = outputs["sigma"][0]
+            forecast_mean = outputs.get("forecast_mu", outputs["mu"])[0]
+            forecast_sigma = outputs.get("forecast_sigma", outputs["sigma"])[0]
+            policy_mean = outputs.get("policy_mu", outputs["mu"])[0]
+            policy_sigma = outputs.get("policy_sigma", outputs["sigma"])[0]
             gate = float(outputs["tradeability_gate"][0].item())
             entropy = float(outputs["shape_entropy"][0].item())
             smooth_policy = smooth_policy_distribution(
-                mean=outputs["mu"],
-                sigma=outputs["sigma"],
+                mean=outputs.get("policy_mu", outputs["mu"]),
+                sigma=outputs.get("policy_sigma", outputs["sigma"]),
                 costs=batch["horizon_costs"],
                 tradeability_gate=outputs["tradeability_gate"],
-                previous_position=torch.tensor([previous_position], dtype=mean.dtype),
+                previous_position=torch.tensor([previous_position], dtype=policy_mean.dtype),
                 config=config,
             )
             decision = apply_selection_policy(
                 example=example,
-                mean=mean.tolist(),
-                sigma=sigma.tolist(),
+                mean=policy_mean.tolist(),
+                sigma=policy_sigma.tolist(),
                 config=config,
                 previous_position=previous_position,
                 tradeability_gate=gate,
@@ -223,11 +225,13 @@ def build_validation_diagnostics(
                 horizon_key = str(row["horizon"])
                 horizon_index = config.horizons.index(int(row["horizon"]))
                 actual_return = float(example.returns_target[horizon_index])
+                forecast_mu = float(forecast_mean[horizon_index].item())
+                forecast_sigma_value = float(forecast_sigma[horizon_index].item())
                 horizon_stats[horizon_key]["count"] += 1
                 horizon_stats[horizon_key]["selected"] += int(int(row["horizon"]) == selected_horizon)
                 horizon_stats[horizon_key]["utility_sum"] += float(row["policy_utility"])
                 horizon_stats[horizon_key]["position_sum"] += float(row["position"])
-                horizon_stats[horizon_key]["abs_error_sum"] += abs(actual_return - float(row["mean"]))
+                horizon_stats[horizon_key]["abs_error_sum"] += abs(actual_return - forecast_mu)
                 validation_rows.append(
                     {
                         "sample_id": sample_id,
@@ -235,10 +239,12 @@ def build_validation_diagnostics(
                         "regime_id": example.regime_id,
                         "horizon": int(row["horizon"]),
                         "y_raw": actual_return,
-                        "mu_t": float(row["mean"]),
-                        "mu_raw": float(row["mean"]),
-                        "sigma_t": float(row["sigma"]),
-                        "sigma_raw": float(row["sigma"]),
+                        "mu_t": forecast_mu,
+                        "mu_raw": forecast_mu,
+                        "sigma_t": forecast_sigma_value,
+                        "sigma_raw": forecast_sigma_value,
+                        "policy_mu_t": float(row["mean"]),
+                        "policy_sigma_t": float(row["sigma"]),
                         "sigma_t_sq": float(row["sigma_sq"]),
                         "g_t": float(row["g_t"]),
                         "mu_t_tilde": float(row["mu_t_tilde"]),
@@ -290,8 +296,10 @@ def build_validation_diagnostics(
                         0.0,
                     ),
                     "selected_g_t": float(selected_row["g_t"]),
-                    "selected_mu_t": float(selected_row["mean"]),
-                    "selected_sigma_t": float(selected_row["sigma"]),
+                    "selected_mu_t": float(forecast_mean[selected_index].item()),
+                    "selected_sigma_t": float(forecast_sigma[selected_index].item()),
+                    "selected_policy_mu_t": float(selected_row["mean"]),
+                    "selected_policy_sigma_t": float(selected_row["sigma"]),
                     "selected_sigma_t_sq": float(selected_row["sigma_sq"]),
                     "selected_mu_t_tilde": float(selected_row["mu_t_tilde"]),
                     "selected_policy_utility": float(decision["selected_policy_utility"]),

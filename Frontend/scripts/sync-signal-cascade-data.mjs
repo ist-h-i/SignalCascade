@@ -16,6 +16,8 @@ const sourceMetaPath = path.join(currentRunDir, 'source.json')
 const forecastSummaryPath = path.join(currentRunDir, 'forecast_summary.json')
 const manifestPath = path.join(currentRunDir, 'manifest.json')
 const validationSummaryPath = path.join(currentRunDir, 'validation_summary.json')
+const policySummaryPath = path.join(currentRunDir, 'policy_summary.csv')
+const horizonDiagPath = path.join(currentRunDir, 'horizon_diag.csv')
 const outputPath = path.resolve(frontendRoot, 'public/dashboard-data.json')
 const liveDataDir = path.join(artifactRoot, 'live')
 const liveCsvPath = path.join(liveDataDir, 'xauusd_m30_latest.csv')
@@ -36,9 +38,8 @@ const forecastSummary = fs.existsSync(forecastSummaryPath)
 const manifest = fs.existsSync(manifestPath)
   ? JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
   : null
-const validationSummary = fs.existsSync(validationSummaryPath)
-  ? JSON.parse(fs.readFileSync(validationSummaryPath, 'utf8'))
-  : null
+const validationSummary = loadRequiredCurrentDiagnosticsSummary()
+const diagnosticsGeneratedAt = validationSummary.generated_at_utc
 const allCsvRows = parseCsv(fs.readFileSync(csvPath, 'utf8'))
 const requiredSourceRows = resolveRequiredSourceRows(metrics, allCsvRows.length)
 const csvRows = allCsvRows.slice(-requiredSourceRows)
@@ -52,14 +53,32 @@ if (anchorIndex < 0) {
 }
 
 const anchorBar = bars4h[anchorIndex]
+const priceScale = resolvePositiveNumber(
+  prediction.effective_price_scale ??
+    prediction.price_scale ??
+    forecastSummary?.effective_price_scale ??
+    forecastSummary?.price_scale ??
+    sourceMeta?.effective_price_scale ??
+    sourceMeta?.price_scale,
+  1,
+)
+const anchorCloseDisplay = resolvePositiveNumber(
+  prediction.current_close_display ??
+    forecastSummary?.anchor_close_display,
+  anchorBar.close / priceScale,
+)
 const meanByHorizon = prediction.mu_t ?? prediction.expected_log_returns ?? {}
 const sigmaByHorizon = prediction.sigma_t ?? prediction.uncertainties ?? {}
 const sigmaSqByHorizon = prediction.sigma_t_sq ?? {}
-const predictedCloseByHorizon =
+const predictedCloseByHorizonRaw =
   prediction.median_predicted_close_by_horizon ??
   prediction.median_predicted_closes ??
   prediction.predicted_closes ??
   {}
+const predictedCloseByHorizon =
+  prediction.median_predicted_close_display_by_horizon ??
+  prediction.median_predicted_closes_display ??
+  scalePriceMap(predictedCloseByHorizonRaw, priceScale)
 const selectedPolicyUtility = prediction.selected_policy_utility ?? prediction.policy_score ?? 0
 const gT = prediction.g_t ?? prediction.tradeability_gate ?? 0
 const horizons = Object.keys(meanByHorizon)
@@ -70,13 +89,23 @@ const horizonRows = buildHorizonRows({
   horizons,
   bars4h,
   anchorIndex,
-  anchorClose: anchorBar.close,
+  anchorClose: anchorCloseDisplay,
   meanByHorizon,
   sigmaByHorizon,
   sigmaSqByHorizon,
   predictedCloseByHorizon,
+  priceScale,
 })
-const chartRows = buildChartRows({ rawRows: csvRows, anchorTime, anchorBar, horizonRows, bars4h, anchorIndex })
+const chartRows = buildChartRows({
+  rawRows: csvRows,
+  anchorTime,
+  anchorClose: anchorCloseDisplay,
+  anchorBar,
+  horizonRows,
+  bars4h,
+  anchorIndex,
+  priceScale,
+})
 const selectedHorizon =
   prediction.executed_horizon ??
   prediction.policy_horizon ??
@@ -112,7 +141,7 @@ const operatingPoint = {
 const freshness = buildFreshness({
   dashboardGeneratedAt: new Date().toISOString(),
   manifestGeneratedAt: manifest?.generated_at ?? null,
-  diagnosticsGeneratedAt: validationSummary?.generated_at_utc ?? null,
+  diagnosticsGeneratedAt,
   forecastGeneratedAt: forecastSummary?.generated_at_utc ?? null,
   predictionAnchorTime: prediction.anchor_time ?? null,
 })
@@ -120,7 +149,7 @@ const interruptedTuning = Boolean(manifest?.interrupted_tuning)
 const runQuality = deriveRunQuality({ interruptedTuning, freshness })
 const overlayAction = prediction.no_trade_band_hit ? 'hold' : 'reduce'
 const payload = {
-  schemaVersion: 5,
+  schemaVersion: 6,
   generatedAt: freshness.dashboardGeneratedAt,
   instrument: '金 / XAUUSD',
   artifacts: {
@@ -143,14 +172,17 @@ const payload = {
     start: toIso(csvRows[0].ts),
     end: toIso(csvRows[csvRows.length - 1].ts),
     manifestGeneratedAt: manifest?.generated_at ?? null,
-    diagnosticsGeneratedAt: validationSummary?.generated_at_utc ?? null,
+    diagnosticsGeneratedAt,
     forecastGeneratedAt: forecastSummary?.generated_at_utc ?? null,
     predictionAnchorTime: prediction.anchor_time ?? null,
     freshness,
   },
   run: {
     anchorTime: toIso(anchorBar.ts),
-    anchorClose: anchorBar.close,
+    anchorClose: anchorCloseDisplay,
+    anchorCloseRaw: prediction.current_close_raw ?? forecastSummary?.anchor_close_raw ?? anchorBar.close,
+    effectivePriceScale: priceScale,
+    priceScale,
     selectedHorizon,
     executedHorizon: prediction.executed_horizon ?? null,
     selectedHours: selectedHorizon * 4,
@@ -229,9 +261,130 @@ const payload = {
   narrative: buildNarrative({ prediction, horizonRows }),
 }
 
+assertDashboardLineage({
+  payload,
+  sourceMeta,
+  manifest,
+  prediction,
+  forecastSummary,
+  diagnosticsGeneratedAt,
+})
+
 fs.mkdirSync(path.dirname(outputPath), { recursive: true })
 fs.writeFileSync(outputPath, JSON.stringify(payload, null, 2))
 console.log(`Wrote ${outputPath}`)
+
+function assertDashboardLineage({ payload, sourceMeta, manifest, prediction, forecastSummary, diagnosticsGeneratedAt }) {
+  const expectedArtifactId =
+    typeof sourceMeta?.artifact_id === 'string' && sourceMeta.artifact_id.length > 0
+      ? sourceMeta.artifact_id
+      : null
+
+  if (expectedArtifactId === null) {
+    throw new Error(`Current artifact is missing source.json artifact_id: ${sourceMetaPath}`)
+  }
+
+  if (payload.provenance.artifactId !== expectedArtifactId) {
+    throw new Error(
+      `dashboard provenance mismatch: dashboard artifactId=${payload.provenance.artifactId ?? 'null'} current artifact_id=${expectedArtifactId}`,
+    )
+  }
+
+  const expectedSessionId =
+    typeof manifest?.session_id === 'string' && manifest.session_id.length > 0
+      ? manifest.session_id
+      : null
+  if (expectedSessionId !== null && payload.run.tuningSessionId !== expectedSessionId) {
+    throw new Error(
+      `dashboard session mismatch: dashboard tuningSessionId=${payload.run.tuningSessionId ?? 'null'} current session_id=${expectedSessionId}`,
+    )
+  }
+
+  const expectedAnchorClose = resolveFiniteNumber(
+    prediction.current_close_display ??
+      forecastSummary?.anchor_close_display,
+  )
+  if (expectedAnchorClose !== null && !numbersMatch(payload.run.anchorClose, expectedAnchorClose)) {
+    throw new Error(
+      `dashboard anchorClose mismatch: dashboard anchorClose=${payload.run.anchorClose} current close display=${expectedAnchorClose}`,
+    )
+  }
+
+  if (payload.provenance.diagnosticsGeneratedAt !== diagnosticsGeneratedAt) {
+    throw new Error(
+      `dashboard diagnostics mismatch: dashboard diagnosticsGeneratedAt=${payload.provenance.diagnosticsGeneratedAt ?? 'null'} current diagnosticsGeneratedAt=${diagnosticsGeneratedAt}`,
+    )
+  }
+
+  const expectedPriceScale = resolveFiniteNumber(
+    prediction.effective_price_scale ??
+      prediction.price_scale ??
+      forecastSummary?.effective_price_scale ??
+      forecastSummary?.price_scale ??
+      manifest?.effective_price_scale ??
+      sourceMeta?.effective_price_scale ??
+      sourceMeta?.price_scale,
+  )
+  if (expectedPriceScale !== null && !numbersMatch(payload.run.effectivePriceScale, expectedPriceScale)) {
+    throw new Error(
+      `dashboard effectivePriceScale mismatch: dashboard effectivePriceScale=${payload.run.effectivePriceScale} current effective_price_scale=${expectedPriceScale}`,
+    )
+  }
+  if (
+    payload.run.priceScale !== undefined &&
+    !numbersMatch(payload.run.priceScale, payload.run.effectivePriceScale)
+  ) {
+    throw new Error(
+      `dashboard priceScale alias mismatch: dashboard priceScale=${payload.run.priceScale} effectivePriceScale=${payload.run.effectivePriceScale}`,
+    )
+  }
+}
+
+function resolvePositiveNumber(value, fallback) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback
+}
+
+function resolveFiniteNumber(value) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : null
+}
+
+function numbersMatch(left, right) {
+  return Math.abs(Number(left) - Number(right)) <= 1e-9
+}
+
+function scalePriceMap(valueByKey, priceScale) {
+  return Object.fromEntries(
+    Object.entries(valueByKey ?? {}).map(([key, value]) => [key, Number(value) / priceScale]),
+  )
+}
+
+function loadRequiredCurrentDiagnosticsSummary() {
+  const missingFiles = [
+    ['validation_summary.json', validationSummaryPath],
+    ['policy_summary.csv', policySummaryPath],
+    ['horizon_diag.csv', horizonDiagPath],
+  ].filter(([, filePath]) => !fs.existsSync(filePath))
+
+  if (missingFiles.length > 0) {
+    throw new Error(
+      `diagnostics unpublished for current artifact: missing ${missingFiles.map(([name]) => name).join(', ')} under ${currentRunDir}`,
+    )
+  }
+
+  const validationSummary = JSON.parse(fs.readFileSync(validationSummaryPath, 'utf8'))
+  if (
+    typeof validationSummary.generated_at_utc !== 'string' ||
+    validationSummary.generated_at_utc.trim().length === 0
+  ) {
+    throw new Error(
+      `diagnostics unpublished for current artifact: ${validationSummaryPath} is missing generated_at_utc`,
+    )
+  }
+
+  return validationSummary
+}
 
 function resolveCsvPath(targetDateJst) {
   if (process.env.SIGNAL_CASCADE_CSV_PATH) {
@@ -658,6 +811,7 @@ function buildHorizonRows({
   sigmaByHorizon,
   sigmaSqByHorizon,
   predictedCloseByHorizon,
+  priceScale,
 }) {
   return horizons.map((horizon) => {
     const muT = meanByHorizon[String(horizon)] ?? null
@@ -673,7 +827,7 @@ function buildHorizonRows({
     const lowerClose = predictedClose * Math.exp(-uncertainty)
     const upperClose = predictedClose * Math.exp(uncertainty)
     const actualBar = bars4h[anchorIndex + horizon] ?? null
-    const actualClose = actualBar ? actualBar.close : null
+    const actualClose = actualBar ? actualBar.close / priceScale : null
 
     return {
       horizon,
@@ -692,7 +846,7 @@ function buildHorizonRows({
   })
 }
 
-function buildChartRows({ rawRows, anchorTime, anchorBar, horizonRows, bars4h, anchorIndex }) {
+function buildChartRows({ rawRows, anchorTime, anchorClose, anchorBar, horizonRows, bars4h, anchorIndex, priceScale }) {
   const maxHorizon = horizonRows.reduce((currentMax, row) => Math.max(currentMax, row.horizon), 1)
   const historyWindowBars = Math.max(64, Math.min(160, maxHorizon * 16))
   const historyRows = rawRows
@@ -702,9 +856,9 @@ function buildChartRows({ rawRows, anchorTime, anchorBar, horizonRows, bars4h, a
       ts: row.ts,
       label: toIso(row.ts),
       phase: 'history',
-      close: row.close,
-      high: row.high,
-      low: row.low,
+      close: row.close / priceScale,
+      high: row.high / priceScale,
+      low: row.low / priceScale,
       forecastBase: null,
       forecastLower: null,
       forecastInnerLower: null,
@@ -722,11 +876,13 @@ function buildChartRows({ rawRows, anchorTime, anchorBar, horizonRows, bars4h, a
 
   const historyEndTs = historyRows.at(-1)?.ts ?? anchorBar.lastTs ?? anchorBar.ts
   const interpolatedForecast = interpolateForecast({
+    anchorClose,
     anchorBar,
     horizonRows,
     bars4h,
     anchorIndex,
     historyEndTs,
+    priceScale,
   })
   const forecastRows = interpolatedForecast.map((row) => ({
     ts: row.ts,
@@ -755,6 +911,7 @@ function buildChartRows({ rawRows, anchorTime, anchorBar, horizonRows, bars4h, a
     rawRows,
     startTs: historyRows[0]?.ts ?? anchorBar.ts,
     endTs: forecastRows.at(-1)?.ts ?? anchorBar.ts,
+    priceScale,
   })
 
   return {
@@ -764,15 +921,15 @@ function buildChartRows({ rawRows, anchorTime, anchorBar, horizonRows, bars4h, a
   }
 }
 
-function buildMicroRows({ rawRows, startTs, endTs }) {
+function buildMicroRows({ rawRows, startTs, endTs, priceScale }) {
   return rawRows
     .filter((row) => row.ts >= startTs && row.ts <= endTs)
     .map((row) => ({
       ts: row.ts,
-      open: row.open,
-      high: row.high,
-      low: row.low,
-      close: row.close,
+      open: row.open / priceScale,
+      high: row.high / priceScale,
+      low: row.low / priceScale,
+      close: row.close / priceScale,
     }))
 }
 
@@ -789,7 +946,7 @@ function calculateVisiblePriceDomain(rows) {
   return [Math.floor(min - pad), Math.ceil(max + pad)]
 }
 
-function interpolateForecast({ anchorBar, horizonRows, bars4h, anchorIndex, historyEndTs }) {
+function interpolateForecast({ anchorClose, horizonRows, bars4h, anchorIndex, historyEndTs, priceScale }) {
   const horizonActuals = new Map(horizonRows.map((row) => [row.horizon, row.actualClose]))
   const points = [
     {
@@ -797,14 +954,14 @@ function interpolateForecast({ anchorBar, horizonRows, bars4h, anchorIndex, hist
       ts: historyEndTs,
       logBase: 0,
       sigma: 0,
-      actual: anchorBar.close,
+      actual: anchorClose,
     },
     ...horizonRows.map((row) => ({
       step: row.horizon,
       ts:
         bars4h[anchorIndex + row.horizon]?.lastTs ??
         historyEndTs + row.horizon * 4 * 60 * 60 * 1000,
-      logBase: Math.log(row.predictedClose / anchorBar.close),
+      logBase: Math.log(row.predictedClose / anchorClose),
       sigma: row.uncertainty,
       actual: row.actualClose,
     })),
@@ -823,13 +980,13 @@ function interpolateForecast({ anchorBar, horizonRows, bars4h, anchorIndex, hist
     const logBase = prev.logBase + (next.logBase - prev.logBase) * ratio
     const sigma = prev.sigma + (next.sigma - prev.sigma) * ratio
     const halfSigma = sigma * 0.5
-    const base = anchorBar.close * Math.exp(logBase)
+    const base = anchorClose * Math.exp(logBase)
     const lower = base * Math.exp(-sigma)
     const innerLower = base * Math.exp(-halfSigma)
     const innerUpper = base * Math.exp(halfSigma)
     const upper = base * Math.exp(sigma)
     const actualBar = bars4h[anchorIndex + step] ?? null
-    const actualPoint = horizonActuals.get(step) ?? actualBar?.close ?? null
+    const actualPoint = horizonActuals.get(step) ?? (actualBar ? actualBar.close / priceScale : null)
 
     rows.push({
       ts:
