@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import math
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 
 import torch
 
@@ -30,16 +30,22 @@ def predict_latest(
     examples: list[TrainingExample],
     config: TrainingConfig,
     previous_position: float = 0.0,
+    latest_example: TrainingExample | None = None,
 ) -> PredictionResult:
+    if not examples and latest_example is None:
+        raise ValueError("At least one training example is required for prediction.")
+
+    target_example = latest_example or examples[-1]
+    context_examples = [example for example in examples if example.anchor_time < target_example.anchor_time]
     previous_state, carried_previous_position = replay_recurrent_context(
         model=model,
-        examples=examples[:-1],
+        examples=context_examples,
         config=config,
         initial_previous_position=previous_position,
     )
     return predict_from_example(
         model=model,
-        example=examples[-1],
+        example=target_example,
         config=config,
         previous_position=carried_previous_position,
         previous_state=previous_state,
@@ -208,10 +214,12 @@ def build_forecast_summary_payload(
     config: TrainingConfig,
     validation_metrics: dict[str, object] | None = None,
     best_params: dict[str, object] | None = None,
+    generated_at_utc: str | None = None,
 ) -> dict[str, object]:
     price_scale = _resolve_price_scale(prediction.price_scale)
     anchor_close = float(prediction.current_close)
     anchor_close_display = _to_display_price(anchor_close, price_scale)
+    resolved_generated_at_utc = generated_at_utc or datetime.now(timezone.utc).isoformat()
     predicted_closes_raw = dict(prediction.predicted_closes)
     predicted_closes_display = {
         str(horizon): _to_display_price(float(value), price_scale)
@@ -223,6 +231,8 @@ def build_forecast_summary_payload(
     }
     return {
         "schema_version": FORECAST_SCHEMA_VERSION,
+        "generated_at": resolved_generated_at_utc,
+        "generated_at_utc": resolved_generated_at_utc,
         "predicted_close_semantics": "median_from_log_return",
         "anchor_time": prediction.anchor_time,
         "anchor_close": anchor_close,

@@ -142,6 +142,48 @@ class StatefulEvaluationTests(unittest.TestCase):
         self.assertAlmostEqual(prediction.expected_log_returns["1"], 0.51, places=6)
         self.assertEqual(prediction.inference_context_mode, "carry_on")
 
+    def test_predict_latest_can_target_latest_inference_anchor(self) -> None:
+        class _CarryAwareModel(torch.nn.Module):
+            def forward(self, main_sequences, overlay_sequences, state_features, previous_state=None):
+                batch_size = state_features.shape[0]
+                prior = 0.0 if previous_state is None else float(previous_state[0, 0].item())
+                forecast_mu = torch.tensor([[0.01 + prior]], dtype=torch.float32).repeat(batch_size, 1)
+                policy_mu = torch.tensor([[0.02]], dtype=torch.float32).repeat(batch_size, 1)
+                sigma = torch.tensor([[0.02]], dtype=torch.float32).repeat(batch_size, 1)
+                shape_posterior = torch.tensor(
+                    [[0.5, 0.2, 0.1, 0.1, 0.05, 0.05]],
+                    dtype=torch.float32,
+                ).repeat(batch_size, 1)
+                memory_state = torch.tensor([[0.5]], dtype=torch.float32).repeat(batch_size, 1)
+                return {
+                    "mu": forecast_mu,
+                    "sigma": sigma,
+                    "forecast_mu": forecast_mu,
+                    "forecast_sigma": sigma,
+                    "policy_mu": policy_mu,
+                    "policy_sigma": sigma,
+                    "tradeability_gate": torch.tensor([1.0], dtype=torch.float32).repeat(batch_size),
+                    "shape_entropy": torch.tensor([0.2], dtype=torch.float32).repeat(batch_size),
+                    "shape_posterior": shape_posterior,
+                    "shape_probs": shape_posterior,
+                    "memory_state": memory_state,
+                    "next_state": memory_state,
+                }
+
+        config = TrainingConfig(horizons=(1,))
+        examples = [_example(0, "asia|low|trend"), _example(1, "asia|low|trend")]
+        latest_example = _example(2, "asia|low|trend")
+        prediction = predict_latest(
+            _CarryAwareModel(),
+            examples,
+            config,
+            latest_example=latest_example,
+        )
+
+        self.assertEqual(prediction.anchor_time, latest_example.anchor_time.isoformat())
+        self.assertAlmostEqual(prediction.expected_log_returns["1"], 0.51, places=6)
+        self.assertEqual(prediction.inference_context_mode, "carry_on")
+
     def test_predict_from_example_marks_stateless_context_by_default(self) -> None:
         config = TrainingConfig(horizons=(1,))
         prediction = predict_from_example(_StaticPolicyModel(), _example(0, "asia|low|trend"), config)

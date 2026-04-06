@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import unittest
@@ -20,6 +20,10 @@ from signal_cascade_pytorch.bootstrap import (
     _resolve_diagnostics_output_dir,
 )
 from signal_cascade_pytorch.application.config import TrainingConfig
+from signal_cascade_pytorch.application.dataset_service import (
+    build_latest_inference_example_from_bars,
+    build_training_examples_from_bars,
+)
 from signal_cascade_pytorch.application.diagnostics_service import DIAGNOSTICS_SCHEMA_VERSION
 from signal_cascade_pytorch.application.inference_service import (
     FORECAST_SCHEMA_VERSION,
@@ -36,6 +40,9 @@ from signal_cascade_pytorch.domain.entities import (
     TIMEFRAME_FEATURE_NAMES,
     TRAINING_EXAMPLE_CONTRACT_VERSION,
 )
+from signal_cascade_pytorch.bootstrap import _build_model_from_example
+from signal_cascade_pytorch.infrastructure.persistence import save_checkpoint
+from signal_cascade_pytorch.interfaces.cli import build_parser
 
 
 def _prediction() -> PredictionResult:
@@ -60,6 +67,43 @@ def _prediction() -> PredictionResult:
         regime_id="asia|low|trend",
         price_scale=100.0,
     )
+
+
+def _build_csv_bars(*, start: datetime, count: int) -> list[OHLCVBar]:
+    bars: list[OHLCVBar] = []
+    for index in range(count):
+        timestamp = start + timedelta(minutes=30 * index)
+        open_price = 1800.0 + (0.2 * index)
+        close_price = open_price + (0.08 if index % 2 == 0 else -0.05)
+        bars.append(
+            OHLCVBar(
+                timestamp=timestamp,
+                open=open_price,
+                high=max(open_price, close_price) + 0.12,
+                low=min(open_price, close_price) - 0.12,
+                close=close_price,
+                volume=1000.0 + float(index % 17),
+            )
+        )
+    return bars
+
+
+def _write_csv_bars(path: Path, bars: list[OHLCVBar]) -> None:
+    rows = ["timestamp,open,high,low,close,volume"]
+    rows.extend(
+        ",".join(
+            (
+                bar.timestamp.isoformat(),
+                str(bar.open),
+                str(bar.high),
+                str(bar.low),
+                str(bar.close),
+                str(bar.volume),
+            )
+        )
+        for bar in bars
+    )
+    path.write_text("\n".join(rows) + "\n", encoding="utf-8")
 
 
 class ArtifactSchemaTests(unittest.TestCase):
@@ -437,8 +481,21 @@ class ArtifactSchemaTests(unittest.TestCase):
             self.assertTrue((current_dir / "marker.txt").exists())
             self.assertFalse((current_dir / "old-only.txt").exists())
             promoted_source = json.loads((current_dir / "source.json").read_text(encoding="utf-8"))
+            promoted_manifest = json.loads((current_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(promoted_source["artifact_kind"], "training_run")
             self.assertEqual(promoted_source["artifact_id"], "artifact-123")
+            self.assertEqual(promoted_manifest["schema_version"], 1)
+            self.assertEqual(promoted_manifest["artifact_kind"], "training_run")
+            self.assertEqual(promoted_manifest["artifact_id"], "artifact-123")
+            self.assertEqual(
+                promoted_manifest["generated_at_utc"],
+                "2026-04-06T04:40:00+00:00",
+            )
+            self.assertEqual(
+                promoted_manifest["generated_at_utc"],
+                promoted_manifest["generated_at"],
+            )
+            self.assertEqual(promoted_manifest["entrypoints"]["source"], "source.json")
             self.assertTrue((source_dir / "marker.txt").exists())
             source_source = json.loads((source_dir / "source.json").read_text(encoding="utf-8"))
             self.assertEqual(source_source["artifact_id"], "artifact-123")
@@ -591,8 +648,13 @@ class ArtifactSchemaTests(unittest.TestCase):
             archived_manifest = json.loads(
                 (Path(manifest["manifest_path"]).read_text(encoding="utf-8"))
             )
+            self.assertEqual(current_manifest["schema_version"], 1)
+            self.assertEqual(current_manifest["artifact_kind"], "training_run")
+            self.assertEqual(current_manifest["artifact_id"], source_payload["artifact_id"])
+            self.assertIsNone(current_manifest["parent_artifact_id"])
             self.assertEqual(current_manifest["generated_at_utc"], current_manifest["generated_at"])
             self.assertEqual(current_manifest["generated_at_utc"], source_payload["generated_at_utc"])
+            self.assertEqual(current_manifest["entrypoints"]["source"], "source.json")
             self.assertEqual(archived_manifest["generated_at_utc"], archived_manifest["generated_at"])
             for relative_path in (
                 "horizon_diag.csv",
@@ -601,6 +663,74 @@ class ArtifactSchemaTests(unittest.TestCase):
                 "validation_summary.json",
             ):
                 self.assertIn(relative_path, source_payload["sub_artifacts"])
+
+    def test_predict_cli_uses_latest_inference_anchor_for_live_csv(self) -> None:
+        bars = _build_csv_bars(
+            start=datetime(2026, 1, 5, 0, 0, tzinfo=timezone.utc),
+            count=512,
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "predict_artifact"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = Path(temp_dir) / "live_latest.csv"
+            _write_csv_bars(csv_path, bars)
+
+            config = TrainingConfig(
+                output_dir=str(output_dir),
+                horizons=(1,),
+                main_windows={"4h": 8, "1d": 3, "1w": 2},
+                overlay_windows={"1h": 8, "30m": 16},
+            )
+            examples = build_training_examples_from_bars(bars, config)
+            latest_example = build_latest_inference_example_from_bars(bars, config)
+            self.assertLess(examples[-1].anchor_time, latest_example.anchor_time)
+
+            model = _build_model_from_example(examples[0], config)
+            save_checkpoint(output_dir / "model.pt", model, config)
+            (output_dir / "config.json").write_text(
+                json.dumps(config.to_dict()),
+                encoding="utf-8",
+            )
+
+            parser = build_parser()
+            args = parser.parse_args(
+                [
+                    "predict",
+                    "--output-dir",
+                    str(output_dir),
+                    "--csv",
+                    str(csv_path),
+                ]
+            )
+            self.assertEqual(args.handler(args), 0)
+
+            prediction_payload = json.loads(
+                (output_dir / "prediction.json").read_text(encoding="utf-8")
+            )
+            forecast_payload = json.loads(
+                (output_dir / "forecast_summary.json").read_text(encoding="utf-8")
+            )
+
+            self.assertEqual(
+                prediction_payload["anchor_time"],
+                latest_example.anchor_time.isoformat(),
+            )
+            self.assertEqual(
+                forecast_payload["anchor_time"],
+                latest_example.anchor_time.isoformat(),
+            )
+            self.assertNotEqual(
+                prediction_payload["anchor_time"],
+                examples[-1].anchor_time.isoformat(),
+            )
+            self.assertEqual(prediction_payload["inference_context_mode"], "carry_on")
+            self.assertIsInstance(forecast_payload["generated_at_utc"], str)
+            self.assertTrue(forecast_payload["generated_at_utc"])
+            self.assertEqual(
+                forecast_payload["generated_at"],
+                forecast_payload["generated_at_utc"],
+            )
 
     def test_prediction_serializer_adds_schema_and_median_semantics(self) -> None:
         payload = serialize_prediction_result(_prediction())
@@ -621,9 +751,15 @@ class ArtifactSchemaTests(unittest.TestCase):
         prediction = _prediction()
         config = TrainingConfig(horizons=(1, 3))
         prediction_payload = serialize_prediction_result(prediction)
-        forecast_payload = build_forecast_summary_payload(prediction, config)
+        forecast_payload = build_forecast_summary_payload(
+            prediction,
+            config,
+            generated_at_utc="2026-04-06T10:00:00+00:00",
+        )
 
         self.assertEqual(forecast_payload["schema_version"], FORECAST_SCHEMA_VERSION)
+        self.assertEqual(forecast_payload["generated_at"], "2026-04-06T10:00:00+00:00")
+        self.assertEqual(forecast_payload["generated_at_utc"], "2026-04-06T10:00:00+00:00")
         self.assertIn("median_predicted_close", forecast_payload["forecast_rows"][0])
         self.assertIn("median_predicted_close_display", forecast_payload["forecast_rows"][0])
         self.assertIn("mu_t", forecast_payload["forecast_rows"][0])

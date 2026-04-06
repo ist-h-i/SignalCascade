@@ -10,8 +10,10 @@ from .artifact_provenance import (
     build_subartifact_lineage,
     materialize_artifact_source,
 )
+from .artifact_manifest import build_artifact_entrypoints, build_artifact_manifest
 from .config import TrainingConfig
 from .dataset_service import (
+    build_latest_inference_example_from_bars,
     build_training_examples_from_bars,
     limit_base_bars_to_lookback_days,
 )
@@ -91,6 +93,15 @@ def tune_latest_dataset(
         baseline_config,
         price_scale=price_scale,
     )
+    latest_inference_example = (
+        build_latest_inference_example_from_bars(
+            base_bars,
+            baseline_config,
+            price_scale=price_scale,
+        )
+        if len(base_bars) >= 512
+        else None
+    )
     inherited_parameters = _load_parameter_seed(artifact_root)
     inherited_parameters.update(tunable_overrides)
     candidate_parameters = _build_candidate_parameters(inherited_parameters)
@@ -103,7 +114,12 @@ def tune_latest_dataset(
         candidate_dir = ensure_directory(session_dir / candidate_name)
         config = TrainingConfig(seed=seed, output_dir=str(candidate_dir), **static_overrides, **parameters)
         model, summary = train_model(examples, config, candidate_dir)
-        prediction = predict_latest(model, examples, config)
+        prediction = predict_latest(
+            model,
+            examples,
+            config,
+            latest_example=latest_inference_example,
+        )
         _write_run_artifacts(
             output_dir=candidate_dir,
             model=model,
@@ -216,7 +232,6 @@ def tune_latest_dataset(
     }
     save_json(session_dir / "manifest.json", manifest)
     if accepted_result is not None:
-        save_json(current_dir / "manifest.json", manifest)
         save_json(
             artifact_root / "best_params.json",
             {
@@ -249,14 +264,33 @@ def tune_latest_dataset(
             current_dir,
             report_path=artifact_root.parent.parent / "report_signalcascade_xauusd.md",
         )
+        current_source_payload = build_artifact_source_payload(
+            materialize_artifact_source(source_payload, current_dir, base_bars=base_bars),
+            current_dir,
+            artifact_kind="training_run",
+            generated_at_utc=manifest["generated_at_utc"],
+            sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=True)),
+        )
         save_json(
             current_dir / "source.json",
-            build_artifact_source_payload(
-                materialize_artifact_source(source_payload, current_dir, base_bars=base_bars),
-                current_dir,
+            current_source_payload,
+        )
+        save_json(
+            current_dir / "manifest.json",
+            build_artifact_manifest(
                 artifact_kind="training_run",
+                artifact_id=str(current_source_payload["artifact_id"]),
+                parent_artifact_id=(
+                    None
+                    if current_source_payload.get("parent_artifact_id") is None
+                    else str(current_source_payload["parent_artifact_id"])
+                ),
                 generated_at_utc=manifest["generated_at_utc"],
-                sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=True)),
+                source_payload=current_source_payload,
+                entrypoints=build_artifact_entrypoints(
+                    current_source_payload,
+                    include_model=True,
+                ),
             ),
         )
     return manifest

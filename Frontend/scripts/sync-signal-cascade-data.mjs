@@ -40,6 +40,7 @@ const manifest = fs.existsSync(manifestPath)
   : null
 const validationSummary = loadRequiredCurrentDiagnosticsSummary()
 const diagnosticsGeneratedAt = validationSummary.generated_at_utc
+const manifestGeneratedAt = resolveManifestGeneratedAt(manifest)
 const allCsvRows = parseCsv(fs.readFileSync(csvPath, 'utf8'))
 const requiredSourceRows = resolveRequiredSourceRows(metrics, allCsvRows.length)
 const csvRows = allCsvRows.slice(-requiredSourceRows)
@@ -140,7 +141,7 @@ const operatingPoint = {
 }
 const freshness = buildFreshness({
   dashboardGeneratedAt: new Date().toISOString(),
-  manifestGeneratedAt: manifest?.generated_at ?? null,
+  manifestGeneratedAt,
   diagnosticsGeneratedAt,
   forecastGeneratedAt: forecastSummary?.generated_at_utc ?? null,
   predictionAnchorTime: prediction.anchor_time ?? null,
@@ -171,7 +172,7 @@ const payload = {
     gitDirty: artifactProvenance.gitDirty,
     start: toIso(csvRows[0].ts),
     end: toIso(csvRows[csvRows.length - 1].ts),
-    manifestGeneratedAt: manifest?.generated_at ?? null,
+    manifestGeneratedAt,
     diagnosticsGeneratedAt,
     forecastGeneratedAt: forecastSummary?.generated_at_utc ?? null,
     predictionAnchorTime: prediction.anchor_time ?? null,
@@ -343,6 +344,10 @@ function assertDashboardLineage({ payload, sourceMeta, manifest, prediction, for
 function resolvePositiveNumber(value, fallback) {
   const numeric = Number(value)
   return Number.isFinite(numeric) && numeric > 0 ? numeric : fallback
+}
+
+function resolveManifestGeneratedAt(manifest) {
+  return toNonEmptyString(manifest?.generated_at_utc) ?? toNonEmptyString(manifest?.generated_at)
 }
 
 function resolveFiniteNumber(value) {
@@ -555,6 +560,10 @@ function refreshLatestCsv(targetDateJst) {
 
   console.log(download.stdout.trim())
   return liveCsvPath
+}
+
+function toNonEmptyString(value) {
+  return typeof value === 'string' && value.trim().length > 0 ? value : null
 }
 
 function buildFreshness({

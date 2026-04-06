@@ -12,9 +12,12 @@ from .application.artifact_provenance import (
     build_subartifact_lineage,
     materialize_artifact_source,
 )
+from .application.artifact_manifest import build_artifact_entrypoints, build_artifact_manifest
 from .application.config import TrainingConfig
 from .application.diagnostics_service import export_review_diagnostics
 from .application.dataset_service import (
+    build_latest_inference_example,
+    build_latest_inference_example_from_bars,
     build_training_examples,
     build_training_examples_from_bars,
     limit_base_bars_to_lookback_days,
@@ -41,9 +44,6 @@ from .infrastructure.data.synthetic_source import SyntheticMarketDataSource
 from .infrastructure.ml.model import SignalCascadeModel
 from .infrastructure.persistence import ensure_directory, load_checkpoint, load_json, save_json
 
-ARTIFACT_MANIFEST_SCHEMA_VERSION = 1
-
-
 def train_command(args) -> int:
     _emit_cli_compat_warnings(args)
     config = _build_config(args)
@@ -61,8 +61,22 @@ def train_command(args) -> int:
         base_bars = limit_base_bars_to_lookback_days(base_bars, source_payload.get("lookback_days"))
         source_rows_used = len(base_bars)
         examples = build_training_examples_from_bars(base_bars, config, price_scale=price_scale)
+        latest_inference_example = (
+            build_latest_inference_example_from_bars(
+                base_bars,
+                config,
+                price_scale=price_scale,
+            )
+            if len(base_bars) >= 512
+            else None
+        )
     else:
         examples = build_training_examples(source, config, price_scale=price_scale)
+        latest_inference_example = build_latest_inference_example(
+            source,
+            config,
+            price_scale=price_scale,
+        )
     artifact_source_payload = materialize_artifact_source(
         source_payload,
         output_dir,
@@ -76,6 +90,7 @@ def train_command(args) -> int:
         examples=examples,
         config=config,
         previous_position=float(getattr(args, "previous_position", 0.0) or 0.0),
+        latest_example=latest_inference_example,
     )
 
     summary["sample_count"] = len(examples)
@@ -169,8 +184,22 @@ def predict_command(args) -> int:
         base_bars = source.load_bars()
         base_bars = limit_base_bars_to_lookback_days(base_bars, source_payload.get("lookback_days"))
         examples = build_training_examples_from_bars(base_bars, config, price_scale=price_scale)
+        latest_inference_example = (
+            build_latest_inference_example_from_bars(
+                base_bars,
+                config,
+                price_scale=price_scale,
+            )
+            if len(base_bars) >= 512
+            else None
+        )
     else:
         examples = build_training_examples(source, config, price_scale=price_scale)
+        latest_inference_example = build_latest_inference_example(
+            source,
+            config,
+            price_scale=price_scale,
+        )
 
     model = _build_model_from_example(examples[0], config)
     load_checkpoint(output_dir / "model.pt", model)
@@ -179,6 +208,7 @@ def predict_command(args) -> int:
         examples=examples,
         config=config,
         previous_position=float(getattr(args, "previous_position", 0.0) or 0.0),
+        latest_example=latest_inference_example,
     )
     save_json(output_dir / "config.json", config.to_dict())
     save_json(output_dir / "prediction.json", serialize_prediction_result(prediction))
@@ -512,53 +542,48 @@ def _promote_training_run_to_current(
     if backup_dir.exists():
         shutil.rmtree(backup_dir, ignore_errors=True)
     shutil.rmtree(backup_root, ignore_errors=True)
+    if all((current_dir / name).exists() for name in ("config.json", "metrics.json", "prediction.json")):
+        generate_research_report(current_dir)
+    _write_current_artifact_manifest(current_dir)
     return current_dir
 
 
-def _build_artifact_entrypoints(
-    source_payload: dict[str, object],
-    *,
-    include_model: bool = False,
-) -> dict[str, str]:
-    entrypoints = {
-        "analysis": "analysis.json",
-        "config": "config.json",
-        "forecast_summary": "forecast_summary.json",
-        "horizon_diagnostics": "horizon_diag.csv",
-        "metrics": "metrics.json",
-        "policy_summary": "policy_summary.csv",
-        "prediction": "prediction.json",
-        "research_report": "research_report.md",
-        "source": "source.json",
-        "validation_rows": "validation_rows.csv",
-        "validation_summary": "validation_summary.json",
-    }
-    if include_model:
-        entrypoints["model"] = "model.pt"
-    if source_payload["kind"] == "csv":
-        entrypoints["data_snapshot"] = "data_snapshot.csv"
-    return dict(sorted(entrypoints.items()))
+def _write_current_artifact_manifest(current_dir: Path) -> None:
+    source_payload = load_json(current_dir / "source.json")
+    if not isinstance(source_payload, dict):
+        raise FileNotFoundError(f"current artifact is missing source.json: {current_dir / 'source.json'}")
+    generated_at_utc = source_payload.get("generated_at_utc")
+    if not isinstance(generated_at_utc, str) or not generated_at_utc.strip():
+        diagnostics_summary = load_required_diagnostics_summary(current_dir)
+        generated_at_utc = str(diagnostics_summary["generated_at_utc"])
+    artifact_id = source_payload.get("artifact_id")
+    if not isinstance(artifact_id, str) or not artifact_id.strip():
+        raise ValueError(f"current artifact is missing source artifact_id: {current_dir / 'source.json'}")
+    artifact_kind = source_payload.get("artifact_kind")
+    if not isinstance(artifact_kind, str) or not artifact_kind.strip():
+        raise ValueError(f"current artifact is missing source artifact_kind: {current_dir / 'source.json'}")
+    parent_artifact_id = source_payload.get("parent_artifact_id")
+    resolved_parent_artifact_id = (
+        str(parent_artifact_id) if parent_artifact_id is not None else None
+    )
+    save_json(
+        current_dir / "manifest.json",
+        build_artifact_manifest(
+            artifact_kind=artifact_kind,
+            artifact_id=artifact_id,
+            parent_artifact_id=resolved_parent_artifact_id,
+            generated_at_utc=generated_at_utc,
+            source_payload=source_payload,
+            entrypoints=build_artifact_entrypoints(
+                source_payload,
+                include_model=(current_dir / "model.pt").exists(),
+            ),
+        ),
+    )
 
 
-def _build_artifact_manifest(
-    *,
-    artifact_kind: str,
-    artifact_id: str,
-    parent_artifact_id: str | None,
-    generated_at_utc: str,
-    source_payload: dict[str, object],
-    entrypoints: dict[str, str],
-) -> dict[str, object]:
-    return {
-        "schema_version": ARTIFACT_MANIFEST_SCHEMA_VERSION,
-        "artifact_kind": artifact_kind,
-        "artifact_id": artifact_id,
-        "parent_artifact_id": parent_artifact_id,
-        "generated_at": generated_at_utc,
-        "generated_at_utc": generated_at_utc,
-        **price_scale_manifest_fields(source_payload),
-        "entrypoints": dict(sorted(entrypoints.items())),
-    }
+_build_artifact_entrypoints = build_artifact_entrypoints
+_build_artifact_manifest = build_artifact_manifest
 
 
 def _build_config(args) -> TrainingConfig:

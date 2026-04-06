@@ -30,6 +30,51 @@ if (diagnosticsGeneratedAt === null) {
   throw new Error('dashboard-data provenance.diagnosticsGeneratedAt must be present')
 }
 
+const manifestGeneratedAt = toNonEmptyString(manifest.generated_at)
+if (manifestGeneratedAt === null) {
+  throw new Error(`current manifest.json is missing generated_at: ${manifestPath}`)
+}
+
+const manifestGeneratedAtUtc = toNonEmptyString(manifest.generated_at_utc)
+if (manifestGeneratedAtUtc === null) {
+  throw new Error(`current manifest.json is missing generated_at_utc: ${manifestPath}`)
+}
+if (manifestGeneratedAtUtc !== manifestGeneratedAt) {
+  throw new Error(
+    `current manifest.json timestamp mismatch: generated_at_utc=${manifestGeneratedAtUtc} generated_at=${manifestGeneratedAt}`,
+  )
+}
+
+const sourceGeneratedAtUtc = toNonEmptyString(sourceMeta.generated_at_utc)
+if (sourceGeneratedAtUtc === null) {
+  throw new Error(`current source.json is missing generated_at_utc: ${sourceMetaPath}`)
+}
+if (sourceGeneratedAtUtc !== manifestGeneratedAtUtc) {
+  throw new Error(
+    `current artifact timestamp mismatch: manifest generated_at_utc=${manifestGeneratedAtUtc} source generated_at_utc=${sourceGeneratedAtUtc}`,
+  )
+}
+
+const dashboardManifestGeneratedAt = toNonEmptyString(dashboardData.provenance?.manifestGeneratedAt)
+if (dashboardManifestGeneratedAt === null) {
+  throw new Error('dashboard-data provenance.manifestGeneratedAt must be present')
+}
+if (dashboardManifestGeneratedAt !== manifestGeneratedAtUtc) {
+  throw new Error(
+    `dashboard-data manifestGeneratedAt mismatch: dashboard=${dashboardManifestGeneratedAt} current=${manifestGeneratedAtUtc}`,
+  )
+}
+
+const freshnessManifestGeneratedAt = toNonEmptyString(dashboardData.provenance?.freshness?.manifestGeneratedAt)
+if (freshnessManifestGeneratedAt === null) {
+  throw new Error('dashboard-data provenance.freshness.manifestGeneratedAt must be present')
+}
+if (freshnessManifestGeneratedAt !== manifestGeneratedAtUtc) {
+  throw new Error(
+    `dashboard-data freshness.manifestGeneratedAt mismatch: dashboard=${freshnessManifestGeneratedAt} current=${manifestGeneratedAtUtc}`,
+  )
+}
+
 const expectedArtifactId = toNonEmptyString(sourceMeta.artifact_id)
 if (expectedArtifactId === null) {
   throw new Error(`current source.json is missing artifact_id: ${sourceMetaPath}`)
