@@ -8,6 +8,7 @@
     "sync:data": "node ./scripts/sync-signal-cascade-data.mjs",
     "sync:data:fast": "SIGNAL_CASCADE_DISABLE_TRAINING=1 node ./scripts/sync-signal-cascade-data.mjs",
     "test:data-contract": "node --experimental-strip-types --test ./src/dashboard/data-contract.test.ts",
+    "test:data-publish": "node --test ./scripts/dashboard-publish-regression.test.mjs",
     "dev": "vite",
     "dev:dashboard": "npm run sync:data:fast && vite --host 127.0.0.1",
     "build": "npm run check:data:contract && npm run test:data-contract && tsc -b && vite build",
