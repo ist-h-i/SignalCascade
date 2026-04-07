@@ -56,12 +56,22 @@ def apply_selection_policy(
     previous_position: float = 0.0,
     tradeability_gate: float = 1.0,
     shape_probs: Sequence[float] | None = None,
-    cost_multiplier: float = 1.0,
-    gamma_multiplier: float = 1.0,
+    cost_multiplier: float | None = None,
+    gamma_multiplier: float | None = None,
     **_: object,
 ) -> dict[str, object]:
     if config is None:
         raise ValueError("TrainingConfig is required.")
+    resolved_cost_multiplier = (
+        float(config.policy_cost_multiplier)
+        if cost_multiplier is None
+        else float(cost_multiplier)
+    )
+    resolved_gamma_multiplier = (
+        float(config.policy_gamma_multiplier)
+        if gamma_multiplier is None
+        else float(gamma_multiplier)
+    )
     rows = build_exact_policy_rows(
         mean=mean,
         sigma=sigma,
@@ -69,8 +79,8 @@ def apply_selection_policy(
         tradeability_gate=tradeability_gate,
         previous_position=previous_position,
         config=config,
-        cost_multiplier=cost_multiplier,
-        gamma_multiplier=gamma_multiplier,
+        cost_multiplier=resolved_cost_multiplier,
+        gamma_multiplier=resolved_gamma_multiplier,
     )
     selected_row = max(
         rows,
@@ -169,9 +179,19 @@ def build_exact_policy_rows(
     tradeability_gate: float,
     previous_position: float,
     config: TrainingConfig,
-    cost_multiplier: float = 1.0,
-    gamma_multiplier: float = 1.0,
+    cost_multiplier: float | None = None,
+    gamma_multiplier: float | None = None,
 ) -> list[dict[str, object]]:
+    resolved_cost_multiplier = (
+        float(config.policy_cost_multiplier)
+        if cost_multiplier is None
+        else float(cost_multiplier)
+    )
+    resolved_gamma_multiplier = (
+        float(config.policy_gamma_multiplier)
+        if gamma_multiplier is None
+        else float(gamma_multiplier)
+    )
     path_terms = build_policy_path_terms(
         mean=torch.tensor([list(mean)], dtype=torch.float32),
         sigma=torch.tensor([list(sigma)], dtype=torch.float32),
@@ -179,8 +199,8 @@ def build_exact_policy_rows(
         tradeability_gate=torch.tensor([float(tradeability_gate)], dtype=torch.float32),
         previous_position=torch.tensor([float(previous_position)], dtype=torch.float32),
         config=config,
-        cost_multiplier=cost_multiplier,
-        gamma_multiplier=gamma_multiplier,
+        cost_multiplier=resolved_cost_multiplier,
+        gamma_multiplier=resolved_gamma_multiplier,
     )
     rows: list[dict[str, object]] = []
     for horizon_index, horizon in enumerate(config.horizons):
@@ -203,12 +223,12 @@ def build_exact_policy_rows(
         utility = policy_utility(
             position=position,
             previous_position=previous_position,
-            gated_mean=mu_t_tilde,
-            sigma=sigma_value,
-            cost=cost_value,
-            config=config,
-            gamma_multiplier=gamma_multiplier,
-        )
+                gated_mean=mu_t_tilde,
+                sigma=sigma_value,
+                cost=cost_value,
+                config=config,
+                gamma_multiplier=resolved_gamma_multiplier,
+            )
         rows.append(
             {
                 "horizon": int(horizon),
@@ -279,8 +299,8 @@ def smooth_policy_distribution(
     tradeability_gate: torch.Tensor,
     previous_position: torch.Tensor,
     config: TrainingConfig,
-    cost_multiplier: float = 1.0,
-    gamma_multiplier: float = 1.0,
+    cost_multiplier: float | None = None,
+    gamma_multiplier: float | None = None,
 ) -> dict[str, torch.Tensor]:
     path_terms = build_policy_path_terms(
         mean=mean,
@@ -364,15 +384,25 @@ def build_policy_path_terms(
     tradeability_gate: torch.Tensor,
     previous_position: torch.Tensor,
     config: TrainingConfig,
-    cost_multiplier: float = 1.0,
-    gamma_multiplier: float = 1.0,
+    cost_multiplier: float | None = None,
+    gamma_multiplier: float | None = None,
 ) -> dict[str, torch.Tensor]:
-    effective_gamma_value = float(config.risk_aversion_gamma) * float(gamma_multiplier)
+    resolved_cost_multiplier = (
+        float(config.policy_cost_multiplier)
+        if cost_multiplier is None
+        else float(cost_multiplier)
+    )
+    resolved_gamma_multiplier = (
+        float(config.policy_gamma_multiplier)
+        if gamma_multiplier is None
+        else float(gamma_multiplier)
+    )
+    effective_gamma_value = float(config.risk_aversion_gamma) * resolved_gamma_multiplier
     sigma_sq = sigma.pow(2).clamp_min(config.min_policy_sigma**2)
     previous_position_matrix = previous_position.unsqueeze(-1).expand_as(mean)
     g_t = tradeability_gate.unsqueeze(-1).expand_as(mean)
     mu_t_tilde = g_t * mean
-    scaled_costs = costs * float(cost_multiplier)
+    scaled_costs = costs * resolved_cost_multiplier
     margin = mu_t_tilde - (effective_gamma_value * sigma_sq * previous_position_matrix)
     effective_gamma = torch.full_like(mean, effective_gamma_value)
     return {
@@ -395,10 +425,15 @@ def policy_utility(
     sigma: float,
     cost: float,
     config: TrainingConfig,
-    gamma_multiplier: float = 1.0,
+    gamma_multiplier: float | None = None,
 ) -> float:
     sigma_sq = max(float(sigma) ** 2, config.min_policy_sigma**2)
-    effective_gamma = float(config.risk_aversion_gamma) * float(gamma_multiplier)
+    resolved_gamma_multiplier = (
+        float(config.policy_gamma_multiplier)
+        if gamma_multiplier is None
+        else float(gamma_multiplier)
+    )
+    effective_gamma = float(config.risk_aversion_gamma) * resolved_gamma_multiplier
     return (
         (float(gated_mean) * float(position))
         - (0.5 * effective_gamma * sigma_sq * (float(position) ** 2))

@@ -12,8 +12,14 @@ from ..domain.entities import (
 from ..domain.timeframes import HORIZONS
 
 
-CONFIG_SCHEMA_VERSION = 4
+CONFIG_SCHEMA_VERSION = 7
 LEGACY_CONFIG_SCHEMA_VERSION = 1
+CHECKPOINT_SELECTION_METRICS = (
+    "hybrid_exact",
+    "exact_log_wealth",
+    "exact_log_wealth_minus_lambda_cvar",
+    "validation_total",
+)
 
 
 def _default_main_windows() -> dict[str, int]:
@@ -66,6 +72,14 @@ def _default_policy_sweep_min_policy_sigmas() -> tuple[float, ...]:
     return (5e-5, 1e-4, 2e-4)
 
 
+def _default_policy_sweep_q_max_values() -> tuple[float, ...]:
+    return (1.0,)
+
+
+def _default_policy_sweep_cvar_weights() -> tuple[float, ...]:
+    return (0.20,)
+
+
 def _default_policy_sweep_state_reset_modes() -> tuple[str, ...]:
     return ("carry_on", "reset_each_session_or_window")
 
@@ -88,6 +102,8 @@ class TrainingConfig:
     state_dim: int = 24
     shape_classes: int = 6
     dropout: float = 0.1
+    tie_policy_to_forecast_head: bool = False
+    disable_overlay_branch: bool = False
     train_ratio: float = 0.8
     base_cost: float = 6e-4
     delta_multiplier: float = 1.35
@@ -103,6 +119,8 @@ class TrainingConfig:
     cvar_weight: float = 0.20
     cvar_alpha: float = 0.10
     risk_aversion_gamma: float = 3.0
+    policy_cost_multiplier: float = 1.0
+    policy_gamma_multiplier: float = 1.0
     q_max: float = 1.0
     policy_abs_epsilon: float = 1e-4
     policy_smoothing_beta: float = 15.0
@@ -126,10 +144,16 @@ class TrainingConfig:
     policy_sweep_min_policy_sigmas: tuple[float, ...] = field(
         default_factory=_default_policy_sweep_min_policy_sigmas
     )
+    policy_sweep_q_max_values: tuple[float, ...] = field(
+        default_factory=_default_policy_sweep_q_max_values
+    )
+    policy_sweep_cvar_weights: tuple[float, ...] = field(
+        default_factory=_default_policy_sweep_cvar_weights
+    )
     policy_sweep_state_reset_modes: tuple[str, ...] = field(
         default_factory=_default_policy_sweep_state_reset_modes
     )
-    checkpoint_selection_metric: str = "hybrid_exact"
+    checkpoint_selection_metric: str = "exact_log_wealth_minus_lambda_cvar"
     checkpoint_selection_forecast_weight: float = 1.0
     checkpoint_selection_calibration_weight: float = 0.5
     checkpoint_selection_position_gap_weight: float = 0.25
@@ -174,6 +198,8 @@ class TrainingConfig:
             "state_dim": self.state_dim,
             "shape_classes": self.shape_classes,
             "dropout": self.dropout,
+            "tie_policy_to_forecast_head": self.tie_policy_to_forecast_head,
+            "disable_overlay_branch": self.disable_overlay_branch,
             "train_ratio": self.train_ratio,
             "base_cost": self.base_cost,
             "delta_multiplier": self.delta_multiplier,
@@ -189,6 +215,8 @@ class TrainingConfig:
             "cvar_weight": self.cvar_weight,
             "cvar_alpha": self.cvar_alpha,
             "risk_aversion_gamma": self.risk_aversion_gamma,
+            "policy_cost_multiplier": self.policy_cost_multiplier,
+            "policy_gamma_multiplier": self.policy_gamma_multiplier,
             "q_max": self.q_max,
             "policy_abs_epsilon": self.policy_abs_epsilon,
             "policy_smoothing_beta": self.policy_smoothing_beta,
@@ -204,6 +232,8 @@ class TrainingConfig:
             "policy_sweep_cost_multipliers": list(self.policy_sweep_cost_multipliers),
             "policy_sweep_gamma_multipliers": list(self.policy_sweep_gamma_multipliers),
             "policy_sweep_min_policy_sigmas": list(self.policy_sweep_min_policy_sigmas),
+            "policy_sweep_q_max_values": list(self.policy_sweep_q_max_values),
+            "policy_sweep_cvar_weights": list(self.policy_sweep_cvar_weights),
             "policy_sweep_state_reset_modes": list(self.policy_sweep_state_reset_modes),
             "checkpoint_selection_metric": self.checkpoint_selection_metric,
             "checkpoint_selection_forecast_weight": self.checkpoint_selection_forecast_weight,
@@ -247,11 +277,25 @@ class TrainingConfig:
             policy_sweep_min_policy_sigmas = tuple(
                 float(value) for value in payload["policy_sweep_min_policy_sigmas"]
             )
+            policy_sweep_q_max_values = tuple(
+                float(value)
+                for value in payload.get(
+                    "policy_sweep_q_max_values",
+                    [payload.get("q_max", 1.0)],
+                )
+            )
+            policy_sweep_cvar_weights = tuple(
+                float(value)
+                for value in payload.get(
+                    "policy_sweep_cvar_weights",
+                    [payload.get("cvar_weight", 0.20)],
+                )
+            )
             policy_sweep_state_reset_modes = tuple(
                 str(value) for value in payload["policy_sweep_state_reset_modes"]
             )
             checkpoint_selection_metric = str(
-                payload.get("checkpoint_selection_metric", "hybrid_exact")
+                payload.get("checkpoint_selection_metric", "exact_log_wealth_minus_lambda_cvar")
             )
             checkpoint_selection_forecast_weight = float(
                 payload.get("checkpoint_selection_forecast_weight", 1.0)
@@ -297,6 +341,20 @@ class TrainingConfig:
                     [payload.get("min_policy_sigma", 1e-4)],
                 )
             )
+            policy_sweep_q_max_values = tuple(
+                float(value)
+                for value in payload.get(
+                    "policy_sweep_q_max_values",
+                    [payload.get("q_max", 1.0)],
+                )
+            )
+            policy_sweep_cvar_weights = tuple(
+                float(value)
+                for value in payload.get(
+                    "policy_sweep_cvar_weights",
+                    [payload.get("cvar_weight", 0.20)],
+                )
+            )
             policy_sweep_state_reset_modes = tuple(
                 str(value)
                 for value in payload.get(
@@ -305,7 +363,7 @@ class TrainingConfig:
                 )
             )
             checkpoint_selection_metric = str(
-                payload.get("checkpoint_selection_metric", "hybrid_exact")
+                payload.get("checkpoint_selection_metric", "exact_log_wealth_minus_lambda_cvar")
             )
             checkpoint_selection_forecast_weight = float(
                 payload.get("checkpoint_selection_forecast_weight", 1.0)
@@ -357,6 +415,8 @@ class TrainingConfig:
             state_dim=int(payload.get("state_dim", 24)),
             shape_classes=int(payload.get("shape_classes", 6)),
             dropout=float(payload["dropout"]),
+            tie_policy_to_forecast_head=bool(payload.get("tie_policy_to_forecast_head", False)),
+            disable_overlay_branch=bool(payload.get("disable_overlay_branch", False)),
             train_ratio=float(payload["train_ratio"]),
             base_cost=float(payload.get("base_cost", 6e-4)),
             delta_multiplier=float(payload.get("delta_multiplier", 1.35)),
@@ -372,6 +432,8 @@ class TrainingConfig:
             cvar_weight=float(payload.get("cvar_weight", 0.20)),
             cvar_alpha=float(payload.get("cvar_alpha", 0.10)),
             risk_aversion_gamma=float(payload.get("risk_aversion_gamma", 3.0)),
+            policy_cost_multiplier=float(payload.get("policy_cost_multiplier", 1.0)),
+            policy_gamma_multiplier=float(payload.get("policy_gamma_multiplier", 1.0)),
             q_max=float(payload.get("q_max", 1.0)),
             policy_abs_epsilon=float(payload.get("policy_abs_epsilon", 1e-4)),
             policy_smoothing_beta=float(payload.get("policy_smoothing_beta", 15.0)),
@@ -387,6 +449,8 @@ class TrainingConfig:
             policy_sweep_cost_multipliers=policy_sweep_cost_multipliers,
             policy_sweep_gamma_multipliers=policy_sweep_gamma_multipliers,
             policy_sweep_min_policy_sigmas=policy_sweep_min_policy_sigmas,
+            policy_sweep_q_max_values=policy_sweep_q_max_values,
+            policy_sweep_cvar_weights=policy_sweep_cvar_weights,
             policy_sweep_state_reset_modes=policy_sweep_state_reset_modes,
             checkpoint_selection_metric=checkpoint_selection_metric,
             checkpoint_selection_forecast_weight=checkpoint_selection_forecast_weight,

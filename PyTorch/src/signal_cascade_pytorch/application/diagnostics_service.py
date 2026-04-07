@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import csv
+from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
@@ -21,9 +22,13 @@ from ..domain.entities import OHLCVBar, TrainingExample
 from ..infrastructure.ml.model import SignalCascadeModel
 from ..infrastructure.persistence import save_json
 
-DIAGNOSTICS_SCHEMA_VERSION = 6
-POLICY_SELECTION_RULE_VERSION = 2
-POLICY_SELECTION_BASIS = "pareto_rank_then_average_log_wealth_cvar_tail_loss_turnover_row_key"
+DIAGNOSTICS_SCHEMA_VERSION = 10
+POLICY_SELECTION_RULE_VERSION = 4
+POLICY_SELECTION_OBJECTIVE_FLOOR_RATIO = 0.7
+POLICY_SELECTION_BASIS = (
+    "pareto_rank_then_near_best_blocked_objective_mean_turnover_mean_"
+    "blocked_objective_mean_average_log_wealth_mean_cvar_tail_loss_mean_row_key"
+)
 
 
 def export_review_diagnostics(
@@ -31,6 +36,7 @@ def export_review_diagnostics(
     model: SignalCascadeModel,
     examples: Sequence[TrainingExample],
     config: TrainingConfig,
+    checkpoint_audit: dict[str, object] | None = None,
     selection_policy: dict[str, object] | None = None,
     threshold_resolution: dict[str, object] | None = None,
     source_payload: dict[str, object] | None = None,
@@ -54,6 +60,15 @@ def export_review_diagnostics(
             )
             for mode in config.diagnostic_state_reset_modes
         }
+        if model is not None
+        else {}
+    )
+    blocked_walk_forward_evaluation = (
+        _build_blocked_walk_forward_evaluation(
+            model=model,
+            validation_examples=validation_examples,
+            config=config,
+        )
         if model is not None
         else {}
     )
@@ -82,6 +97,7 @@ def export_review_diagnostics(
         "generated_at_utc": datetime.now(timezone.utc).isoformat(),
         "policy_mode": "shape_aware_profit_maximization",
         "primary_state_reset_mode": config.evaluation_state_reset_mode,
+        "checkpoint_audit": dict(checkpoint_audit or {}),
         "dataset": {
             "sample_count": len(examples),
             "validation_sample_count": len(validation_examples),
@@ -93,8 +109,12 @@ def export_review_diagnostics(
         "validation": diagnostics["summary"],
         "state_vector_summary": diagnostics.get("state_vector_summary", {}),
         "stateful_evaluation": stateful_evaluation,
+        "blocked_walk_forward_evaluation": blocked_walk_forward_evaluation,
         "policy_calibration_sweep": policy_calibration_sweep,
-        "policy_calibration_summary": _summarize_policy_calibration_sweep(policy_calibration_sweep),
+        "policy_calibration_summary": _summarize_policy_calibration_sweep(
+            policy_calibration_sweep,
+            config=config,
+        ),
         "paths": {
             "validation_rows_csv": str(validation_rows_path),
             "policy_summary_csv": str(policy_summary_path),
@@ -352,54 +372,289 @@ def build_validation_snapshots(
     return diagnostics["policy_summary"]
 
 
+def _build_blocked_walk_forward_evaluation(
+    *,
+    model: SignalCascadeModel,
+    validation_examples: Sequence[TrainingExample],
+    config: TrainingConfig,
+) -> dict[str, object]:
+    folds = _split_validation_examples_into_contiguous_folds(
+        validation_examples,
+        fold_count=config.walk_forward_folds,
+    )
+    if not folds:
+        return {}
+
+    state_reset_modes: dict[str, dict[str, object]] = {}
+    best_mode_by_mean = None
+    best_mode_mean = None
+    for mode in config.diagnostic_state_reset_modes:
+        fold_rows: list[dict[str, object]] = []
+        for fold_index, fold_examples in enumerate(folds, start=1):
+            metrics = evaluate_model(
+                model=model,
+                examples=fold_examples,
+                config=config,
+                state_reset_mode=mode,
+            )
+            fold_rows.append(
+                {
+                    "fold_index": fold_index,
+                    "sample_count": len(fold_examples),
+                    "start_timestamp": fold_examples[0].anchor_time.isoformat(),
+                    "end_timestamp": fold_examples[-1].anchor_time.isoformat(),
+                    "average_log_wealth": float(metrics["average_log_wealth"]),
+                    "cvar_tail_loss": float(metrics["cvar_tail_loss"]),
+                    "turnover": float(metrics["turnover"]),
+                    "directional_accuracy": float(metrics["directional_accuracy"]),
+                    "exact_smooth_position_mae": float(metrics["exact_smooth_position_mae"]),
+                }
+            )
+        wealth_values = [float(row["average_log_wealth"]) for row in fold_rows]
+        turnover_values = [float(row["turnover"]) for row in fold_rows]
+        direction_values = [float(row["directional_accuracy"]) for row in fold_rows]
+        position_mae_values = [float(row["exact_smooth_position_mae"]) for row in fold_rows]
+        mode_summary = {
+            "fold_count": len(fold_rows),
+            "average_log_wealth_mean": sum(wealth_values) / max(len(wealth_values), 1),
+            "average_log_wealth_min": min(wealth_values, default=0.0),
+            "average_log_wealth_max": max(wealth_values, default=0.0),
+            "turnover_mean": sum(turnover_values) / max(len(turnover_values), 1),
+            "directional_accuracy_mean": sum(direction_values) / max(len(direction_values), 1),
+            "exact_smooth_position_mae_mean": sum(position_mae_values) / max(len(position_mae_values), 1),
+            "folds": fold_rows,
+        }
+        state_reset_modes[mode] = mode_summary
+        if best_mode_mean is None or float(mode_summary["average_log_wealth_mean"]) > float(best_mode_mean):
+            best_mode_by_mean = mode
+            best_mode_mean = float(mode_summary["average_log_wealth_mean"])
+
+    return {
+        "fold_count": len(folds),
+        "fold_sample_counts": [len(fold) for fold in folds],
+        "state_reset_modes": state_reset_modes,
+        "best_state_reset_mode_by_mean_log_wealth": best_mode_by_mean,
+    }
+
+
+def _split_validation_examples_into_contiguous_folds(
+    validation_examples: Sequence[TrainingExample],
+    *,
+    fold_count: int,
+) -> list[list[TrainingExample]]:
+    total_examples = len(validation_examples)
+    if total_examples == 0:
+        return []
+    resolved_fold_count = max(1, min(int(fold_count), total_examples))
+    base_fold_size = total_examples // resolved_fold_count
+    remainder = total_examples % resolved_fold_count
+    folds: list[list[TrainingExample]] = []
+    start_index = 0
+    for fold_index in range(resolved_fold_count):
+        current_size = base_fold_size + (1 if fold_index < remainder else 0)
+        end_index = start_index + current_size
+        folds.append(list(validation_examples[start_index:end_index]))
+        start_index = end_index
+    return [fold for fold in folds if fold]
+
+
 def _build_policy_calibration_sweep(
     model: SignalCascadeModel,
     validation_examples: Sequence[TrainingExample],
     config: TrainingConfig,
 ) -> list[dict[str, object]]:
     sweep_rows: list[dict[str, object]] = []
+    folds = _split_validation_examples_into_contiguous_folds(
+        validation_examples,
+        fold_count=config.walk_forward_folds,
+    )
+    cost_multipliers = _resolve_policy_sweep_axis(
+        configured_values=config.policy_sweep_cost_multipliers,
+        default_values=(0.5, 1.0, 2.0, 4.0),
+        current_value=float(config.policy_cost_multiplier),
+    )
+    gamma_multipliers = _resolve_policy_sweep_axis(
+        configured_values=config.policy_sweep_gamma_multipliers,
+        default_values=(0.5, 1.0, 2.0),
+        current_value=float(config.policy_gamma_multiplier),
+    )
+    q_max_values = tuple(float(value) for value in config.policy_sweep_q_max_values)
+    if q_max_values == (1.0,) and float(config.q_max) != 1.0:
+        q_max_values = (float(config.q_max),)
+    cvar_weights = tuple(float(value) for value in config.policy_sweep_cvar_weights)
+    if cvar_weights == (0.20,) and float(config.cvar_weight) != 0.20:
+        cvar_weights = (float(config.cvar_weight),)
     for state_reset_mode in config.policy_sweep_state_reset_modes:
-        for min_policy_sigma in config.policy_sweep_min_policy_sigmas:
-            for gamma_multiplier in config.policy_sweep_gamma_multipliers:
-                for cost_multiplier in config.policy_sweep_cost_multipliers:
-                    metrics = evaluate_model(
-                        model=model,
-                        examples=validation_examples,
-                        config=config,
-                        state_reset_mode=state_reset_mode,
-                        cost_multiplier=float(cost_multiplier),
-                        gamma_multiplier=float(gamma_multiplier),
-                        min_policy_sigma=float(min_policy_sigma),
-                    )
-                    sweep_rows.append(
-                        {
-                            "row_key": _policy_sweep_row_key(
+        for cvar_weight in cvar_weights:
+            for q_max in q_max_values:
+                for min_policy_sigma in config.policy_sweep_min_policy_sigmas:
+                    for gamma_multiplier in gamma_multipliers:
+                        for cost_multiplier in cost_multipliers:
+                            sweep_config = replace(
+                                config,
+                                cvar_weight=float(cvar_weight),
+                                q_max=float(q_max),
+                                min_policy_sigma=float(min_policy_sigma),
+                            )
+                            metrics = evaluate_model(
+                                model=model,
+                                examples=validation_examples,
+                                config=sweep_config,
                                 state_reset_mode=state_reset_mode,
                                 cost_multiplier=float(cost_multiplier),
                                 gamma_multiplier=float(gamma_multiplier),
-                                min_policy_sigma=float(min_policy_sigma),
-                            ),
-                            "state_reset_mode": state_reset_mode,
-                            "cost_multiplier": float(cost_multiplier),
-                            "gamma_multiplier": float(gamma_multiplier),
-                            "min_policy_sigma": float(min_policy_sigma),
-                            "average_log_wealth": float(metrics["average_log_wealth"]),
-                            "turnover": float(metrics["turnover"]),
-                            "cvar_tail_loss": float(metrics["cvar_tail_loss"]),
-                            "no_trade_band_hit_rate": float(metrics["no_trade_band_hit_rate"]),
-                            "exact_smooth_horizon_agreement": float(
-                                metrics["exact_smooth_horizon_agreement"]
-                            ),
-                            "exact_smooth_no_trade_agreement": float(
-                                metrics["exact_smooth_no_trade_agreement"]
-                            ),
-                            "exact_smooth_position_mae": float(metrics["exact_smooth_position_mae"]),
-                            "exact_smooth_utility_regret": float(
-                                metrics["exact_smooth_utility_regret"]
-                            ),
-                        }
-                    )
+                            )
+                            blocked_metrics = _evaluate_blocked_policy_sweep_row(
+                                model=model,
+                                folds=folds,
+                                config=sweep_config,
+                                state_reset_mode=state_reset_mode,
+                                cost_multiplier=float(cost_multiplier),
+                                gamma_multiplier=float(gamma_multiplier),
+                            )
+                            objective_value = _policy_sweep_objective_value(
+                                average_log_wealth=float(metrics["average_log_wealth"]),
+                                cvar_tail_loss=float(metrics["cvar_tail_loss"]),
+                                cvar_weight=float(cvar_weight),
+                            )
+                            sweep_rows.append(
+                                {
+                                    "row_key": _policy_sweep_row_key(
+                                        state_reset_mode=state_reset_mode,
+                                        cost_multiplier=float(cost_multiplier),
+                                        gamma_multiplier=float(gamma_multiplier),
+                                        min_policy_sigma=float(min_policy_sigma),
+                                        q_max=float(q_max),
+                                        cvar_weight=float(cvar_weight),
+                                    ),
+                                    "state_reset_mode": state_reset_mode,
+                                    "cost_multiplier": float(cost_multiplier),
+                                    "gamma_multiplier": float(gamma_multiplier),
+                                    "min_policy_sigma": float(min_policy_sigma),
+                                    "q_max": float(q_max),
+                                    "cvar_weight": float(cvar_weight),
+                                    "average_log_wealth": float(metrics["average_log_wealth"]),
+                                    "objective_log_wealth_minus_lambda_cvar": objective_value,
+                                    "turnover": float(metrics["turnover"]),
+                                    "cvar_tail_loss": float(metrics["cvar_tail_loss"]),
+                                    "no_trade_band_hit_rate": float(metrics["no_trade_band_hit_rate"]),
+                                    "exact_smooth_horizon_agreement": float(
+                                        metrics["exact_smooth_horizon_agreement"]
+                                    ),
+                                    "exact_smooth_no_trade_agreement": float(
+                                        metrics["exact_smooth_no_trade_agreement"]
+                                    ),
+                                    "exact_smooth_position_mae": float(
+                                        metrics["exact_smooth_position_mae"]
+                                    ),
+                                    "exact_smooth_utility_regret": float(
+                                        metrics["exact_smooth_utility_regret"]
+                                    ),
+                                    "blocked_walk_forward": blocked_metrics,
+                                    "blocked_average_log_wealth_mean": float(
+                                        blocked_metrics["average_log_wealth_mean"]
+                                    ),
+                                    "blocked_cvar_tail_loss_mean": float(
+                                        blocked_metrics["cvar_tail_loss_mean"]
+                                    ),
+                                    "blocked_turnover_mean": float(
+                                        blocked_metrics["turnover_mean"]
+                                    ),
+                                    "blocked_directional_accuracy_mean": float(
+                                        blocked_metrics["directional_accuracy_mean"]
+                                    ),
+                                    "blocked_exact_smooth_position_mae_mean": float(
+                                        blocked_metrics["exact_smooth_position_mae_mean"]
+                                    ),
+                                    "blocked_objective_log_wealth_minus_lambda_cvar_mean": float(
+                                        blocked_metrics[
+                                            "objective_log_wealth_minus_lambda_cvar_mean"
+                                        ]
+                                    ),
+                                }
+                            )
     return _annotate_policy_calibration_sweep(sweep_rows)
+
+
+def _resolve_policy_sweep_axis(
+    *,
+    configured_values: Sequence[float],
+    default_values: Sequence[float],
+    current_value: float,
+) -> tuple[float, ...]:
+    resolved_values = tuple(float(value) for value in configured_values)
+    if (
+        tuple(resolved_values) == tuple(float(value) for value in default_values)
+        and float(current_value) not in resolved_values
+    ):
+        resolved_values = tuple(sorted({*resolved_values, float(current_value)}))
+    return resolved_values
+
+
+def _evaluate_blocked_policy_sweep_row(
+    *,
+    model: SignalCascadeModel,
+    folds: Sequence[Sequence[TrainingExample]],
+    config: TrainingConfig,
+    state_reset_mode: str,
+    cost_multiplier: float,
+    gamma_multiplier: float,
+) -> dict[str, object]:
+    fold_rows: list[dict[str, object]] = []
+    for fold_index, fold_examples in enumerate(folds, start=1):
+        metrics = evaluate_model(
+            model=model,
+            examples=fold_examples,
+            config=config,
+            state_reset_mode=state_reset_mode,
+            cost_multiplier=cost_multiplier,
+            gamma_multiplier=gamma_multiplier,
+        )
+        objective_value = _policy_sweep_objective_value(
+            average_log_wealth=float(metrics["average_log_wealth"]),
+            cvar_tail_loss=float(metrics["cvar_tail_loss"]),
+            cvar_weight=float(config.cvar_weight),
+        )
+        fold_rows.append(
+            {
+                "fold_index": fold_index,
+                "sample_count": len(fold_examples),
+                "start_timestamp": fold_examples[0].anchor_time.isoformat(),
+                "end_timestamp": fold_examples[-1].anchor_time.isoformat(),
+                "average_log_wealth": float(metrics["average_log_wealth"]),
+                "cvar_tail_loss": float(metrics["cvar_tail_loss"]),
+                "turnover": float(metrics["turnover"]),
+                "directional_accuracy": float(metrics["directional_accuracy"]),
+                "exact_smooth_position_mae": float(metrics["exact_smooth_position_mae"]),
+                "objective_log_wealth_minus_lambda_cvar": objective_value,
+            }
+        )
+
+    return {
+        "fold_count": len(fold_rows),
+        "fold_sample_counts": [int(row["sample_count"]) for row in fold_rows],
+        "average_log_wealth_mean": _policy_sweep_fold_mean(fold_rows, "average_log_wealth"),
+        "cvar_tail_loss_mean": _policy_sweep_fold_mean(fold_rows, "cvar_tail_loss"),
+        "turnover_mean": _policy_sweep_fold_mean(fold_rows, "turnover"),
+        "directional_accuracy_mean": _policy_sweep_fold_mean(fold_rows, "directional_accuracy"),
+        "exact_smooth_position_mae_mean": _policy_sweep_fold_mean(
+            fold_rows,
+            "exact_smooth_position_mae",
+        ),
+        "objective_log_wealth_minus_lambda_cvar_mean": _policy_sweep_fold_mean(
+            fold_rows,
+            "objective_log_wealth_minus_lambda_cvar",
+        ),
+        "folds": fold_rows,
+    }
+
+
+def _policy_sweep_fold_mean(
+    fold_rows: Sequence[dict[str, object]],
+    key: str,
+) -> float:
+    values = [float(row[key]) for row in fold_rows]
+    return sum(values) / max(len(values), 1)
 
 
 def _annotate_policy_calibration_sweep(
@@ -420,9 +675,10 @@ def _annotate_policy_calibration_sweep(
         annotated_rows,
         key=lambda item: (
             bool(item["dominated"]),
-            -float(item["average_log_wealth"]),
-            float(item["cvar_tail_loss"]),
-            float(item["turnover"]),
+            -_policy_sweep_sort_objective(item),
+            -_policy_sweep_sort_average_log_wealth(item),
+            _policy_sweep_sort_cvar_tail_loss(item),
+            _policy_sweep_sort_turnover(item),
             str(item["row_key"]),
         ),
     )
@@ -433,24 +689,27 @@ def _policy_sweep_row_dominates(
     right: dict[str, object],
 ) -> bool:
     comparisons = (
-        float(left["average_log_wealth"]) >= float(right["average_log_wealth"]),
-        float(left["turnover"]) <= float(right["turnover"]),
-        float(left["cvar_tail_loss"]) <= float(right["cvar_tail_loss"]),
+        _policy_sweep_sort_average_log_wealth(left) >= _policy_sweep_sort_average_log_wealth(right),
+        _policy_sweep_sort_turnover(left) <= _policy_sweep_sort_turnover(right),
+        _policy_sweep_sort_cvar_tail_loss(left) <= _policy_sweep_sort_cvar_tail_loss(right),
     )
     strictly_better = (
-        float(left["average_log_wealth"]) > float(right["average_log_wealth"])
-        or float(left["turnover"]) < float(right["turnover"])
-        or float(left["cvar_tail_loss"]) < float(right["cvar_tail_loss"])
+        _policy_sweep_sort_average_log_wealth(left) > _policy_sweep_sort_average_log_wealth(right)
+        or _policy_sweep_sort_turnover(left) < _policy_sweep_sort_turnover(right)
+        or _policy_sweep_sort_cvar_tail_loss(left) < _policy_sweep_sort_cvar_tail_loss(right)
     )
     return all(comparisons) and strictly_better
 
 
 def _summarize_policy_calibration_sweep(
     sweep_rows: Sequence[dict[str, object]],
+    *,
+    config: TrainingConfig | None = None,
 ) -> dict[str, object]:
     pareto_rows = [dict(row) for row in sweep_rows if not bool(row.get("dominated", False))]
-    selected_row = pareto_rows[0] if pareto_rows else (dict(sweep_rows[0]) if sweep_rows else None)
-    return {
+    best_row = pareto_rows[0] if pareto_rows else (dict(sweep_rows[0]) if sweep_rows else None)
+    selected_row = _select_policy_calibration_row(pareto_rows, best_row)
+    summary = {
         "row_count": len(sweep_rows),
         "pareto_optimal_count": len(pareto_rows),
         "dominated_count": max(len(sweep_rows) - len(pareto_rows), 0),
@@ -459,8 +718,54 @@ def _summarize_policy_calibration_sweep(
         "selection_rule_version": POLICY_SELECTION_RULE_VERSION,
         "selected_row": selected_row,
         "selected_row_key": None if selected_row is None else selected_row.get("row_key"),
-        "best_row": selected_row,
+        "selected_row_role": "diagnostic_recommendation_not_applied_runtime_config",
+        "best_row": best_row,
     }
+    if config is not None:
+        applied_runtime_policy = _build_applied_runtime_policy(config)
+        summary.update(
+            {
+                "applied_runtime_policy": applied_runtime_policy,
+                "applied_runtime_row_key": applied_runtime_policy["row_key"],
+                "applied_runtime_policy_role": "authoritative_runtime_config",
+                "selected_row_matches_applied_runtime": (
+                    False
+                    if selected_row is None
+                    else selected_row.get("row_key") == applied_runtime_policy["row_key"]
+                ),
+            }
+        )
+    return summary
+
+
+def _select_policy_calibration_row(
+    pareto_rows: Sequence[dict[str, object]],
+    best_row: dict[str, object] | None,
+) -> dict[str, object] | None:
+    if best_row is None:
+        return None
+    best_objective = _policy_sweep_sort_objective(best_row)
+    if best_objective > 0.0:
+        objective_floor = best_objective * POLICY_SELECTION_OBJECTIVE_FLOOR_RATIO
+    else:
+        objective_floor = best_objective
+    candidate_rows = [
+        dict(row)
+        for row in pareto_rows
+        if _policy_sweep_sort_objective(row) >= objective_floor
+    ]
+    if not candidate_rows:
+        candidate_rows = [dict(best_row)]
+    candidate_rows.sort(
+        key=lambda item: (
+            _policy_sweep_sort_turnover(item),
+            -_policy_sweep_sort_objective(item),
+            -_policy_sweep_sort_average_log_wealth(item),
+            _policy_sweep_sort_cvar_tail_loss(item),
+            str(item["row_key"]),
+        )
+    )
+    return candidate_rows[0]
 
 
 def _policy_sweep_row_key(
@@ -469,6 +774,8 @@ def _policy_sweep_row_key(
     cost_multiplier: float,
     gamma_multiplier: float,
     min_policy_sigma: float,
+    q_max: float,
+    cvar_weight: float,
 ) -> str:
     return "|".join(
         (
@@ -476,8 +783,62 @@ def _policy_sweep_row_key(
             f"cost_multiplier={cost_multiplier:.12g}",
             f"gamma_multiplier={gamma_multiplier:.12g}",
             f"min_policy_sigma={min_policy_sigma:.12g}",
+            f"q_max={q_max:.12g}",
+            f"cvar_weight={cvar_weight:.12g}",
         )
     )
+
+
+def _build_applied_runtime_policy(config: TrainingConfig) -> dict[str, object]:
+    return {
+        "row_key": _policy_sweep_row_key(
+            state_reset_mode=str(config.evaluation_state_reset_mode),
+            cost_multiplier=float(config.policy_cost_multiplier),
+            gamma_multiplier=float(config.policy_gamma_multiplier),
+            min_policy_sigma=float(config.min_policy_sigma),
+            q_max=float(config.q_max),
+            cvar_weight=float(config.cvar_weight),
+        ),
+        "state_reset_mode": str(config.evaluation_state_reset_mode),
+        "cost_multiplier": float(config.policy_cost_multiplier),
+        "gamma_multiplier": float(config.policy_gamma_multiplier),
+        "min_policy_sigma": float(config.min_policy_sigma),
+        "q_max": float(config.q_max),
+        "cvar_weight": float(config.cvar_weight),
+    }
+
+
+def _policy_sweep_sort_average_log_wealth(row: dict[str, object]) -> float:
+    return float(row.get("blocked_average_log_wealth_mean", row["average_log_wealth"]))
+
+
+def _policy_sweep_sort_cvar_tail_loss(row: dict[str, object]) -> float:
+    return float(row.get("blocked_cvar_tail_loss_mean", row["cvar_tail_loss"]))
+
+
+def _policy_sweep_sort_turnover(row: dict[str, object]) -> float:
+    return float(row.get("blocked_turnover_mean", row["turnover"]))
+
+
+def _policy_sweep_sort_objective(row: dict[str, object]) -> float:
+    if "blocked_objective_log_wealth_minus_lambda_cvar_mean" in row:
+        return float(row["blocked_objective_log_wealth_minus_lambda_cvar_mean"])
+    if "objective_log_wealth_minus_lambda_cvar" in row:
+        return float(row["objective_log_wealth_minus_lambda_cvar"])
+    return _policy_sweep_objective_value(
+        average_log_wealth=float(row["average_log_wealth"]),
+        cvar_tail_loss=float(row["cvar_tail_loss"]),
+        cvar_weight=float(row.get("cvar_weight", 0.0)),
+    )
+
+
+def _policy_sweep_objective_value(
+    *,
+    average_log_wealth: float,
+    cvar_tail_loss: float,
+    cvar_weight: float,
+) -> float:
+    return float(average_log_wealth) - (float(cvar_weight) * float(cvar_tail_loss))
 
 
 def _policy_sweep_rows_sha256(sweep_rows: Sequence[dict[str, object]]) -> str | None:

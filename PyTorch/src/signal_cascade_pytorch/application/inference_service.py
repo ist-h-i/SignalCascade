@@ -12,8 +12,8 @@ from .training_service import examples_to_batch, replay_recurrent_context
 from ..domain.entities import PredictionResult, TrainingExample
 from ..infrastructure.ml.model import SignalCascadeModel
 
-PREDICTION_SCHEMA_VERSION = 6
-FORECAST_SCHEMA_VERSION = 6
+PREDICTION_SCHEMA_VERSION = 7
+FORECAST_SCHEMA_VERSION = 7
 
 
 def _resolve_price_scale(value: float | None) -> float:
@@ -139,6 +139,8 @@ def predict_from_example(
         regime_id=example.regime_id,
         policy_log_returns=policy_log_returns,
         policy_uncertainties=policy_uncertainties,
+        policy_head_tied_to_forecast=bool(outputs["policy_head_tied_to_forecast"].item()),
+        overlay_branch_disabled=bool(outputs["overlay_branch_disabled"].item()),
         inference_context_mode=inference_context_mode
         or ("carry_on" if previous_state is not None else "stateless"),
     )
@@ -200,6 +202,38 @@ def serialize_prediction_result(prediction: PredictionResult) -> dict[str, objec
             if prediction.policy_uncertainties is None
             else dict(prediction.policy_uncertainties)
         ),
+        "policy_head_tied_to_forecast": bool(prediction.policy_head_tied_to_forecast),
+        "overlay_branch_disabled": bool(prediction.overlay_branch_disabled),
+        "overlay_branch_contract": (
+            "disabled_in_canonical_path"
+            if prediction.overlay_branch_disabled
+            else "auxiliary_latent_branch_without_direct_supervision"
+        ),
+        "display_forecast": {
+            "label": "display forecast",
+            "mean_key": "mu_t",
+            "sigma_key": "sigma_t",
+            "mean_by_horizon": dict(prediction.expected_log_returns),
+            "sigma_by_horizon": dict(prediction.uncertainties),
+        },
+        "policy_driver": {
+            "label": "policy driver",
+            "mean_key": "policy_mu_t",
+            "sigma_key": "policy_sigma_t",
+            "head_relationship": (
+                "tied_to_forecast_head"
+                if prediction.policy_head_tied_to_forecast
+                else "separate_policy_head"
+            ),
+            "mean_by_horizon": (
+                None if prediction.policy_log_returns is None else dict(prediction.policy_log_returns)
+            ),
+            "sigma_by_horizon": (
+                None
+                if prediction.policy_uncertainties is None
+                else dict(prediction.policy_uncertainties)
+            ),
+        },
         "horizon_utilities": dict(prediction.horizon_utilities),
         "horizon_positions": dict(prediction.horizon_positions),
         "shape_posterior": dict(prediction.shape_probabilities),
@@ -274,6 +308,38 @@ def build_forecast_summary_payload(
             if prediction.policy_uncertainties is None
             else dict(prediction.policy_uncertainties)
         ),
+        "policy_head_tied_to_forecast": bool(prediction.policy_head_tied_to_forecast),
+        "overlay_branch_disabled": bool(prediction.overlay_branch_disabled),
+        "overlay_branch_contract": (
+            "disabled_in_canonical_path"
+            if prediction.overlay_branch_disabled
+            else "auxiliary_latent_branch_without_direct_supervision"
+        ),
+        "display_forecast": {
+            "label": "display forecast",
+            "mean_key": "mu_t",
+            "sigma_key": "sigma_t",
+            "mean_by_horizon": dict(prediction.expected_log_returns),
+            "sigma_by_horizon": dict(prediction.uncertainties),
+        },
+        "policy_driver": {
+            "label": "policy driver",
+            "mean_key": "policy_mu_t",
+            "sigma_key": "policy_sigma_t",
+            "head_relationship": (
+                "tied_to_forecast_head"
+                if prediction.policy_head_tied_to_forecast
+                else "separate_policy_head"
+            ),
+            "mean_by_horizon": (
+                None if prediction.policy_log_returns is None else dict(prediction.policy_log_returns)
+            ),
+            "sigma_by_horizon": (
+                None
+                if prediction.policy_uncertainties is None
+                else dict(prediction.policy_uncertainties)
+            ),
+        },
         "horizon_utilities": dict(prediction.horizon_utilities),
         "horizon_positions": dict(prediction.horizon_positions),
         "shape_posterior": dict(prediction.shape_probabilities),

@@ -14,6 +14,7 @@ from .application.artifact_provenance import (
 )
 from .application.artifact_manifest import build_artifact_entrypoints, build_artifact_manifest
 from .application.config import TrainingConfig
+from .application.current_alias import build_current_alias_metadata
 from .application.diagnostics_service import export_review_diagnostics
 from .application.dataset_service import (
     build_latest_inference_example,
@@ -37,8 +38,9 @@ from .application.report_service import (
     generate_research_report,
     load_required_diagnostics_summary,
 )
-from .application.training_service import train_model
+from .application.training_service import _build_checkpoint_audit, train_model
 from .application.tuning_service import tune_latest_dataset
+from .application.tuning_service import _extend_current_sub_artifacts
 from .infrastructure.data.csv_source import CsvMarketDataSource
 from .infrastructure.data.synthetic_source import SyntheticMarketDataSource
 from .infrastructure.ml.model import SignalCascadeModel
@@ -109,6 +111,7 @@ def train_command(args) -> int:
         model=model,
         examples=examples,
         config=config,
+        checkpoint_audit=dict(summary.get("checkpoint_audit") or {}),
         source_payload=artifact_source_payload,
         source_rows_original=source_rows_original,
         source_rows_used=source_rows_used,
@@ -253,6 +256,11 @@ def export_diagnostics_command(args) -> int:
         diagnostics_output_dir,
         base_bars=base_bars if source_payload["kind"] == "csv" else None,
     )
+    metrics_payload = load_json(artifact_dir / "metrics.json")
+    resolved_checkpoint_audit = _resolve_checkpoint_audit_summary(
+        metrics_payload if isinstance(metrics_payload, dict) else {},
+        config,
+    )
 
     model = _build_model_from_example(examples[0], config)
     load_checkpoint(artifact_dir / "model.pt", model)
@@ -261,6 +269,7 @@ def export_diagnostics_command(args) -> int:
         model=model,
         examples=examples,
         config=config,
+        checkpoint_audit=resolved_checkpoint_audit,
         source_payload=artifact_source_payload,
         source_rows_original=source_rows_original,
         source_rows_used=source_rows_used,
@@ -306,9 +315,12 @@ def tune_latest_command(args) -> int:
         seed=args.seed,
         config_overrides=_config_overrides_from_args(args),
         lookback_days=getattr(args, "csv_lookback_days", None),
+        candidate_limit=getattr(args, "candidate_limit", None),
+        quick_mode=bool(getattr(args, "quick_mode", False)),
     )
     best_candidate = manifest["best_candidate"]
     accepted_candidate = manifest.get("accepted_candidate")
+    production_current_candidate = manifest.get("production_current_candidate")
     optimization_gate = manifest.get("optimization_gate", {})
 
     print(f"current run dir: {manifest['current_dir']}")
@@ -333,6 +345,8 @@ def tune_latest_command(args) -> int:
         print("current updated: False")
         return 2
     print(f"accepted candidate: {accepted_candidate['candidate']}")
+    if isinstance(production_current_candidate, dict):
+        print(f"production current candidate: {production_current_candidate.get('candidate', '-')}")
     print("current updated: True")
     return 0
 
@@ -349,6 +363,164 @@ def promote_current_command(args) -> int:
     return 0
 
 
+def audit_checkpoints_command(args) -> int:
+    artifact_dir = Path(args.output_dir).expanduser().resolve()
+    metrics_payload = load_json(artifact_dir / "metrics.json")
+    if not isinstance(metrics_payload, dict):
+        raise FileNotFoundError(f"metrics.json is missing or invalid: {artifact_dir / 'metrics.json'}")
+    config_payload = load_json(artifact_dir / "config.json")
+    if not isinstance(config_payload, dict):
+        raise FileNotFoundError(f"config.json is missing or invalid: {artifact_dir / 'config.json'}")
+
+    config = TrainingConfig.from_dict(config_payload)
+    history = metrics_payload.get("history", [])
+    if not isinstance(history, list) or not history:
+        raise ValueError(f"metrics.json is missing epoch history: {artifact_dir / 'metrics.json'}")
+
+    payload = _build_checkpoint_audit_payload(
+        artifact_dir=artifact_dir,
+        history=history,
+        config=config,
+        selected_epoch=metrics_payload.get("best_epoch"),
+    )
+    audit_output = (
+        Path(args.audit_output).expanduser().resolve()
+        if getattr(args, "audit_output", None)
+        else artifact_dir / "checkpoint_audit.json"
+    )
+    save_json(audit_output, payload)
+
+    summary = payload.get("summary", {})
+    print(f"artifact dir: {artifact_dir}")
+    print(f"audit path: {audit_output}")
+    print(f"selected epoch: {summary.get('selected_epoch')}")
+    print(f"best epoch by exact wealth: {summary.get('best_epoch_by_exact_log_wealth')}")
+    print(f"delta to best exact wealth: {summary.get('delta_to_best_exact_log_wealth')}")
+    if "best_epoch_by_exact_log_wealth_minus_lambda_cvar" in summary:
+        print(
+            "best epoch by exact wealth minus lambda*cvar: "
+            f"{summary.get('best_epoch_by_exact_log_wealth_minus_lambda_cvar')}"
+        )
+        print(
+            "delta to best exact wealth minus lambda*cvar: "
+            f"{summary.get('delta_to_best_exact_log_wealth_minus_lambda_cvar')}"
+        )
+    elif payload.get("exact_log_wealth_minus_lambda_cvar_unavailable_reason"):
+        print(
+            "exact wealth minus lambda*cvar unavailable: "
+            f"{payload['exact_log_wealth_minus_lambda_cvar_unavailable_reason']}"
+        )
+    return 0
+
+
+def _build_checkpoint_audit_payload(
+    *,
+    artifact_dir: Path,
+    history: list[dict[str, object]],
+    config: TrainingConfig,
+    selected_epoch: object | None,
+) -> dict[str, object]:
+    ranked_rows = [
+        row
+        for row in history
+        if "epoch" in row
+        and "validation_exact_log_wealth" in row
+        and "validation_selection_score" in row
+    ]
+    if not ranked_rows:
+        raise ValueError("epoch history does not include validation_selection_score/exact wealth rows")
+
+    summary = _build_checkpoint_audit(ranked_rows, config)
+    if not summary and selected_epoch is not None:
+        summary = {"selected_epoch": float(selected_epoch)}
+
+    selection_rank = sorted(
+        ranked_rows,
+        key=lambda row: (
+            float(row["validation_selection_score"]),
+            float(row["epoch"]),
+        ),
+    )
+    wealth_rank = sorted(
+        ranked_rows,
+        key=lambda row: (
+            -float(row["validation_exact_log_wealth"]),
+            float(row["epoch"]),
+        ),
+    )
+
+    payload: dict[str, object] = {
+        "artifact_dir": str(artifact_dir),
+        "history_length": len(history),
+        "evaluated_epoch_count": len(ranked_rows),
+        "summary": summary,
+        "top_epochs_by_selection_score": [
+            {
+                "epoch": float(row["epoch"]),
+                "validation_selection_score": float(row["validation_selection_score"]),
+                "validation_exact_log_wealth": float(row["validation_exact_log_wealth"]),
+            }
+            for row in selection_rank[:5]
+        ],
+        "top_epochs_by_exact_log_wealth": [
+            {
+                "epoch": float(row["epoch"]),
+                "validation_exact_log_wealth": float(row["validation_exact_log_wealth"]),
+                "validation_selection_score": float(row["validation_selection_score"]),
+            }
+            for row in wealth_rank[:5]
+        ],
+    }
+
+    if all("validation_exact_cvar_tail_loss" in row for row in ranked_rows):
+        wealth_minus_cvar_rank = sorted(
+            ranked_rows,
+            key=lambda row: (
+                -(
+                    float(row["validation_exact_log_wealth"])
+                    - (
+                        float(config.cvar_weight)
+                        * float(row["validation_exact_cvar_tail_loss"])
+                    )
+                ),
+                float(row["epoch"]),
+            ),
+        )
+        payload["top_epochs_by_exact_log_wealth_minus_lambda_cvar"] = [
+            {
+                "epoch": float(row["epoch"]),
+                "validation_exact_log_wealth_minus_lambda_cvar": float(
+                    row["validation_exact_log_wealth"]
+                )
+                - (float(config.cvar_weight) * float(row["validation_exact_cvar_tail_loss"])),
+                "validation_exact_log_wealth": float(row["validation_exact_log_wealth"]),
+                "validation_exact_cvar_tail_loss": float(row["validation_exact_cvar_tail_loss"]),
+            }
+            for row in wealth_minus_cvar_rank[:5]
+        ]
+    else:
+        payload["exact_log_wealth_minus_lambda_cvar_unavailable_reason"] = (
+            "validation_exact_cvar_tail_loss_missing_in_history"
+        )
+
+    return payload
+
+
+def _resolve_checkpoint_audit_summary(
+    metrics_payload: dict[str, object],
+    config: TrainingConfig,
+) -> dict[str, object]:
+    existing = metrics_payload.get("checkpoint_audit")
+    if isinstance(existing, dict) and existing:
+        return dict(existing)
+
+    history = metrics_payload.get("history")
+    if not isinstance(history, list):
+        return {}
+
+    return dict(_build_checkpoint_audit(history, config))
+
+
 def _build_model_from_example(example, config: TrainingConfig) -> SignalCascadeModel:
     return SignalCascadeModel(
         feature_dim=len(example.main_sequences["4h"][0]),
@@ -359,6 +531,8 @@ def _build_model_from_example(example, config: TrainingConfig) -> SignalCascadeM
         shape_classes=config.shape_classes,
         branch_dilations=config.branch_dilations,
         dropout=config.dropout,
+        tie_policy_to_forecast_head=config.tie_policy_to_forecast_head,
+        disable_overlay_branch=config.disable_overlay_branch,
     )
 
 
@@ -396,6 +570,7 @@ def _overlay_sub_artifacts(source_payload: dict[str, object]) -> dict[str, str]:
         "horizon_diag.csv": "regenerated",
         "manifest.json": "generated",
         "metrics.json": "regenerated",
+        "model.pt": "copied",
         "policy_summary.csv": "regenerated",
         "prediction.json": "copied",
         "source.json": "regenerated",
@@ -429,6 +604,9 @@ def _materialize_replay_artifact(
         source_path = artifact_dir / name
         if source_path.exists():
             save_json(diagnostics_output_dir / name, load_json(source_path))
+    model_path = artifact_dir / "model.pt"
+    if model_path.exists():
+        shutil.copy2(model_path, diagnostics_output_dir / "model.pt")
 
     overlay_sub_artifacts = _overlay_sub_artifacts(source_payload)
     overlay_source_payload = build_artifact_source_payload(
@@ -454,7 +632,10 @@ def _materialize_replay_artifact(
             ),
             generated_at_utc=generated_at_utc,
             source_payload=source_payload,
-            entrypoints=_build_artifact_entrypoints(source_payload),
+            entrypoints=_build_artifact_entrypoints(
+                source_payload,
+                include_model=(diagnostics_output_dir / "model.pt").exists(),
+            ),
         ),
     )
 
@@ -518,8 +699,15 @@ def _promote_training_run_to_current(
     if not source_payload_path.exists():
         raise FileNotFoundError(f"source artifact is missing source.json: {source_payload_path}")
     source_payload = load_json(source_payload_path)
-    if source_payload.get("artifact_kind") != "training_run":
-        raise ValueError("current alias can only be promoted from a training_run artifact")
+    artifact_kind = str(source_payload.get("artifact_kind", "")).strip()
+    if artifact_kind not in {"training_run", "diagnostic_replay_overlay"}:
+        raise ValueError(
+            "current alias can only be promoted from a training_run or diagnostic_replay_overlay artifact"
+        )
+    if artifact_kind == "diagnostic_replay_overlay" and not (resolved_source_dir / "model.pt").exists():
+        raise ValueError(
+            "current alias can only be promoted from a diagnostic_replay_overlay artifact when model.pt exists"
+        )
     load_required_diagnostics_summary(resolved_source_dir)
 
     stage_dir = resolved_artifact_root / f".current_promote_stage_{uuid4().hex}"
@@ -542,8 +730,26 @@ def _promote_training_run_to_current(
     if backup_dir.exists():
         shutil.rmtree(backup_dir, ignore_errors=True)
     shutil.rmtree(backup_root, ignore_errors=True)
+
+    current_source_payload = load_json(current_dir / "source.json")
+    if isinstance(current_source_payload, dict):
+        current_source_payload.update(
+            build_current_alias_metadata(
+                resolved_artifact_root,
+                resolved_source_dir,
+            )
+        )
+        current_source_payload["sub_artifacts"] = _extend_current_sub_artifacts(
+            current_source_payload,
+            resolved_source_dir,
+        )
+        save_json(current_dir / "source.json", current_source_payload)
+
     if all((current_dir / name).exists() for name in ("config.json", "metrics.json", "prediction.json")):
-        generate_research_report(current_dir)
+        generate_research_report(
+            current_dir,
+            report_path=resolved_artifact_root.parent.parent / "report_signalcascade_xauusd.md",
+        )
     _write_current_artifact_manifest(current_dir)
     return current_dir
 
@@ -596,8 +802,42 @@ def _build_config(args) -> TrainingConfig:
 
 def _load_config_with_overrides(output_dir: Path, args) -> TrainingConfig:
     payload = load_json(output_dir / "config.json")
+    if getattr(args, "apply_selected_policy_calibration", False):
+        payload = _apply_selected_policy_calibration_payload(
+            payload,
+            output_dir / "validation_summary.json",
+        )
     payload.update(_config_overrides_from_args(args))
     return TrainingConfig.from_dict(payload)
+
+
+def _apply_selected_policy_calibration_payload(
+    payload: dict[str, object],
+    validation_summary_path: Path,
+) -> dict[str, object]:
+    merged = dict(payload)
+    if not validation_summary_path.exists():
+        return merged
+    summary = load_json(validation_summary_path)
+    calibration_summary = summary.get("policy_calibration_summary")
+    if not isinstance(calibration_summary, dict):
+        return merged
+    selected_row = calibration_summary.get("selected_row")
+    if not isinstance(selected_row, dict):
+        return merged
+    if "state_reset_mode" in selected_row:
+        merged["evaluation_state_reset_mode"] = str(selected_row["state_reset_mode"])
+    if "min_policy_sigma" in selected_row:
+        merged["min_policy_sigma"] = float(selected_row["min_policy_sigma"])
+    if "cost_multiplier" in selected_row:
+        merged["policy_cost_multiplier"] = float(selected_row["cost_multiplier"])
+    if "gamma_multiplier" in selected_row:
+        merged["policy_gamma_multiplier"] = float(selected_row["gamma_multiplier"])
+    if "q_max" in selected_row:
+        merged["q_max"] = float(selected_row["q_max"])
+    if "cvar_weight" in selected_row:
+        merged["cvar_weight"] = float(selected_row["cvar_weight"])
+    return merged
 
 
 def _build_source_payload(args, config: TrainingConfig) -> dict[str, object]:
@@ -621,6 +861,8 @@ def _resolve_source_payload(args, output_dir: Path) -> dict[str, object]:
         if (output_dir / "source.json").exists()
         else {}
     )
+    if not saved_payload:
+        saved_payload = _infer_source_payload_from_artifact(output_dir)
     if getattr(args, "csv", None):
         payload = {
             **normalize_price_scale_payload(saved_payload),
@@ -639,6 +881,21 @@ def _resolve_source_payload(args, output_dir: Path) -> dict[str, object]:
         saved_payload,
         requested_price_scale=getattr(args, "price_scale", None),
     )
+
+
+def _infer_source_payload_from_artifact(output_dir: Path) -> dict[str, object]:
+    snapshot_path = output_dir / "data_snapshot.csv"
+    if not snapshot_path.exists():
+        return {}
+    config_payload = load_json(output_dir / "config.json") or {}
+    requested_price_scale = config_payload.get("requested_price_scale", config_payload.get("price_scale"))
+    payload: dict[str, object] = {
+        "kind": "csv",
+        "path": str(snapshot_path.expanduser().resolve()),
+    }
+    if requested_price_scale is not None:
+        payload["requested_price_scale"] = requested_price_scale
+    return normalize_price_scale_payload(payload)
 
 
 def _resolve_price_scale(source_payload: dict[str, object]) -> float:
@@ -662,6 +919,8 @@ def _config_overrides_from_args(args) -> dict[str, object]:
     maybe("state_dim", getattr(args, "state_dim", None))
     maybe("shape_classes", getattr(args, "shape_classes", None))
     maybe("dropout", getattr(args, "dropout", None))
+    maybe("tie_policy_to_forecast_head", getattr(args, "tie_policy_to_forecast_head", None))
+    maybe("disable_overlay_branch", getattr(args, "disable_overlay_branch", None))
     maybe("walk_forward_folds", getattr(args, "walk_forward_folds", None))
     maybe("base_cost", getattr(args, "base_cost", None))
     maybe("delta_multiplier", getattr(args, "delta_multiplier", None))
@@ -676,7 +935,11 @@ def _config_overrides_from_args(args) -> dict[str, object]:
     maybe("profit_loss_weight", getattr(args, "profit_loss_weight", None))
     maybe("cvar_weight", getattr(args, "cvar_weight", None))
     maybe("cvar_alpha", getattr(args, "cvar_alpha", None))
+    maybe("checkpoint_selection_metric", getattr(args, "checkpoint_selection_metric", None))
     maybe("risk_aversion_gamma", getattr(args, "risk_aversion_gamma", None))
+    maybe("policy_cost_multiplier", getattr(args, "policy_cost_multiplier", None))
+    maybe("policy_gamma_multiplier", getattr(args, "policy_gamma_multiplier", None))
+    maybe("min_policy_sigma", getattr(args, "min_policy_sigma", None))
     maybe("q_max", getattr(args, "q_max", None))
     maybe("allow_no_candidate", getattr(args, "allow_no_candidate", None))
     maybe("requested_price_scale", getattr(args, "price_scale", None))
@@ -693,6 +956,12 @@ def _config_overrides_from_args(args) -> dict[str, object]:
     min_policy_sigmas = _parse_float_list(getattr(args, "policy_sweep_min_policy_sigmas", None))
     if min_policy_sigmas is not None:
         overrides["policy_sweep_min_policy_sigmas"] = min_policy_sigmas
+    q_max_values = _parse_float_list(getattr(args, "policy_sweep_q_max_values", None))
+    if q_max_values is not None:
+        overrides["policy_sweep_q_max_values"] = q_max_values
+    cvar_weights = _parse_float_list(getattr(args, "policy_sweep_cvar_weights", None))
+    if cvar_weights is not None:
+        overrides["policy_sweep_cvar_weights"] = cvar_weights
     sweep_state_reset_modes = _parse_str_list(getattr(args, "policy_sweep_state_reset_modes", None))
     if sweep_state_reset_modes is not None:
         overrides["policy_sweep_state_reset_modes"] = sweep_state_reset_modes

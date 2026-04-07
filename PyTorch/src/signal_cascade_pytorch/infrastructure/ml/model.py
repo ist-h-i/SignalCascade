@@ -81,10 +81,14 @@ class SignalCascadeModel(nn.Module):
         shape_classes: int,
         branch_dilations: tuple[int, ...],
         dropout: float,
+        tie_policy_to_forecast_head: bool = False,
+        disable_overlay_branch: bool = False,
     ) -> None:
         super().__init__()
         self.num_horizons = num_horizons
         self.shape_classes = shape_classes
+        self.tie_policy_to_forecast_head = bool(tie_policy_to_forecast_head)
+        self.disable_overlay_branch = bool(disable_overlay_branch)
         encoded_dim = hidden_dim * len(branch_dilations)
         self.main_encoders = nn.ModuleDict(
             {
@@ -164,7 +168,11 @@ class SignalCascadeModel(nn.Module):
             for timeframe in MAIN_TIMEFRAMES
         }
         overlay_latents = {
-            timeframe: self.overlay_encoders[timeframe](overlay_sequences[timeframe])
+            timeframe: (
+                torch.zeros_like(main_latents[MAIN_TIMEFRAMES[0]])
+                if self.disable_overlay_branch
+                else self.overlay_encoders[timeframe](overlay_sequences[timeframe])
+            )
             for timeframe in OVERLAY_TIMEFRAMES
         }
         fused_latent = self.latent_fusion(
@@ -228,13 +236,19 @@ class SignalCascadeModel(nn.Module):
             min=1e-6,
         )
         forecast_sigma = torch.sqrt(forecast_variance)
-        policy_mean = torch.sum(policy_mu_by_shape * mixture_weights, dim=-1)
-        policy_second_moment = torch.sum(
-            mixture_weights * (policy_sigma_by_shape.pow(2) + policy_mu_by_shape.pow(2)),
-            dim=-1,
-        )
-        policy_variance = torch.clamp(policy_second_moment - policy_mean.pow(2), min=1e-6)
-        policy_sigma = torch.sqrt(policy_variance)
+        if self.tie_policy_to_forecast_head:
+            policy_mu_by_shape = forecast_mu_by_shape
+            policy_sigma_by_shape = forecast_sigma_by_shape
+            policy_mean = forecast_mean
+            policy_sigma = forecast_sigma
+        else:
+            policy_mean = torch.sum(policy_mu_by_shape * mixture_weights, dim=-1)
+            policy_second_moment = torch.sum(
+                mixture_weights * (policy_sigma_by_shape.pow(2) + policy_mu_by_shape.pow(2)),
+                dim=-1,
+            )
+            policy_variance = torch.clamp(policy_second_moment - policy_mean.pow(2), min=1e-6)
+            policy_sigma = torch.sqrt(policy_variance)
         tradeability_weights = torch.sigmoid(self.tradeability_logits)
         tradeability_gate = torch.sum(
             shape_posterior * tradeability_weights.unsqueeze(0),
@@ -263,6 +277,16 @@ class SignalCascadeModel(nn.Module):
             "shape_entropy": normalized_entropy,
             "tradeability_gate": tradeability_gate,
             "tradeability_weights": tradeability_weights,
+            "policy_head_tied_to_forecast": torch.tensor(
+                self.tie_policy_to_forecast_head,
+                dtype=torch.bool,
+                device=device,
+            ),
+            "overlay_branch_disabled": torch.tensor(
+                self.disable_overlay_branch,
+                dtype=torch.bool,
+                device=device,
+            ),
             "state_projection": state_projection,
             "state_vector": state_vector,
             "state_vector_components": state_vector_components,

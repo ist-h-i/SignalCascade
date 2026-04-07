@@ -1,64 +1,64 @@
 {
   "version": "portable-static-v1",
   "runType": "pr",
-  "timestamp": "2026-04-05T19:13:04.687Z",
-  "overallScore": 86.07,
+  "timestamp": "2026-04-06T21:52:13.423Z",
+  "overallScore": 85.76,
   "gate": "warn",
   "hardFails": [],
   "aggregationMode": "portable-static-heuristic",
   "targetCount": 1,
   "warnOnly": false,
   "categoryScores": {
-    "spacing": 30,
+    "spacing": 29.6,
     "density": 20,
-    "visual": 9.6,
-    "color": 20,
-    "responsive": 6.47
+    "visual": 11.26,
+    "color": 17.6,
+    "responsive": 7.3
   },
   "ruleTotals": {
-    "S1": 0,
+    "S1": 0.4,
     "D1": 0,
     "D2": 0,
-    "V2": 10.4,
+    "V2": 8.74,
     "V4": 0,
-    "C2": 0,
-    "R2": 3.53
+    "C2": 2.4,
+    "R2": 2.7
   },
   "normalizedRuleTotals": {
-    "S1": 0,
+    "S1": 0.4,
     "D1": 0,
     "D2": 0,
-    "V2": 10.4,
+    "V2": 8.74,
     "V4": 0,
-    "C2": 0,
-    "R2": 3.53
+    "C2": 2.4,
+    "R2": 2.7
   },
   "legacyRuleTotals": {
-    "S1": 0,
+    "S1": 0.4,
     "D1": 0,
     "D2": 0,
-    "V2": 10.4,
+    "V2": 8.74,
     "V4": 0,
-    "C2": 0,
-    "R2": 3.53
+    "C2": 2.4,
+    "R2": 2.7
   },
   "routeSummaries": [
     {
       "route": "/global",
-      "score": 95,
-      "fileCount": 11,
+      "score": 94.61,
+      "fileCount": 15,
       "topDeductions": [
         {
           "rule": "V2",
-          "deduction": 10.4
+          "deduction": 8.74
         },
         {
           "rule": "R2",
-          "deduction": 3.53
+          "deduction": 2.7
         },
         {
-          "rule": "S1",
-          "deduction": 0
+          "rule": "C2",
+          "deduction": 2.4
         }
       ]
     }
@@ -66,17 +66,22 @@
   "ruleResults": [
     {
       "rule": "V2",
-      "deduction": 10.4,
+      "deduction": 8.74,
       "severity": "high"
     },
     {
       "rule": "R2",
-      "deduction": 3.53,
+      "deduction": 2.7,
+      "severity": "low"
+    },
+    {
+      "rule": "C2",
+      "deduction": 2.4,
       "severity": "low"
     },
     {
       "rule": "S1",
-      "deduction": 0,
+      "deduction": 0.4,
       "severity": "low"
     },
     {
@@ -93,18 +98,13 @@
       "rule": "V4",
       "deduction": 0,
       "severity": "low"
-    },
-    {
-      "rule": "C2",
-      "deduction": 0,
-      "severity": "low"
     }
   ],
   "scanStats": {
-    "scannedFiles": 11,
+    "scannedFiles": 15,
     "styleFiles": 2,
     "templateFiles": 4,
-    "borderUsage": 7,
+    "borderUsage": 17,
     "borderedContainers": 0,
     "dividerMarkers": 0,
     "nestedBorderChains": 0

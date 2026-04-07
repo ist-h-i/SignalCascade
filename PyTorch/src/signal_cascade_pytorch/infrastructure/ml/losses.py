@@ -66,6 +66,8 @@ def profit_objective_loss(
         tradeability_gate=outputs["tradeability_gate"],
         previous_position=previous_position,
         config=config,
+        cost_multiplier=config.policy_cost_multiplier,
+        gamma_multiplier=config.policy_gamma_multiplier,
     )
     pnl_by_horizon = (
         policy["horizon_positions"] * batch["returns"]

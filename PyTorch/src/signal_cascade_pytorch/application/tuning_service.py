@@ -12,6 +12,7 @@ from .artifact_provenance import (
 )
 from .artifact_manifest import build_artifact_entrypoints, build_artifact_manifest
 from .config import TrainingConfig
+from .current_alias import build_current_alias_metadata
 from .dataset_service import (
     build_latest_inference_example_from_bars,
     build_training_examples_from_bars,
@@ -34,6 +35,7 @@ from ..infrastructure.data.csv_source import CsvMarketDataSource
 from ..infrastructure.persistence import ensure_directory, load_json, save_json
 
 _RESERVED_ARTIFACT_DIRECTORIES = {"archive", "current", "live"}
+_DEFAULT_QUICK_MODE_CANDIDATE_LIMIT = 4
 _FALLBACK_PARAMETERS = {
     "epochs": 12,
     "batch_size": 16,
@@ -41,6 +43,14 @@ _FALLBACK_PARAMETERS = {
     "hidden_dim": 48,
     "dropout": 0.1,
     "weight_decay": 5e-5,
+    "evaluation_state_reset_mode": "carry_on",
+    "min_policy_sigma": 1e-4,
+    "policy_cost_multiplier": 1.0,
+    "policy_gamma_multiplier": 1.0,
+    "q_max": 1.0,
+    "cvar_weight": 0.2,
+    "tie_policy_to_forecast_head": False,
+    "disable_overlay_branch": False,
 }
 _OPTIMIZATION_GATE_RULES = (
     {"metric": "average_log_wealth", "operator": "minimum", "threshold": 0.0},
@@ -50,6 +60,18 @@ _OPTIMIZATION_GATE_RULES = (
     {"metric": "directional_accuracy", "operator": "minimum", "threshold": 0.50},
     {"metric": "no_trade_band_hit_rate", "operator": "maximum", "threshold": 0.80},
 )
+_PRODUCTION_CURRENT_SELECTION_RULE = "optimization_gate_then_user_value_score"
+_PRODUCTION_CURRENT_SELECTION_RULE_VERSION = 1
+_PRODUCTION_CURRENT_PRIORITY_METRICS = (
+    "blocked_directional_accuracy_mean",
+    "mu_calibration",
+    "blocked_exact_smooth_position_mae_mean",
+    "user_value_forecast_stability_score",
+    "sigma_calibration",
+    "max_drawdown",
+    "blocked_turnover_mean",
+    "blocked_objective_log_wealth_minus_lambda_cvar_mean",
+)
 
 
 def tune_latest_dataset(
@@ -58,6 +80,8 @@ def tune_latest_dataset(
     seed: int = 7,
     config_overrides: dict[str, object] | None = None,
     lookback_days: int | None = None,
+    candidate_limit: int | None = None,
+    quick_mode: bool = False,
 ) -> dict[str, object]:
     csv_path = csv_path.expanduser().resolve()
     artifact_root = artifact_root.expanduser().resolve()
@@ -105,11 +129,16 @@ def tune_latest_dataset(
     inherited_parameters = _load_parameter_seed(artifact_root)
     inherited_parameters.update(tunable_overrides)
     candidate_parameters = _build_candidate_parameters(inherited_parameters)
+    evaluated_candidate_parameters, resolved_candidate_limit = _resolve_session_candidates(
+        candidate_parameters,
+        candidate_limit=candidate_limit,
+        quick_mode=quick_mode,
+    )
     session_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     session_dir = ensure_directory(archive_root / f"session_{session_id}")
     leaderboard: list[dict[str, object]] = []
 
-    for index, parameters in enumerate(candidate_parameters, start=1):
+    for index, parameters in enumerate(evaluated_candidate_parameters, start=1):
         candidate_name = f"candidate_{index:02d}"
         candidate_dir = ensure_directory(session_dir / candidate_name)
         config = TrainingConfig(seed=seed, output_dir=str(candidate_dir), **static_overrides, **parameters)
@@ -120,7 +149,7 @@ def tune_latest_dataset(
             config,
             latest_example=latest_inference_example,
         )
-        _write_run_artifacts(
+        diagnostics_summary = _write_run_artifacts(
             output_dir=candidate_dir,
             model=model,
             examples=examples,
@@ -154,12 +183,26 @@ def tune_latest_dataset(
             "anchor_time": prediction.anchor_time,
             **parameters,
         }
+        result_row.update(_extract_forecast_profile_metrics(prediction))
+        result_row.update(_extract_blocked_candidate_metrics(diagnostics_summary, config))
         result_row.update(_evaluate_optimization_gate(result_row))
+        result_row.update(_build_user_value_metrics(result_row))
         leaderboard.append(result_row)
 
     leaderboard.sort(
         key=lambda row: (
             not bool(row["optimization_gate_passed"]),
+            _descending_metric(
+                row,
+                "blocked_objective_log_wealth_minus_lambda_cvar_mean",
+                "project_value_score",
+            ),
+            _descending_metric(
+                row,
+                "blocked_average_log_wealth_mean",
+                "average_log_wealth",
+            ),
+            _ascending_metric(row, "blocked_turnover_mean"),
             -float(row["project_value_score"]),
             -float(row["average_log_wealth"]),
             -float(row["realized_pnl_per_anchor"]),
@@ -172,27 +215,40 @@ def tune_latest_dataset(
             float(row["best_validation_loss"]),
         )
     )
-    save_json(session_dir / "leaderboard.json", {"results": leaderboard})
+    save_json(
+        session_dir / "leaderboard.json",
+        {
+            "results": leaderboard,
+            "generated_candidate_count": len(candidate_parameters),
+            "evaluated_candidate_count": len(evaluated_candidate_parameters),
+            "candidate_limit": resolved_candidate_limit,
+            "quick_mode": bool(quick_mode),
+        },
+    )
 
     best_result = leaderboard[0]
     accepted_result = next(
         (row for row in leaderboard if bool(row["optimization_gate_passed"])),
         None,
     )
+    production_result = _select_production_current_candidate(leaderboard)
     archived_current_dir = None
     archived_legacy_root_dirs: list[Path] = []
 
-    if accepted_result is not None:
+    if production_result is not None:
         accepted_candidate_dir = session_dir / str(accepted_result["candidate"])
+        accepted_candidate_config = load_json(accepted_candidate_dir / "config.json")
         load_required_diagnostics_summary(accepted_candidate_dir)
+        production_candidate_dir = session_dir / str(production_result["candidate"])
+        load_required_diagnostics_summary(production_candidate_dir)
         archived_current_dir = _archive_existing_current(current_dir, session_dir)
         archived_legacy_root_dirs = _archive_legacy_root_runs(artifact_root, session_dir)
 
         if current_dir.exists():
             shutil.rmtree(current_dir)
-        shutil.copytree(accepted_candidate_dir, current_dir)
+        shutil.copytree(production_candidate_dir, current_dir)
 
-    current_dir_payload = str(current_dir) if current_dir.exists() or accepted_result is not None else None
+    current_dir_payload = str(current_dir) if current_dir.exists() or production_result is not None else None
 
     generated_at_utc = datetime.now(timezone.utc).isoformat()
     manifest = {
@@ -206,13 +262,22 @@ def tune_latest_dataset(
         "manifest_path": str(session_dir / "manifest.json"),
         "source_path": str(csv_path),
         "lookback_days": lookback_days,
+        "quick_mode": bool(quick_mode),
+        "candidate_limit": resolved_candidate_limit,
         **price_scale_manifest_fields(source_payload),
         "sample_count": len(examples),
         "source_rows_original": source_rows_original,
         "source_rows_used": source_rows_used,
+        "generated_candidate_count": len(candidate_parameters),
+        "evaluated_candidate_count": len(evaluated_candidate_parameters),
         "best_candidate": best_result,
         "accepted_candidate": accepted_result,
-        "current_updated": accepted_result is not None,
+        "production_current_candidate": production_result,
+        "production_current_selection": _build_production_current_selection_payload(
+            accepted_result=accepted_result,
+            production_result=production_result,
+        ),
+        "current_updated": production_result is not None,
         "interrupted_tuning": accepted_result is None,
         "optimization_gate": {
             "status": "passed" if accepted_result is not None else "failed",
@@ -226,19 +291,22 @@ def tune_latest_dataset(
             "thresholds": _optimization_gate_thresholds_payload(),
             "accepted_candidate": None if accepted_result is None else accepted_result["candidate"],
             "best_candidate": best_result["candidate"],
+            "production_current_candidate": (
+                None if production_result is None else production_result["candidate"]
+            ),
         },
         "archived_previous_current_dir": str(archived_current_dir) if archived_current_dir else None,
         "archived_legacy_root_dirs": [str(path) for path in archived_legacy_root_dirs],
     }
     save_json(session_dir / "manifest.json", manifest)
-    if accepted_result is not None:
+    if production_result is not None:
         save_json(
             artifact_root / "best_params.json",
             {
                 "updated_at": manifest["generated_at"],
                 "source_path": str(csv_path),
                 "parameters": {
-                    key: accepted_result[key]
+                    key: accepted_candidate_config[key]
                     for key in (
                         "epochs",
                         "batch_size",
@@ -246,34 +314,34 @@ def tune_latest_dataset(
                         "hidden_dim",
                         "dropout",
                         "weight_decay",
+                        "evaluation_state_reset_mode",
+                        "min_policy_sigma",
+                        "policy_cost_multiplier",
+                        "policy_gamma_multiplier",
+                        "q_max",
+                        "cvar_weight",
+                        "tie_policy_to_forecast_head",
+                        "disable_overlay_branch",
                     )
                 },
             },
         )
-        save_json(
-            current_dir / "source.json",
-            build_artifact_source_payload(
-                materialize_artifact_source(source_payload, current_dir, base_bars=base_bars),
-                current_dir,
-                artifact_kind="training_run",
-                generated_at_utc=manifest["generated_at_utc"],
-                sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=True)),
-            ),
+        current_source_payload = load_json(current_dir / "source.json")
+        current_source_payload.update(
+            build_current_alias_metadata(
+                artifact_root,
+                production_candidate_dir,
+                selection_timestamp_utc=str(manifest["generated_at_utc"]),
+            )
         )
+        current_source_payload["sub_artifacts"] = _extend_current_sub_artifacts(
+            current_source_payload,
+            production_candidate_dir,
+        )
+        save_json(current_dir / "source.json", current_source_payload)
         generate_research_report(
             current_dir,
             report_path=artifact_root.parent.parent / "report_signalcascade_xauusd.md",
-        )
-        current_source_payload = build_artifact_source_payload(
-            materialize_artifact_source(source_payload, current_dir, base_bars=base_bars),
-            current_dir,
-            artifact_kind="training_run",
-            generated_at_utc=manifest["generated_at_utc"],
-            sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=True)),
-        )
-        save_json(
-            current_dir / "source.json",
-            current_source_payload,
         )
         save_json(
             current_dir / "manifest.json",
@@ -285,7 +353,7 @@ def tune_latest_dataset(
                     if current_source_payload.get("parent_artifact_id") is None
                     else str(current_source_payload["parent_artifact_id"])
                 ),
-                generated_at_utc=manifest["generated_at_utc"],
+                generated_at_utc=str(current_source_payload["generated_at_utc"]),
                 source_payload=current_source_payload,
                 entrypoints=build_artifact_entrypoints(
                     current_source_payload,
@@ -294,6 +362,68 @@ def tune_latest_dataset(
             ),
         )
     return manifest
+
+
+def _resolve_session_candidates(
+    candidate_parameters: list[dict[str, object]],
+    *,
+    candidate_limit: int | None,
+    quick_mode: bool,
+) -> tuple[list[dict[str, object]], int | None]:
+    if candidate_limit is not None and int(candidate_limit) < 1:
+        raise ValueError("candidate_limit must be >= 1")
+
+    resolved_candidate_limit = (
+        int(candidate_limit)
+        if candidate_limit is not None
+        else (
+            min(len(candidate_parameters), _DEFAULT_QUICK_MODE_CANDIDATE_LIMIT)
+            if quick_mode
+            else None
+        )
+    )
+    if resolved_candidate_limit is None:
+        return list(candidate_parameters), None
+    if not quick_mode:
+        return list(candidate_parameters[:resolved_candidate_limit]), resolved_candidate_limit
+    prioritized_candidates = _prioritize_quick_mode_candidates(candidate_parameters)
+    return prioritized_candidates[:resolved_candidate_limit], resolved_candidate_limit
+
+
+def _prioritize_quick_mode_candidates(
+    candidate_parameters: list[dict[str, object]],
+) -> list[dict[str, object]]:
+    if not candidate_parameters:
+        return []
+
+    prioritized: list[dict[str, object]] = []
+    seen: set[tuple[object, ...]] = set()
+
+    def add_candidate(candidate: dict[str, object]) -> None:
+        key = tuple((key, candidate[key]) for key in sorted(candidate))
+        if key in seen:
+            return
+        seen.add(key)
+        prioritized.append(candidate)
+
+    add_candidate(candidate_parameters[0])
+    for target_tie, target_overlay_off in (
+        (True, False),
+        (False, True),
+        (True, True),
+    ):
+        for candidate in candidate_parameters:
+            if (
+                bool(candidate.get("tie_policy_to_forecast_head")) == target_tie
+                and bool(candidate.get("disable_overlay_branch")) == target_overlay_off
+            ):
+                add_candidate(candidate)
+                break
+    for candidate in candidate_parameters:
+        add_candidate(candidate)
+    return prioritized
+
+
 def _write_run_artifacts(
     output_dir: Path,
     model,
@@ -306,7 +436,7 @@ def _write_run_artifacts(
     sample_count: int,
     source_rows_original: int,
     source_rows_used: int,
-) -> None:
+) -> dict[str, object]:
     artifact_source_payload = materialize_artifact_source(
         source_payload,
         output_dir,
@@ -337,14 +467,23 @@ def _write_run_artifacts(
                 "hidden_dim": config.hidden_dim,
                 "dropout": config.dropout,
                 "weight_decay": config.weight_decay,
+                "evaluation_state_reset_mode": config.evaluation_state_reset_mode,
+                "min_policy_sigma": config.min_policy_sigma,
+                "policy_cost_multiplier": config.policy_cost_multiplier,
+                "policy_gamma_multiplier": config.policy_gamma_multiplier,
+                "q_max": config.q_max,
+                "cvar_weight": config.cvar_weight,
+                "tie_policy_to_forecast_head": config.tie_policy_to_forecast_head,
+                "disable_overlay_branch": config.disable_overlay_branch,
             },
         ),
     )
-    export_review_diagnostics(
+    diagnostics_summary = export_review_diagnostics(
         output_dir=output_dir,
         model=model,
         examples=examples,
         config=config,
+        checkpoint_audit=dict(summary.get("checkpoint_audit") or {}),
         source_payload=artifact_source_payload,
         source_rows_original=source_rows_original,
         source_rows_used=source_rows_used,
@@ -359,6 +498,7 @@ def _write_run_artifacts(
             sub_artifacts=build_subartifact_lineage(_training_sub_artifacts(include_report=False)),
         ),
     )
+    return diagnostics_summary
 
 
 def _training_sub_artifacts(*, include_report: bool) -> dict[str, str]:
@@ -423,6 +563,41 @@ def _coerce_parameter_payload(payload: dict[str, object]) -> dict[str, object]:
         "weight_decay": float(
             payload.get("weight_decay", _FALLBACK_PARAMETERS["weight_decay"])
         ),
+        "evaluation_state_reset_mode": str(
+            payload.get(
+                "evaluation_state_reset_mode",
+                _FALLBACK_PARAMETERS["evaluation_state_reset_mode"],
+            )
+        ),
+        "min_policy_sigma": float(
+            payload.get("min_policy_sigma", _FALLBACK_PARAMETERS["min_policy_sigma"])
+        ),
+        "policy_cost_multiplier": float(
+            payload.get(
+                "policy_cost_multiplier",
+                _FALLBACK_PARAMETERS["policy_cost_multiplier"],
+            )
+        ),
+        "policy_gamma_multiplier": float(
+            payload.get(
+                "policy_gamma_multiplier",
+                _FALLBACK_PARAMETERS["policy_gamma_multiplier"],
+            )
+        ),
+        "q_max": float(payload.get("q_max", _FALLBACK_PARAMETERS["q_max"])),
+        "cvar_weight": float(payload.get("cvar_weight", _FALLBACK_PARAMETERS["cvar_weight"])),
+        "tie_policy_to_forecast_head": bool(
+            payload.get(
+                "tie_policy_to_forecast_head",
+                _FALLBACK_PARAMETERS["tie_policy_to_forecast_head"],
+            )
+        ),
+        "disable_overlay_branch": bool(
+            payload.get(
+                "disable_overlay_branch",
+                _FALLBACK_PARAMETERS["disable_overlay_branch"],
+            )
+        ),
     }
 
 
@@ -434,14 +609,44 @@ def _extract_tunable_overrides(payload: dict[str, object]) -> dict[str, object]:
         "hidden_dim",
         "dropout",
         "weight_decay",
+        "evaluation_state_reset_mode",
+        "min_policy_sigma",
+        "policy_cost_multiplier",
+        "policy_gamma_multiplier",
+        "q_max",
+        "cvar_weight",
+        "tie_policy_to_forecast_head",
+        "disable_overlay_branch",
     }
     return {key: payload[key] for key in tunable_keys if key in payload}
 
 
 def _build_candidate_parameters(previous: dict[str, object]) -> list[dict[str, object]]:
     base = _coerce_parameter_payload(previous)
+    structural_candidates = [
+        {
+            **base,
+            "tie_policy_to_forecast_head": False,
+            "disable_overlay_branch": False,
+        },
+        {
+            **base,
+            "tie_policy_to_forecast_head": True,
+            "disable_overlay_branch": False,
+        },
+        {
+            **base,
+            "tie_policy_to_forecast_head": False,
+            "disable_overlay_branch": True,
+        },
+        {
+            **base,
+            "tie_policy_to_forecast_head": True,
+            "disable_overlay_branch": True,
+        },
+    ]
     candidates = [
-        base,
+        *structural_candidates,
         {
             **base,
             "epochs": _clip_int(base["epochs"] + 2, minimum=6, maximum=24),
@@ -477,6 +682,60 @@ def _build_candidate_parameters(previous: dict[str, object]) -> list[dict[str, o
             "batch_size": _clip_batch_size(base["batch_size"] // 2),
             "epochs": _clip_int(base["epochs"] + 3, minimum=6, maximum=24),
         },
+        {
+            **base,
+            "evaluation_state_reset_mode": _alternate_state_reset_mode(
+                base["evaluation_state_reset_mode"]
+            ),
+        },
+        {
+            **base,
+            "policy_cost_multiplier": _clip_policy_multiplier(
+                base["policy_cost_multiplier"] * 0.5
+            ),
+        },
+        {
+            **base,
+            "policy_cost_multiplier": _clip_policy_multiplier(
+                base["policy_cost_multiplier"] * 2.0
+            ),
+        },
+        {
+            **base,
+            "policy_gamma_multiplier": _clip_policy_multiplier(
+                base["policy_gamma_multiplier"] * 0.5
+            ),
+        },
+        {
+            **base,
+            "policy_gamma_multiplier": _clip_policy_multiplier(
+                base["policy_gamma_multiplier"] * 2.0
+            ),
+        },
+        {
+            **base,
+            "q_max": _clip_q_max(base["q_max"] + 0.25),
+        },
+        {
+            **base,
+            "q_max": _clip_q_max(base["q_max"] - 0.25),
+        },
+        {
+            **base,
+            "cvar_weight": _clip_cvar_weight(base["cvar_weight"] * 0.5),
+        },
+        {
+            **base,
+            "cvar_weight": _clip_cvar_weight(base["cvar_weight"] * 2.0),
+        },
+        {
+            **base,
+            "min_policy_sigma": _clip_min_policy_sigma(base["min_policy_sigma"] * 0.5),
+        },
+        {
+            **base,
+            "min_policy_sigma": _clip_min_policy_sigma(base["min_policy_sigma"] * 2.0),
+        },
         dict(_FALLBACK_PARAMETERS),
     ]
 
@@ -490,13 +749,300 @@ def _build_candidate_parameters(previous: dict[str, object]) -> list[dict[str, o
             "hidden_dim": _clip_hidden_dim(int(candidate["hidden_dim"])),
             "dropout": _clip_dropout(float(candidate["dropout"])),
             "weight_decay": _round_float(float(candidate["weight_decay"])),
+            "evaluation_state_reset_mode": str(candidate["evaluation_state_reset_mode"]),
+            "min_policy_sigma": _clip_min_policy_sigma(float(candidate["min_policy_sigma"])),
+            "policy_cost_multiplier": _clip_policy_multiplier(
+                float(candidate["policy_cost_multiplier"])
+            ),
+            "policy_gamma_multiplier": _clip_policy_multiplier(
+                float(candidate["policy_gamma_multiplier"])
+            ),
+            "q_max": _clip_q_max(float(candidate["q_max"])),
+            "cvar_weight": _clip_cvar_weight(float(candidate["cvar_weight"])),
+            "tie_policy_to_forecast_head": bool(candidate["tie_policy_to_forecast_head"]),
+            "disable_overlay_branch": bool(candidate["disable_overlay_branch"]),
         }
-        key = tuple(normalized.values())
+        key = tuple(normalized[key] for key in sorted(normalized))
         if key in seen:
             continue
         seen.add(key)
         deduped.append(normalized)
     return deduped
+
+
+def _extract_blocked_candidate_metrics(
+    diagnostics_summary: dict[str, object],
+    config: TrainingConfig,
+) -> dict[str, object]:
+    blocked_payload = diagnostics_summary.get("blocked_walk_forward_evaluation")
+    if not isinstance(blocked_payload, dict):
+        return {}
+
+    state_reset_modes = blocked_payload.get("state_reset_modes")
+    if not isinstance(state_reset_modes, dict):
+        return {}
+
+    mode_payload = state_reset_modes.get(config.evaluation_state_reset_mode)
+    if not isinstance(mode_payload, dict):
+        return {}
+
+    metrics: dict[str, object] = {
+        "blocked_state_reset_mode": config.evaluation_state_reset_mode,
+        "blocked_best_state_reset_mode_by_mean_log_wealth": blocked_payload.get(
+            "best_state_reset_mode_by_mean_log_wealth"
+        ),
+    }
+
+    for source_key, target_key in (
+        ("average_log_wealth_mean", "blocked_average_log_wealth_mean"),
+        ("turnover_mean", "blocked_turnover_mean"),
+        ("directional_accuracy_mean", "blocked_directional_accuracy_mean"),
+        ("exact_smooth_position_mae_mean", "blocked_exact_smooth_position_mae_mean"),
+    ):
+        value = _finite_float_or_none(mode_payload.get(source_key))
+        if value is not None:
+            metrics[target_key] = value
+
+    folds = mode_payload.get("folds")
+    if isinstance(folds, list):
+        cvar_values = [
+            float(fold["cvar_tail_loss"])
+            for fold in folds
+            if isinstance(fold, dict)
+            and _finite_float_or_none(fold.get("cvar_tail_loss")) is not None
+        ]
+        if cvar_values:
+            blocked_cvar_mean = sum(cvar_values) / len(cvar_values)
+            metrics["blocked_cvar_tail_loss_mean"] = blocked_cvar_mean
+            blocked_wealth = _finite_float_or_none(metrics.get("blocked_average_log_wealth_mean"))
+            if blocked_wealth is not None:
+                metrics["blocked_objective_log_wealth_minus_lambda_cvar_mean"] = (
+                    blocked_wealth - (float(config.cvar_weight) * blocked_cvar_mean)
+                )
+
+    return metrics
+
+
+def _extract_forecast_profile_metrics(prediction) -> dict[str, object]:
+    current_close = _finite_float_or_none(getattr(prediction, "current_close", None))
+    if current_close is None or current_close <= 0.0:
+        return {}
+
+    predicted_closes = getattr(prediction, "predicted_closes", None)
+    if not isinstance(predicted_closes, dict):
+        return {}
+
+    horizon_returns: list[tuple[int, float]] = []
+    for horizon, predicted_close in predicted_closes.items():
+        predicted_close_value = _finite_float_or_none(predicted_close)
+        if predicted_close_value is None:
+            continue
+        horizon_returns.append(
+            (int(horizon), (predicted_close_value / current_close) - 1.0)
+        )
+
+    if not horizon_returns:
+        return {}
+
+    horizon_returns.sort(key=lambda item: item[0])
+    max_abs_return = max(abs(expected_return) for _, expected_return in horizon_returns)
+    jump_max = max(
+        (
+            abs(next_return - current_return)
+            for (_, current_return), (_, next_return) in zip(
+                horizon_returns,
+                horizon_returns[1:],
+            )
+        ),
+        default=0.0,
+    )
+    max_horizon = max(horizon for horizon, _ in horizon_returns)
+    long_horizon_threshold = max(3, math.ceil(max_horizon * 0.4))
+    long_horizon_abs_max = max(
+        (
+            abs(expected_return)
+            for horizon, expected_return in horizon_returns
+            if horizon >= long_horizon_threshold
+        ),
+        default=max_abs_return,
+    )
+    return {
+        "forecast_return_pct_abs_max": max_abs_return,
+        "forecast_return_pct_jump_max": jump_max,
+        "forecast_long_horizon_return_pct_abs_max": long_horizon_abs_max,
+    }
+
+
+def _build_user_value_metrics(candidate: dict[str, object]) -> dict[str, object]:
+    chart_fidelity_score = _build_chart_fidelity_score(candidate)
+    sigma_band_score = _inverse_linear_score(
+        candidate.get("sigma_calibration"),
+        upper_bound=0.20,
+        default=0.5,
+    )
+    execution_stability_score = _build_execution_stability_score(candidate)
+    economic_score = _wealth_like_score(
+        candidate.get("blocked_objective_log_wealth_minus_lambda_cvar_mean"),
+        candidate.get("average_log_wealth"),
+    )
+    forecast_stability_score = _build_forecast_stability_score(candidate)
+    base_user_value_score = (
+        (0.55 * chart_fidelity_score)
+        + (0.10 * sigma_band_score)
+        + (0.20 * execution_stability_score)
+        + (0.15 * economic_score)
+    )
+    user_value_score = (0.70 * base_user_value_score) + (0.30 * forecast_stability_score)
+    return {
+        "user_value_score": user_value_score,
+        "user_value_base_score": base_user_value_score,
+        "user_value_chart_fidelity_score": chart_fidelity_score,
+        "user_value_sigma_band_score": sigma_band_score,
+        "user_value_execution_stability_score": execution_stability_score,
+        "user_value_economic_score": economic_score,
+        "user_value_forecast_stability_score": forecast_stability_score,
+    }
+
+
+def _build_chart_fidelity_score(candidate: dict[str, object]) -> float:
+    directional_score = _clamp01(
+        _metric_with_fallback(
+            candidate,
+            primary_key="blocked_directional_accuracy_mean",
+            fallback_key="directional_accuracy",
+            default=0.5,
+        )
+    )
+    mu_fit_score = _inverse_linear_score(
+        candidate.get("mu_calibration"),
+        upper_bound=0.20,
+        default=0.5,
+    )
+    position_consistency_score = _inverse_linear_score(
+        _metric_with_fallback(
+            candidate,
+            primary_key="blocked_exact_smooth_position_mae_mean",
+            fallback_key="exact_smooth_position_mae",
+            default=0.25,
+        ),
+        upper_bound=0.25,
+        default=0.5,
+    )
+    return (
+        (0.50 * directional_score)
+        + (0.20 * mu_fit_score)
+        + (0.30 * position_consistency_score)
+    )
+
+
+def _build_execution_stability_score(candidate: dict[str, object]) -> float:
+    drawdown_score = _inverse_linear_score(
+        candidate.get("max_drawdown"),
+        upper_bound=0.15,
+        default=0.0,
+    )
+    turnover_score = _inverse_linear_score(
+        candidate.get("blocked_turnover_mean"),
+        upper_bound=2.0,
+        default=0.0,
+    )
+    return (0.60 * drawdown_score) + (0.40 * turnover_score)
+
+
+def _build_forecast_stability_score(candidate: dict[str, object]) -> float:
+    jump_score = _inverse_linear_score(
+        candidate.get("forecast_return_pct_jump_max"),
+        upper_bound=0.16,
+        default=0.5,
+    )
+    long_horizon_score = _inverse_linear_score(
+        candidate.get("forecast_long_horizon_return_pct_abs_max"),
+        upper_bound=0.12,
+        default=0.5,
+    )
+    return (0.60 * jump_score) + (0.40 * long_horizon_score)
+
+
+def _select_production_current_candidate(
+    leaderboard: list[dict[str, object]],
+) -> dict[str, object] | None:
+    passed_rows = [row for row in leaderboard if bool(row.get("optimization_gate_passed"))]
+    if not passed_rows:
+        return None
+    return min(
+        passed_rows,
+        key=lambda row: (
+            -_metric_with_fallback(
+                row,
+                primary_key="user_value_score",
+                fallback_key="project_value_score",
+                default=0.0,
+            ),
+            -_metric_with_fallback(
+                row,
+                primary_key="user_value_chart_fidelity_score",
+                fallback_key="project_value_score",
+                default=0.0,
+            ),
+            -_metric_with_fallback(
+                row,
+                primary_key="user_value_forecast_stability_score",
+                fallback_key="user_value_chart_fidelity_score",
+                default=0.0,
+            ),
+            _ascending_metric(row, "blocked_exact_smooth_position_mae_mean"),
+            _ascending_metric(row, "sigma_calibration"),
+            _ascending_metric(row, "blocked_turnover_mean"),
+            _descending_metric(
+                row,
+                "blocked_objective_log_wealth_minus_lambda_cvar_mean",
+                "average_log_wealth",
+            ),
+            str(row.get("candidate", "")),
+        ),
+    )
+
+
+def _build_production_current_selection_payload(
+    *,
+    accepted_result: dict[str, object] | None,
+    production_result: dict[str, object] | None,
+) -> dict[str, object]:
+    if production_result is None:
+        return {
+            "selection_mode": "no_accepted_candidate",
+            "selection_rule": _PRODUCTION_CURRENT_SELECTION_RULE,
+            "selection_rule_version": _PRODUCTION_CURRENT_SELECTION_RULE_VERSION,
+            "decision_summary": "production current was not updated because no candidate passed the optimization gate.",
+            "override_reason": None,
+            "override_priority_metrics": [],
+        }
+    if accepted_result is None or production_result.get("candidate") == accepted_result.get("candidate"):
+        return {
+            "selection_mode": "accepted_candidate",
+            "selection_rule": _PRODUCTION_CURRENT_SELECTION_RULE,
+            "selection_rule_version": _PRODUCTION_CURRENT_SELECTION_RULE_VERSION,
+            "decision_summary": (
+                "production current matches the accepted candidate after user-value selection."
+            ),
+            "override_reason": None,
+            "override_priority_metrics": [],
+        }
+    return {
+        "selection_mode": "auto_user_value_selection",
+        "selection_rule": _PRODUCTION_CURRENT_SELECTION_RULE,
+        "selection_rule_version": _PRODUCTION_CURRENT_SELECTION_RULE_VERSION,
+        "decision_summary": (
+            "production current differs from the accepted candidate because chart fidelity, "
+            "forecast stability, sigma-band reliability, and execution stability took priority "
+            "over blocked-objective rank."
+        ),
+        "override_reason": (
+            "production current prioritizes chart fidelity, forecast stability, sigma-band reliability, "
+            "and execution stability over blocked-objective winner"
+        ),
+        "override_priority_metrics": list(_PRODUCTION_CURRENT_PRIORITY_METRICS),
+    }
 
 
 def _archive_existing_current(current_dir: Path, session_dir: Path) -> Path | None:
@@ -511,6 +1057,27 @@ def _archive_existing_current(current_dir: Path, session_dir: Path) -> Path | No
         shutil.rmtree(archived_dir)
     shutil.move(str(current_dir), archived_dir)
     return archived_dir
+
+
+def _extend_current_sub_artifacts(
+    current_source_payload: dict[str, object],
+    source_artifact_dir: Path,
+) -> dict[str, dict[str, object]]:
+    existing_payload = current_source_payload.get("sub_artifacts")
+    existing = dict(existing_payload) if isinstance(existing_payload, dict) else {}
+    source_artifact_id = current_source_payload.get("artifact_id")
+    for name, materialization in (
+        ("analysis.json", "regenerated"),
+        ("manifest.json", "generated"),
+        ("research_report.md", "regenerated"),
+    ):
+        entry = dict(existing.get(name, {})) if isinstance(existing.get(name), dict) else {}
+        entry["materialization"] = materialization
+        entry["source_artifact_dir"] = str(source_artifact_dir)
+        if source_artifact_id is not None:
+            entry["source_artifact_id"] = str(source_artifact_id)
+        existing[name] = entry
+    return existing
 
 
 def _archive_legacy_root_runs(artifact_root: Path, session_dir: Path) -> list[Path]:
@@ -551,8 +1118,114 @@ def _clip_dropout(value: float) -> float:
     return round(max(0.05, min(0.25, value)), 2)
 
 
+def _clip_min_policy_sigma(value: float) -> float:
+    candidates = (5e-5, 1e-4, 2e-4, 4e-4)
+    return min(candidates, key=lambda candidate: abs(candidate - max(5e-5, value)))
+
+
+def _clip_policy_multiplier(value: float) -> float:
+    candidates = (0.5, 1.0, 2.0, 4.0, 6.0)
+    return min(candidates, key=lambda candidate: abs(candidate - max(0.5, value)))
+
+
+def _clip_q_max(value: float) -> float:
+    candidates = (0.5, 0.75, 1.0, 1.25, 1.5)
+    return min(candidates, key=lambda candidate: abs(candidate - max(0.5, value)))
+
+
+def _clip_cvar_weight(value: float) -> float:
+    candidates = (0.05, 0.1, 0.2, 0.4, 0.8)
+    return min(candidates, key=lambda candidate: abs(candidate - max(0.05, value)))
+
+
+def _alternate_state_reset_mode(value: str) -> str:
+    return (
+        "reset_each_session_or_window"
+        if str(value) == "carry_on"
+        else "carry_on"
+    )
+
+
 def _round_float(value: float) -> float:
     return float(f"{value:.6g}")
+
+
+def _finite_float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    numeric_value = float(value)
+    if not math.isfinite(numeric_value):
+        return None
+    return numeric_value
+
+
+def _metric_with_fallback(
+    row: dict[str, object],
+    *,
+    primary_key: str,
+    fallback_key: str,
+    default: float,
+) -> float:
+    primary_value = _finite_float_or_none(row.get(primary_key))
+    if primary_value is not None:
+        return primary_value
+    fallback_value = _finite_float_or_none(row.get(fallback_key))
+    if fallback_value is not None:
+        return fallback_value
+    return float(default)
+
+
+def _inverse_linear_score(
+    value: object,
+    *,
+    upper_bound: float,
+    default: float,
+) -> float:
+    numeric_value = _finite_float_or_none(value)
+    if numeric_value is None:
+        return _clamp01(default)
+    if upper_bound <= 0.0:
+        return 0.0
+    return _clamp01(1.0 - (numeric_value / upper_bound))
+
+
+def _wealth_like_score(primary_value: object, fallback_value: object) -> float:
+    value = _finite_float_or_none(primary_value)
+    if value is None:
+        value = _finite_float_or_none(fallback_value)
+    if value is None:
+        return 0.0
+    return _clamp01(0.5 + (value * 10.0))
+
+
+def _clamp01(value: float) -> float:
+    return max(0.0, min(float(value), 1.0))
+
+
+def _descending_metric(
+    row: dict[str, object],
+    primary_key: str,
+    fallback_key: str,
+) -> float:
+    primary_value = _finite_float_or_none(row.get(primary_key))
+    if primary_value is not None:
+        return -primary_value
+
+    fallback_value = _finite_float_or_none(row.get(fallback_key))
+    if fallback_value is not None:
+        return -fallback_value
+
+    return math.inf
+
+
+def _ascending_metric(
+    row: dict[str, object],
+    primary_key: str,
+) -> float:
+    primary_value = _finite_float_or_none(row.get(primary_key))
+    if primary_value is not None:
+        return primary_value
+    return math.inf
 
 
 def _evaluate_optimization_gate(candidate: dict[str, object]) -> dict[str, object]:

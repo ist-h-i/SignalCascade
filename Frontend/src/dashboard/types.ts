@@ -2,7 +2,9 @@ export type HorizonRow = {
   horizon: number
   hours: number
   muT: number | null
+  policyMuT?: number | null
   sigmaT: number
+  policySigmaT?: number | null
   sigmaTSq: number | null
   predictedClose: number
   lowerClose: number
@@ -126,6 +128,12 @@ export type DashboardData = {
       predictionLagHours: number | null
     }
   }
+  governance?: {
+    selectionMode?: string | null
+    overrideReason?: string | null
+    productionCurrentCandidate?: string | null
+    acceptedCandidate?: string | null
+  }
   run: {
     anchorTime: string
     anchorClose: number
@@ -141,6 +149,10 @@ export type DashboardData = {
     noTradeBandHit: boolean
     gT: number
     selectedPolicyUtility: number
+    policyHeadRelationship?: string | null
+    displayForecastLabel?: string | null
+    policyDriverLabel?: string | null
+    overlayBranchContract?: string | null
     overlayAction: string
     policyStatus: string
     stateResetMode: string | null

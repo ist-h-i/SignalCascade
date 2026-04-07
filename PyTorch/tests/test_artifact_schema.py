@@ -292,9 +292,13 @@ class ArtifactSchemaTests(unittest.TestCase):
         payload = config.to_dict()
         restored = TrainingConfig.from_dict(payload)
 
-        self.assertEqual(payload["config_schema_version"], 4)
+        self.assertEqual(payload["config_schema_version"], 7)
         self.assertEqual(restored.training_state_reset_mode, "carry_on")
         self.assertEqual(restored.evaluation_state_reset_mode, "carry_on")
+        self.assertEqual(restored.policy_cost_multiplier, 1.0)
+        self.assertEqual(restored.policy_gamma_multiplier, 1.0)
+        self.assertFalse(restored.tie_policy_to_forecast_head)
+        self.assertFalse(restored.disable_overlay_branch)
         self.assertEqual(
             restored.diagnostic_state_reset_modes,
             ("carry_on", "reset_each_session_or_window", "reset_each_example"),
@@ -304,6 +308,8 @@ class ArtifactSchemaTests(unittest.TestCase):
             ("carry_on", "reset_each_session_or_window"),
         )
         self.assertEqual(restored.policy_sweep_min_policy_sigmas, (5e-5, 1e-4, 2e-4))
+        self.assertEqual(restored.policy_sweep_q_max_values, (1.0,))
+        self.assertEqual(restored.policy_sweep_cvar_weights, (0.2,))
         self.assertEqual(payload["feature_contract_version"], TRAINING_EXAMPLE_CONTRACT_VERSION)
         self.assertEqual(tuple(payload["timeframe_feature_names"]), TIMEFRAME_FEATURE_NAMES)
         self.assertEqual(tuple(payload["state_feature_names"]), STATE_FEATURE_NAMES)
@@ -369,8 +375,14 @@ class ArtifactSchemaTests(unittest.TestCase):
 
         self.assertEqual(restored.training_state_reset_mode, "carry_on")
         self.assertEqual(restored.evaluation_state_reset_mode, "carry_on")
+        self.assertEqual(restored.policy_cost_multiplier, 1.0)
+        self.assertEqual(restored.policy_gamma_multiplier, 1.0)
+        self.assertFalse(restored.tie_policy_to_forecast_head)
+        self.assertFalse(restored.disable_overlay_branch)
         self.assertEqual(restored.policy_sweep_state_reset_modes, ("carry_on",))
         self.assertEqual(restored.policy_sweep_min_policy_sigmas, (1e-4,))
+        self.assertEqual(restored.policy_sweep_q_max_values, (1.0,))
+        self.assertEqual(restored.policy_sweep_cvar_weights, (0.2,))
 
     def test_artifact_source_payload_materializes_ids_hashes_and_snapshot_metadata(self) -> None:
         config = TrainingConfig(output_dir="artifacts/demo")
@@ -428,7 +440,7 @@ class ArtifactSchemaTests(unittest.TestCase):
         self.assertIsNotNone(payload.get("artifact_id"))
         self.assertIsNotNone(payload.get("config_sha256"))
         self.assertIsNotNone(payload.get("data_snapshot_sha256"))
-        self.assertEqual(payload["sub_artifacts"]["config.json"]["schema_version"], 4)
+        self.assertEqual(payload["sub_artifacts"]["config.json"]["schema_version"], 7)
         self.assertIsNotNone(payload["sub_artifacts"]["data_snapshot.csv"].get("sha256"))
 
     def test_overlay_output_dir_defaults_to_sibling_and_rejects_source_artifact_dir(self) -> None:
@@ -484,6 +496,14 @@ class ArtifactSchemaTests(unittest.TestCase):
             promoted_manifest = json.loads((current_dir / "manifest.json").read_text(encoding="utf-8"))
             self.assertEqual(promoted_source["artifact_kind"], "training_run")
             self.assertEqual(promoted_source["artifact_id"], "artifact-123")
+            self.assertEqual(
+                promoted_source["current_alias_contract"]["alias_role"],
+                "production_current",
+            )
+            self.assertEqual(
+                promoted_source["current_selection_governance"]["selection_mode"],
+                "manual_promote_without_session_context",
+            )
             self.assertEqual(promoted_manifest["schema_version"], 1)
             self.assertEqual(promoted_manifest["artifact_kind"], "training_run")
             self.assertEqual(promoted_manifest["artifact_id"], "artifact-123")
@@ -500,17 +520,66 @@ class ArtifactSchemaTests(unittest.TestCase):
             source_source = json.loads((source_dir / "source.json").read_text(encoding="utf-8"))
             self.assertEqual(source_source["artifact_id"], "artifact-123")
 
-    def test_promote_training_run_to_current_rejects_non_training_source(self) -> None:
+    def test_promote_training_run_to_current_accepts_overlay_with_model(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            source_dir = artifact_root / "reruns" / "overlay"
+            current_dir = artifact_root / "current"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            current_dir.mkdir(parents=True, exist_ok=True)
+            (source_dir / "source.json").write_text(
+                json.dumps({"artifact_kind": "diagnostic_replay_overlay", "artifact_id": "overlay-123"}),
+                encoding="utf-8",
+            )
+            (source_dir / "config.json").write_text("{}", encoding="utf-8")
+            (source_dir / "validation_summary.json").write_text(
+                json.dumps({"generated_at_utc": "2026-04-07T00:00:00+00:00"}),
+                encoding="utf-8",
+            )
+            (source_dir / "policy_summary.csv").write_text("horizon\n1\n", encoding="utf-8")
+            (source_dir / "horizon_diag.csv").write_text("horizon\n1\n", encoding="utf-8")
+            (source_dir / "model.pt").write_bytes(b"model")
+
+            promoted_dir = _promote_training_run_to_current(artifact_root, source_dir)
+
+            promoted_source = json.loads((promoted_dir / "source.json").read_text(encoding="utf-8"))
+            promoted_manifest = json.loads((promoted_dir / "manifest.json").read_text(encoding="utf-8"))
+
+        self.assertEqual(promoted_source["artifact_kind"], "diagnostic_replay_overlay")
+        self.assertEqual(promoted_manifest["artifact_kind"], "diagnostic_replay_overlay")
+        self.assertEqual(promoted_manifest["entrypoints"]["model"], "model.pt")
+
+    def test_promote_training_run_to_current_rejects_non_promotable_source(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            source_dir = artifact_root / "reruns" / "legacy"
+            source_dir.mkdir(parents=True, exist_ok=True)
+            (source_dir / "source.json").write_text(
+                json.dumps({"artifact_kind": "legacy"}),
+                encoding="utf-8",
+            )
+
+            with self.assertRaises(ValueError):
+                _promote_training_run_to_current(artifact_root, source_dir)
+
+    def test_promote_training_run_to_current_rejects_overlay_without_model(self) -> None:
         with TemporaryDirectory() as temp_dir:
             artifact_root = Path(temp_dir)
             source_dir = artifact_root / "reruns" / "overlay"
             source_dir.mkdir(parents=True, exist_ok=True)
             (source_dir / "source.json").write_text(
-                json.dumps({"artifact_kind": "diagnostic_replay_overlay"}),
+                json.dumps({"artifact_kind": "diagnostic_replay_overlay", "artifact_id": "overlay-123"}),
                 encoding="utf-8",
             )
+            (source_dir / "config.json").write_text("{}", encoding="utf-8")
+            (source_dir / "validation_summary.json").write_text(
+                json.dumps({"generated_at_utc": "2026-04-07T00:00:00+00:00"}),
+                encoding="utf-8",
+            )
+            (source_dir / "policy_summary.csv").write_text("horizon\n1\n", encoding="utf-8")
+            (source_dir / "horizon_diag.csv").write_text("horizon\n1\n", encoding="utf-8")
 
-            with self.assertRaises(ValueError):
+            with self.assertRaisesRegex(ValueError, "model.pt exists"):
                 _promote_training_run_to_current(artifact_root, source_dir)
 
     def test_promote_training_run_to_current_requires_published_diagnostics(self) -> None:
@@ -655,6 +724,19 @@ class ArtifactSchemaTests(unittest.TestCase):
             self.assertEqual(current_manifest["generated_at_utc"], current_manifest["generated_at"])
             self.assertEqual(current_manifest["generated_at_utc"], source_payload["generated_at_utc"])
             self.assertEqual(current_manifest["entrypoints"]["source"], "source.json")
+            self.assertEqual(
+                source_payload["current_alias_contract"]["alias_role"],
+                "production_current",
+            )
+            self.assertEqual(
+                source_payload["current_selection_governance"]["selection_mode"],
+                "accepted_candidate",
+            )
+            self.assertTrue(
+                Path(
+                    source_payload["current_alias_contract"]["authoritative_paths"]["top_level_report"]
+                ).exists()
+            )
             self.assertEqual(archived_manifest["generated_at_utc"], archived_manifest["generated_at"])
             for relative_path in (
                 "horizon_diag.csv",
@@ -746,6 +828,16 @@ class ArtifactSchemaTests(unittest.TestCase):
         self.assertEqual(payload["price_scale"], 100.0)
         self.assertEqual(payload["current_close_display"], 1.0)
         self.assertAlmostEqual(payload["median_predicted_close_display_by_horizon"]["3"], 1.02, places=9)
+        self.assertEqual(payload["display_forecast"]["label"], "display forecast")
+        self.assertEqual(payload["policy_driver"]["label"], "policy driver")
+        self.assertEqual(
+            payload["policy_driver"]["head_relationship"],
+            "separate_policy_head",
+        )
+        self.assertEqual(
+            payload["overlay_branch_contract"],
+            "auxiliary_latent_branch_without_direct_supervision",
+        )
 
     def test_report_analysis_tracks_artifact_versions(self) -> None:
         prediction = _prediction()
@@ -768,6 +860,8 @@ class ArtifactSchemaTests(unittest.TestCase):
         self.assertEqual(forecast_payload["selected_policy_utility"], 0.05)
         self.assertEqual(forecast_payload["effective_price_scale"], 100.0)
         self.assertAlmostEqual(forecast_payload["anchor_close_display"], 1.0, places=9)
+        self.assertEqual(forecast_payload["display_forecast"]["label"], "display forecast")
+        self.assertEqual(forecast_payload["policy_driver"]["label"], "policy driver")
 
         with TemporaryDirectory() as temp_dir:
             output_dir = Path(temp_dir)
@@ -783,6 +877,20 @@ class ArtifactSchemaTests(unittest.TestCase):
                         "purged_samples": 2,
                         "best_validation_loss": -0.1,
                         "best_epoch": 2.0,
+                        "history": [
+                            {
+                                "epoch": 2.0,
+                                "validation_exact_log_wealth": 0.01,
+                                "validation_exact_cvar_tail_loss": 0.02,
+                                "validation_selection_score": 0.02,
+                            },
+                            {
+                                "epoch": 3.0,
+                                "validation_exact_log_wealth": 0.03,
+                                "validation_exact_cvar_tail_loss": 0.04,
+                                "validation_selection_score": 0.04,
+                            },
+                        ],
                         "validation_metrics": {
                             "average_log_wealth": 0.01,
                             "exact_smooth_horizon_agreement": 1.0,
@@ -825,6 +933,38 @@ class ArtifactSchemaTests(unittest.TestCase):
                             "prediction.json": {"materialization": "copied"},
                             "analysis.json": {"materialization": "regenerated"},
                         },
+                        "current_alias_contract": {
+                            "alias_role": "production_current",
+                            "top_level_report_role": "mirror_of_current_research_report",
+                            "authoritative_paths": {
+                                "runtime_config": str(output_dir / "config.json"),
+                                "prediction": str(output_dir / "prediction.json"),
+                                "forecast_summary": str(output_dir / "forecast_summary.json"),
+                                "source": str(output_dir / "source.json"),
+                                "research_report": str(output_dir / "research_report.md"),
+                                "top_level_report": "/tmp/report_signalcascade_xauusd.md",
+                            },
+                            "runtime_contract": {
+                                "diagnostic_recommendation_pointer": (
+                                    "validation_summary.json.policy_calibration_summary.selected_row"
+                                ),
+                            },
+                            "source_of_truth_summary": "current artifacts are authoritative",
+                        },
+                        "current_selection_governance": {
+                            "selection_mode": "explicit_governance_override",
+                            "selection_rule": "optimization_gate_then_blocked_objective",
+                            "selection_rule_version": 1,
+                            "decision_summary": "override applied",
+                            "best_candidate": {"candidate": "candidate_05"},
+                            "accepted_candidate": {"candidate": "candidate_05"},
+                            "production_current": {"candidate": "candidate_04"},
+                            "paired_frontier": {
+                                "delta_production_minus_accepted": {
+                                    "blocked_turnover_mean": -1.25,
+                                }
+                            },
+                        },
                     }
                 ),
                 encoding="utf-8",
@@ -835,41 +975,100 @@ class ArtifactSchemaTests(unittest.TestCase):
                         "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
                         "generated_at_utc": "2026-04-06T04:40:00+00:00",
                         "primary_state_reset_mode": "reset_each_session_or_window",
+                        "state_vector_summary": {
+                            "shape_posterior_top_class_share": {"1": 1.0},
+                        },
                         "stateful_evaluation": {"carry_on": {"average_log_wealth": 0.01}},
+                        "blocked_walk_forward_evaluation": {
+                            "fold_count": 3,
+                            "fold_sample_counts": [1, 1, 1],
+                            "best_state_reset_mode_by_mean_log_wealth": "carry_on",
+                            "state_reset_modes": {
+                                "carry_on": {
+                                    "fold_count": 3,
+                                    "average_log_wealth_mean": 0.01,
+                                    "average_log_wealth_min": 0.009,
+                                    "average_log_wealth_max": 0.011,
+                                    "turnover_mean": 0.2,
+                                    "directional_accuracy_mean": 0.6,
+                                    "exact_smooth_position_mae_mean": 0.03,
+                                    "folds": [
+                                        {
+                                            "fold_index": 1,
+                                            "sample_count": 1,
+                                            "start_timestamp": "2026-04-06T00:00:00+00:00",
+                                            "end_timestamp": "2026-04-06T00:00:00+00:00",
+                                            "average_log_wealth": 0.009,
+                                            "cvar_tail_loss": 0.01,
+                                            "turnover": 0.2,
+                                            "directional_accuracy": 0.6,
+                                            "exact_smooth_position_mae": 0.03,
+                                        }
+                                    ],
+                                }
+                            },
+                        },
                         "policy_calibration_summary": {
                             "row_count": 1,
                             "pareto_optimal_count": 1,
                             "dominated_count": 0,
                             "policy_calibration_rows_sha256": "rows1234",
-                            "selection_basis": "pareto_rank_then_average_log_wealth_cvar_tail_loss_turnover_row_key",
-                            "selection_rule_version": 2,
-                            "selected_row_key": "state_reset_mode=reset_each_session_or_window|cost_multiplier=4|gamma_multiplier=2|min_policy_sigma=0.0001",
+                            "selection_basis": (
+                                "pareto_rank_then_near_best_blocked_objective_mean_turnover_mean_"
+                                "blocked_objective_mean_average_log_wealth_mean_cvar_tail_loss_mean_row_key"
+                            ),
+                            "selection_rule_version": 4,
+                            "selected_row_key": (
+                                "state_reset_mode=reset_each_session_or_window|cost_multiplier=4|"
+                                "gamma_multiplier=2|min_policy_sigma=0.0001|q_max=1|cvar_weight=0.2"
+                            ),
                             "selected_row": {
-                                "row_key": "state_reset_mode=reset_each_session_or_window|cost_multiplier=4|gamma_multiplier=2|min_policy_sigma=0.0001",
+                                "row_key": (
+                                    "state_reset_mode=reset_each_session_or_window|cost_multiplier=4|"
+                                    "gamma_multiplier=2|min_policy_sigma=0.0001|q_max=1|cvar_weight=0.2"
+                                ),
                                 "state_reset_mode": "reset_each_session_or_window",
                                 "cost_multiplier": 4.0,
                                 "gamma_multiplier": 2.0,
                                 "min_policy_sigma": 0.0001,
+                                "q_max": 1.0,
+                                "cvar_weight": 0.2,
                                 "average_log_wealth": 0.01,
+                                "blocked_average_log_wealth_mean": 0.009,
+                                "blocked_cvar_tail_loss_mean": 0.02,
+                                "blocked_turnover_mean": 0.4,
+                                "blocked_objective_log_wealth_minus_lambda_cvar_mean": 0.005,
                             },
                             "best_row": {
                                 "state_reset_mode": "reset_each_session_or_window",
                                 "cost_multiplier": 4.0,
                                 "gamma_multiplier": 2.0,
                                 "min_policy_sigma": 0.0001,
+                                "q_max": 1.0,
+                                "cvar_weight": 0.2,
                                 "average_log_wealth": 0.01,
                             },
                         },
                         "policy_calibration_sweep": [
                             {
-                                "row_key": "state_reset_mode=reset_each_session_or_window|cost_multiplier=1|gamma_multiplier=1|min_policy_sigma=0.0001",
+                                "row_key": (
+                                    "state_reset_mode=reset_each_session_or_window|cost_multiplier=1|"
+                                    "gamma_multiplier=1|min_policy_sigma=0.0001|q_max=1|cvar_weight=0.2"
+                                ),
                                 "state_reset_mode": "reset_each_session_or_window",
                                 "cost_multiplier": 1.0,
                                 "gamma_multiplier": 1.0,
                                 "min_policy_sigma": 0.0001,
+                                "q_max": 1.0,
+                                "cvar_weight": 0.2,
                                 "average_log_wealth": 0.01,
+                                "objective_log_wealth_minus_lambda_cvar": 0.006,
                                 "turnover": 0.4,
                                 "cvar_tail_loss": 0.02,
+                                "blocked_average_log_wealth_mean": 0.009,
+                                "blocked_cvar_tail_loss_mean": 0.02,
+                                "blocked_turnover_mean": 0.4,
+                                "blocked_objective_log_wealth_minus_lambda_cvar_mean": 0.005,
                                 "no_trade_band_hit_rate": 0.0,
                                 "dominated": False,
                                 "pareto_optimal": True,
@@ -892,9 +1091,32 @@ class ArtifactSchemaTests(unittest.TestCase):
         self.assertEqual(analysis["artifact_provenance"]["git_commit_sha"], "abc123")
         self.assertEqual(analysis["artifact_provenance"]["git_tree_sha"], "cafe1234")
         self.assertEqual(analysis["dataset"]["purged_samples"], 2)
+        self.assertEqual(analysis["training"]["best_epoch_by_exact_log_wealth"], 3.0)
+        self.assertEqual(
+            analysis["training"]["best_epoch_by_exact_log_wealth_minus_lambda_cvar"],
+            3.0,
+        )
+        self.assertEqual(
+            analysis["training"]["checkpoint_audit"]["selected_epoch_rank_by_exact_log_wealth"],
+            2.0,
+        )
         self.assertIn("carry_on", analysis["stateful_evaluation"])
+        self.assertEqual(analysis["blocked_walk_forward_evaluation"]["fold_count"], 3)
+        self.assertEqual(
+            analysis["blocked_walk_forward_evaluation"]["best_state_reset_mode_by_mean_log_wealth"],
+            "carry_on",
+        )
+        self.assertEqual(analysis["artifact_contract"]["alias_role"], "production_current")
+        self.assertEqual(
+            analysis["governance"]["selection_mode"],
+            "explicit_governance_override",
+        )
+        self.assertEqual(
+            analysis["claim_hardening"]["shape_top_class_collapse"]["dominant_share"],
+            1.0,
+        )
         self.assertEqual(analysis["policy_calibration_summary"]["pareto_optimal_count"], 1)
-        self.assertEqual(analysis["policy_calibration_summary"]["selection_rule_version"], 2)
+        self.assertEqual(analysis["policy_calibration_summary"]["selection_rule_version"], 4)
         self.assertEqual(analysis["forecast"]["g_t"], 0.8)
         self.assertEqual(analysis["forecast"]["selected_policy_utility"], 0.05)
         self.assertEqual(analysis["forecast"]["mu_t"]["3"], 0.02)

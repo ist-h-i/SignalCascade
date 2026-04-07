@@ -89,6 +89,10 @@ def train_model(
         feature_dim=feature_dim,
         state_feature_dim=state_feature_dim,
     )
+    checkpoint_audit = fit_summary.get("checkpoint_audit") or _build_checkpoint_audit(
+        fit_summary.get("history", []),
+        config,
+    )
     save_checkpoint(output_dir / "model.pt", model, config)
     validation_metrics = evaluate_model(model, valid_examples, config)
     purged_samples = max(len(examples) - len(train_examples) - len(valid_examples), 0)
@@ -119,7 +123,17 @@ def train_model(
             fit_summary["best_validation_loss"],
         ),
         "best_epoch": fit_summary["best_epoch"],
+        "best_epoch_by_exact_log_wealth": checkpoint_audit.get("best_epoch_by_exact_log_wealth"),
+        "best_epoch_by_exact_log_wealth_minus_lambda_cvar": checkpoint_audit.get(
+            "best_epoch_by_exact_log_wealth_minus_lambda_cvar"
+        ),
+        "best_epoch_by_blocked_objective_log_wealth_minus_lambda_cvar": checkpoint_audit.get(
+            "best_epoch_by_blocked_objective_log_wealth_minus_lambda_cvar"
+        ),
         "checkpoint_selection_metric": config.checkpoint_selection_metric,
+        "walk_forward_folds": int(config.walk_forward_folds),
+        "oof_epochs": int(config.oof_epochs),
+        "checkpoint_audit": checkpoint_audit,
         "history": fit_summary["history"],
         "validation_metrics": validation_metrics,
     }
@@ -131,8 +145,8 @@ def evaluate_model(
     examples: Sequence[TrainingExample],
     config: TrainingConfig,
     state_reset_mode: str | None = None,
-    cost_multiplier: float = 1.0,
-    gamma_multiplier: float = 1.0,
+    cost_multiplier: float | None = None,
+    gamma_multiplier: float | None = None,
     min_policy_sigma: float | None = None,
 ) -> dict[str, object]:
     if not examples:
@@ -143,6 +157,16 @@ def evaluate_model(
         replace(config, min_policy_sigma=float(min_policy_sigma))
         if min_policy_sigma is not None
         else config
+    )
+    resolved_cost_multiplier = (
+        float(effective_config.policy_cost_multiplier)
+        if cost_multiplier is None
+        else float(cost_multiplier)
+    )
+    resolved_gamma_multiplier = (
+        float(effective_config.policy_gamma_multiplier)
+        if gamma_multiplier is None
+        else float(gamma_multiplier)
     )
     resolved_state_reset_mode = state_reset_mode or config.evaluation_state_reset_mode
     _validate_state_reset_mode(resolved_state_reset_mode)
@@ -210,8 +234,8 @@ def evaluate_model(
                 tradeability_gate=outputs["tradeability_gate"],
                 previous_position=torch.tensor([previous_position], dtype=policy_mean.dtype),
                 config=effective_config,
-                cost_multiplier=cost_multiplier,
-                gamma_multiplier=gamma_multiplier,
+                cost_multiplier=resolved_cost_multiplier,
+                gamma_multiplier=resolved_gamma_multiplier,
             )
             decision = apply_selection_policy(
                 example=example,
@@ -221,8 +245,8 @@ def evaluate_model(
                 previous_position=previous_position,
                 tradeability_gate=gate,
                 shape_probs=outputs["shape_posterior"][0].tolist(),
-                cost_multiplier=cost_multiplier,
-                gamma_multiplier=gamma_multiplier,
+                cost_multiplier=resolved_cost_multiplier,
+                gamma_multiplier=resolved_gamma_multiplier,
             )
 
             selected_row = dict(decision["selected_row"])
@@ -266,7 +290,7 @@ def evaluate_model(
                 sigma=float(smooth_reference_row["sigma"]),
                 cost=float(smooth_reference_row["cost"]),
                 config=effective_config,
-                gamma_multiplier=gamma_multiplier,
+                gamma_multiplier=resolved_gamma_multiplier,
             )
             exact_smooth_horizon_matches += int(selected_horizon == smooth_selected_horizon)
             exact_smooth_no_trade_matches += int(
@@ -315,6 +339,7 @@ def evaluate_model(
     forecast_mae = sum(mu_errors) / max(total_samples, 1)
     checkpoint_selection_score = _checkpoint_selection_score(
         average_log_wealth=average_log_wealth,
+        cvar_tail=cvar_tail,
         forecast_mae=forecast_mae,
         sigma_calibration=sigma_calibration,
         exact_smooth_position_mae=exact_smooth_position_abs_error / max(total_samples, 1),
@@ -355,8 +380,8 @@ def evaluate_model(
         "state_reset_count": state_reset_count,
         "session_count": session_count,
         "window_count": window_count,
-        "cost_multiplier": float(cost_multiplier),
-        "gamma_multiplier": float(gamma_multiplier),
+        "cost_multiplier": resolved_cost_multiplier,
+        "gamma_multiplier": resolved_gamma_multiplier,
         "min_policy_sigma": float(effective_config.min_policy_sigma),
         "policy_horizon_distribution": {
             horizon: horizon_counts[horizon] / max(total_samples, 1)
@@ -383,6 +408,110 @@ def split_examples(
     return train_examples, valid_examples
 
 
+def _split_examples_into_contiguous_folds(
+    examples: Sequence[TrainingExample],
+    fold_count: int,
+) -> list[list[TrainingExample]]:
+    total_examples = len(examples)
+    if total_examples == 0:
+        return []
+    resolved_fold_count = max(1, min(int(fold_count), total_examples))
+    base_fold_size = total_examples // resolved_fold_count
+    remainder = total_examples % resolved_fold_count
+    folds: list[list[TrainingExample]] = []
+    start_index = 0
+    for fold_index in range(resolved_fold_count):
+        current_size = base_fold_size + (1 if fold_index < remainder else 0)
+        end_index = start_index + current_size
+        folds.append(list(examples[start_index:end_index]))
+        start_index = end_index
+    return [fold for fold in folds if fold]
+
+
+def _evaluate_blocked_epoch_metrics(
+    model: SignalCascadeModel,
+    valid_examples: Sequence[TrainingExample],
+    config: TrainingConfig,
+) -> dict[str, float]:
+    if len(valid_examples) < max(2, int(config.walk_forward_folds)):
+        return {}
+
+    folds = _split_examples_into_contiguous_folds(valid_examples, config.walk_forward_folds)
+    if len(folds) <= 1:
+        return {}
+
+    fold_metrics = [evaluate_model(model, fold_examples, config) for fold_examples in folds]
+    average_log_wealth_values = [
+        float(metrics["average_log_wealth"]) for metrics in fold_metrics
+    ]
+    cvar_values = [float(metrics["cvar_tail_loss"]) for metrics in fold_metrics]
+    turnover_values = [float(metrics["turnover"]) for metrics in fold_metrics]
+    blocked_average_log_wealth = sum(average_log_wealth_values) / len(average_log_wealth_values)
+    blocked_cvar_tail_loss = sum(cvar_values) / len(cvar_values)
+    return {
+        "validation_blocked_fold_count": float(len(folds)),
+        "validation_blocked_average_log_wealth_mean": blocked_average_log_wealth,
+        "validation_blocked_cvar_tail_loss_mean": blocked_cvar_tail_loss,
+        "validation_blocked_turnover_mean": sum(turnover_values) / len(turnover_values),
+        "validation_blocked_objective_log_wealth_minus_lambda_cvar_mean": (
+            blocked_average_log_wealth
+            - (float(config.cvar_weight) * blocked_cvar_tail_loss)
+        ),
+    }
+
+
+def _rolling_epoch_metric_mean(
+    history: Sequence[dict[str, float]],
+    key: str,
+    window: int,
+) -> float | None:
+    numeric_values = [
+        float(row[key])
+        for row in history
+        if key in row
+    ]
+    if not numeric_values:
+        return None
+    resolved_window = max(1, min(int(window), len(numeric_values)))
+    return sum(numeric_values[-resolved_window:]) / resolved_window
+
+
+def _resolve_epoch_selection_score(
+    history: list[dict[str, float]],
+    config: TrainingConfig,
+) -> tuple[float, str]:
+    current_row = history[-1]
+    blocked_window = max(1, int(config.oof_epochs))
+
+    if config.checkpoint_selection_metric == "exact_log_wealth":
+        blocked_mean = _rolling_epoch_metric_mean(
+            history,
+            "validation_blocked_average_log_wealth_mean",
+            blocked_window,
+        )
+        if blocked_mean is not None:
+            current_row["validation_oof_epoch_window"] = float(
+                min(blocked_window, len(history))
+            )
+            return -blocked_mean, "blocked_walk_forward_average_log_wealth_oof_mean"
+    if config.checkpoint_selection_metric == "exact_log_wealth_minus_lambda_cvar":
+        blocked_objective_mean = _rolling_epoch_metric_mean(
+            history,
+            "validation_blocked_objective_log_wealth_minus_lambda_cvar_mean",
+            blocked_window,
+        )
+        if blocked_objective_mean is not None:
+            current_row["validation_oof_epoch_window"] = float(
+                min(blocked_window, len(history))
+            )
+            return (
+                -blocked_objective_mean,
+                "blocked_walk_forward_objective_log_wealth_minus_lambda_cvar_oof_mean",
+            )
+
+    return float(current_row["validation_selection_score"]), "single_split_exact_metric"
+
+
 def _fit_model(
     train_examples: Sequence[TrainingExample],
     valid_examples: Sequence[TrainingExample],
@@ -399,6 +528,8 @@ def _fit_model(
         shape_classes=config.shape_classes,
         branch_dilations=config.branch_dilations,
         dropout=config.dropout,
+        tie_policy_to_forecast_head=config.tie_policy_to_forecast_head,
+        disable_overlay_branch=config.disable_overlay_branch,
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -427,6 +558,7 @@ def _fit_model(
             warmup_phase=False,
         )
         exact_metrics = evaluate_model(model, valid_examples, config)
+        blocked_metrics = _evaluate_blocked_epoch_metrics(model, valid_examples, config)
         history.append(
             {
                 "epoch": float(epoch),
@@ -443,11 +575,18 @@ def _fit_model(
                 "validation_forecast_mae": valid_metrics.get("forecast_mae", valid_metrics["return_loss"]),
                 "validation_exact_log_wealth": exact_metrics["average_log_wealth"],
                 "validation_exact_forecast_mae": exact_metrics["forecast_mae"],
+                "validation_exact_cvar_tail_loss": exact_metrics["cvar_tail_loss"],
+                "validation_exact_sigma_calibration": exact_metrics["sigma_calibration"],
+                "validation_exact_position_mae": exact_metrics["exact_smooth_position_mae"],
                 "validation_selection_score": exact_metrics["checkpoint_selection_score"],
+                **blocked_metrics,
             }
         )
-        if exact_metrics["checkpoint_selection_score"] < best_selection_score:
-            best_selection_score = exact_metrics["checkpoint_selection_score"]
+        selection_score, selection_score_source = _resolve_epoch_selection_score(history, config)
+        history[-1]["validation_selection_score"] = selection_score
+        history[-1]["validation_selection_score_source"] = selection_score_source
+        if selection_score < best_selection_score:
+            best_selection_score = selection_score
             best_validation_loss = valid_metrics["total"]
             best_epoch = epoch
             best_state = {key: value.detach().cpu().clone() for key, value in model.state_dict().items()}
@@ -457,8 +596,146 @@ def _fit_model(
         "best_validation_loss": best_validation_loss,
         "best_selection_score": best_selection_score,
         "best_epoch": float(best_epoch),
+        "checkpoint_audit": _build_checkpoint_audit(history, config),
         "history": history,
     }
+
+
+def _build_checkpoint_audit(
+    history: Sequence[dict[str, float]],
+    config: TrainingConfig,
+) -> dict[str, object]:
+    ranked_rows = [
+        row
+        for row in history
+        if "epoch" in row
+        and "validation_exact_log_wealth" in row
+        and "validation_selection_score" in row
+    ]
+    if not ranked_rows:
+        return {}
+
+    selection_rank = sorted(
+        ranked_rows,
+        key=lambda row: (
+            float(row["validation_selection_score"]),
+            float(row["epoch"]),
+        ),
+    )
+    wealth_rank = sorted(
+        ranked_rows,
+        key=lambda row: (
+            -float(row["validation_exact_log_wealth"]),
+            float(row["epoch"]),
+        ),
+    )
+    selected_row = selection_rank[0]
+    best_wealth_row = wealth_rank[0]
+
+    selected_epoch = int(float(selected_row["epoch"]))
+    audit: dict[str, object] = {
+        "selection_metric": config.checkpoint_selection_metric,
+        "cvar_weight": float(config.cvar_weight),
+        "selected_epoch": float(selected_epoch),
+        "best_epoch_by_selection_score": float(selected_epoch),
+        "best_epoch_by_exact_log_wealth": float(best_wealth_row["epoch"]),
+        "selected_epoch_rank_by_exact_log_wealth": float(
+            next(
+                index
+                for index, row in enumerate(wealth_rank, start=1)
+                if int(float(row["epoch"])) == selected_epoch
+            )
+        ),
+        "selected_epoch_exact_log_wealth": float(selected_row["validation_exact_log_wealth"]),
+        "best_exact_log_wealth": float(best_wealth_row["validation_exact_log_wealth"]),
+        "delta_to_best_exact_log_wealth": float(best_wealth_row["validation_exact_log_wealth"])
+        - float(selected_row["validation_exact_log_wealth"]),
+    }
+
+    if all("validation_exact_cvar_tail_loss" in row for row in ranked_rows):
+        wealth_minus_cvar_rank = sorted(
+            ranked_rows,
+            key=lambda row: (
+                -(
+                    float(row["validation_exact_log_wealth"])
+                    - (
+                        float(config.cvar_weight)
+                        * float(row["validation_exact_cvar_tail_loss"])
+                    )
+                ),
+                float(row["epoch"]),
+            ),
+        )
+        best_wealth_minus_cvar_row = wealth_minus_cvar_rank[0]
+        selected_wealth_minus_cvar = float(selected_row["validation_exact_log_wealth"]) - (
+            float(config.cvar_weight) * float(selected_row["validation_exact_cvar_tail_loss"])
+        )
+        best_wealth_minus_cvar = float(best_wealth_minus_cvar_row["validation_exact_log_wealth"]) - (
+            float(config.cvar_weight)
+            * float(best_wealth_minus_cvar_row["validation_exact_cvar_tail_loss"])
+        )
+        audit.update(
+            {
+                "best_epoch_by_exact_log_wealth_minus_lambda_cvar": float(
+                    best_wealth_minus_cvar_row["epoch"]
+                ),
+                "selected_epoch_rank_by_exact_log_wealth_minus_lambda_cvar": float(
+                    next(
+                        index
+                        for index, row in enumerate(wealth_minus_cvar_rank, start=1)
+                        if int(float(row["epoch"])) == selected_epoch
+                    )
+                ),
+                "selected_epoch_exact_log_wealth_minus_lambda_cvar": selected_wealth_minus_cvar,
+                "best_exact_log_wealth_minus_lambda_cvar": best_wealth_minus_cvar,
+                "delta_to_best_exact_log_wealth_minus_lambda_cvar": (
+                    best_wealth_minus_cvar - selected_wealth_minus_cvar
+                ),
+            }
+        )
+    else:
+        audit["exact_log_wealth_minus_lambda_cvar_unavailable_reason"] = (
+            "validation_exact_cvar_tail_loss_missing_in_history"
+        )
+
+    if all(
+        "validation_blocked_objective_log_wealth_minus_lambda_cvar_mean" in row
+        for row in ranked_rows
+    ):
+        blocked_rank = sorted(
+            ranked_rows,
+            key=lambda row: (
+                -float(row["validation_blocked_objective_log_wealth_minus_lambda_cvar_mean"]),
+                float(row["epoch"]),
+            ),
+        )
+        best_blocked_row = blocked_rank[0]
+        audit.update(
+            {
+                "best_epoch_by_blocked_objective_log_wealth_minus_lambda_cvar": float(
+                    best_blocked_row["epoch"]
+                ),
+                "selected_epoch_rank_by_blocked_objective_log_wealth_minus_lambda_cvar": float(
+                    next(
+                        index
+                        for index, row in enumerate(blocked_rank, start=1)
+                        if int(float(row["epoch"])) == selected_epoch
+                    )
+                ),
+                "selected_epoch_blocked_objective_log_wealth_minus_lambda_cvar": float(
+                    selected_row["validation_blocked_objective_log_wealth_minus_lambda_cvar_mean"]
+                ),
+                "best_blocked_objective_log_wealth_minus_lambda_cvar": float(
+                    best_blocked_row["validation_blocked_objective_log_wealth_minus_lambda_cvar_mean"]
+                ),
+                "delta_to_best_blocked_objective_log_wealth_minus_lambda_cvar": (
+                    float(best_blocked_row["validation_blocked_objective_log_wealth_minus_lambda_cvar_mean"])
+                    - float(selected_row["validation_blocked_objective_log_wealth_minus_lambda_cvar_mean"])
+                ),
+            }
+        )
+
+    return audit
 
 
 def _run_epoch(
@@ -578,6 +855,7 @@ def replay_recurrent_context(
 def _checkpoint_selection_score(
     *,
     average_log_wealth: float,
+    cvar_tail: float,
     forecast_mae: float,
     sigma_calibration: float,
     exact_smooth_position_mae: float,
@@ -585,6 +863,13 @@ def _checkpoint_selection_score(
 ) -> float:
     if config.checkpoint_selection_metric == "validation_total":
         return forecast_mae
+    if config.checkpoint_selection_metric == "exact_log_wealth":
+        return -float(average_log_wealth)
+    if config.checkpoint_selection_metric == "exact_log_wealth_minus_lambda_cvar":
+        return -(
+            float(average_log_wealth)
+            - (float(config.cvar_weight) * float(cvar_tail))
+        )
     calibration_error = 0.5 * (float(forecast_mae) + float(sigma_calibration))
     return (
         -float(average_log_wealth)

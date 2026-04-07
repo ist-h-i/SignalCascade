@@ -1,6 +1,6 @@
 # Logic Multiframe Candlestick Model
 
-最終更新: 2026-03-26 JST
+最終更新: 2026-04-07 JST
 
 この文書は、`/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch` の現行実装を基準にしたロジック説明です。
 
@@ -12,19 +12,34 @@
 - regime x horizon ごとの selection threshold
 - precision 未達 run でも `positive` に見えやすい旧スコア運用
 
-現行版の主眼は、`precision-first` の採用判定を first-class にし、学習・評価・推論・保存フォーマットを同じポリシーで通すことです。
+現行版の主眼は、`shape -> forecast / policy -> q_t` を artifact / diagnostics / dashboard まで同じ語彙で通すことです。
+
+## 0. Review Follow-up Decisions
+
+2026-04-07 JST 時点で、review follow-up に基づく canonical 判断は次で固定します。
+
+- `display forecast` は `forecast_mu/sigma` (`mu_t`, `sigma_t`) です。
+- `policy driver` は `policy_mu_t/policy_sigma_t` です。dashboard と artifact では forecast と分離して表示します。
+- 学習 loss の canonical 主経路は `return_loss + shape_loss + profit_loss` のみです。
+- 旧文書にあった `direction loss / overlay loss / consistency loss` は historical note であり、現行 code path には入りません。
+- overlay は live review の source of truth ではありません。diagnostic replay overlay は derived replay evidence として扱います。
+- `tune-latest` の candidate 採用順は blocked walk-forward objective を優先します。
+- checkpoint 選定は `exact_log_wealth_minus_lambda_cvar` を基準にし、blocked walk-forward が得られる場合は `oof_epochs` 本の rolling mean を優先します。
+- `g_t` は当面 scalar broadcast を維持します。2026-04-07 JST の blocked ablation では、horizon collapse を崩した主因は `tie_policy_to_forecast_head` であり、`disable_overlay_branch` 単独でも horizon-specific gate 追加でもありませんでした。
+- 2026-04-07 JST の full blocked-first run では structural 上位が `tie_policy_to_forecast_head=true && disable_overlay_branch=true` に収束したため、現行 production current もこの組み合わせを canonical に使います。
+- `current` alias では `current/source.json` に governance metadata を残し、`best_candidate` / `accepted_candidate` / `production current` の関係を明示します。`accepted_candidate` は blocked-first winner、`production current` は chart fidelity / sigma-band reliability / execution stability を重み付けした `user_value_score` の自動選抜結果です。`report_signalcascade_xauusd.md` は `current/research_report.md` の mirror です。
+- `shape_aware_profit_maximization` は互換 identifier として残りますが、current evidence は `continuous posterior weighting` と `head coupling` までです。`shape_posterior_top_class_share={'1':1.0}` が残る間は、`shape-aware routing` / `regime-aware selection` と読まない契約にします。
 
 ## 1. 目的
 
 モデルは 30 分足を基底データとして、複数時間足のローソク特徴量から次を同時に学習します。
 
-1. `4h / 1d / 1w` の main horizon return
-2. 各 horizon の方向分類 `{-1, 0, +1}`
+1. `forecast_mu/sigma` による horizon 別 forecast distribution
+2. `policy_mu/sigma` による horizon 別 decision driver
 3. main timeframes の次バー shape
-4. `30m / 1h` を使った binary overlay risk filter (`reduce / hold`)
-5. OOF ベースの correctness / selector / threshold policy
+4. recurrent state を使った context carry-on
 
-最終的な採用判定は「予測した」かどうかではなく、「precision 下側信頼限界を満たす signal だけを accept したか」で決まります。
+最終的な採用判定は threshold classifier ではなく、`policy_mu/sigma -> utility -> q_t` の経路で決まります。
 
 ## 2. 時間足と horizon
 
@@ -255,451 +270,191 @@ non-flat ラベルならさらに `clean_weight_bonus` を加えます。
 
 です。
 
-## 6. Overlay ラベル生成
+## 6. Overlay と旧ラベルの扱い
 
-overlay は多値 exit policy ではなく、binary risk filter です。
+`TrainingExample` には historical compatibility のため `overlay_target` と direction 由来の項目が残っています。ただし 2026-04-07 JST 時点の canonical code path では、
 
-- `0 = reduce`
-- `1 = hold`
+- `overlay_target` は batch / loss に入りません
+- direction head / consistency head は存在しません
+- overlay replay artifact は live review SoT ではなく derived replay evidence です
 
-### 6.1 Primary Direction
-
-各 anchor で non-zero direction target のうち、`direction_weight` が最大のものを primary direction とします。non-zero がなければ overlay target は `reduce` です。
-
-### 6.2 Binary Hold Label
-
-anchor 以降 8 本の `30m` future bar を使います。primary direction を `d in {-1, +1}` とすると、directed path return は
-
-`p_k = d * log(C_{t+k} / C_t)`
-
-です。
-
-- final return: `p_8`
-- adverse excursion: `abs(min(min_k p_k, 0))`
-
-overlay threshold は
-
-`delta_overlay = c_1 + overlay_delta_multiplier * sigma_t * sqrt(8)`
-
-`eta_overlay = overlay_mae_multiplier * sigma_t * sqrt(8)`
-
-で、既定値は
-
-- `overlay_delta_multiplier = 0.75`
-- `overlay_mae_multiplier = 0.7`
-
-です。overlay label は
-
-- `hold` if `final_return >= delta_overlay` and `adverse_excursion <= eta_overlay`
-- otherwise `reduce`
-
-です。
+つまり overlay は「artifact lineage 上の補助情報」であって、現行の主学習契約ではありません。
 
 ## 7. モデル構造
 
-現行版のネットワークは「各時間足 encoder + simple fusion」で、旧文書にあった coarse-to-fine gated fusion とは異なります。
+現行版のネットワークは multi-timeframe encoder + latent fusion + recurrent state + shape-conditioned experts です。
 
-### 7.1 TemporalEncoder
+### 7.1 Encoder と latent fusion
 
-各時間足は共通構造の `TemporalEncoder` で処理します。
+- main encoders: `4h / 1d / 1w`
+- overlay encoders: `1h / 30m`
+- 各 encoder は `Linear -> residual causal conv blocks -> pooled latent`
+- 全 latent を concatenate して `latent_fusion` に通します
 
-1. 入力 `feature_dim=6` を `hidden_dim` に線形射影
-2. 1D residual temporal block を dilation `1, 2, 4` で 3 段適用
-3. 各 block は `Conv1d(kernel=3) -> GELU -> Dropout -> residual`
-4. 最終時点ベクトルに `LayerNorm`
+overlay branch は `disable_overlay_branch=true` のときゼロ埋めされ、cheap ablation として切り離せます。
 
-### 7.2 Main Fusion
+### 7.2 状態ベクトル
 
-`4h / 1d / 1w` の latent を concatenate し、MLP で融合します。
+融合 latent `h_t`、shape posterior `s_t`、state features 射影 `z_t`、recurrent memory `m_t` を連結し、
 
-`concat(main_4h, main_1d, main_1w) -> Linear -> GELU -> Dropout -> Linear -> GELU`
+`state_vector = concat(h_t, s_t, z_t, m_t)`
+
+を作ります。
 
 ### 7.3 出力 head
 
-main fusion から次を出力します。
+現行の canonical 出力は次です。
 
-- `mu`: 各 horizon の標準化 log return 平均
-- `sigma`: 各 horizon の標準化不確実性。`softplus(head) + 1e-4`
-- `direction_logits`: 各 horizon の 3 クラス logits
+- `forecast_mu`, `forecast_sigma`
+- `policy_mu`, `policy_sigma`
+- `shape_posterior`
+- `tradeability_gate`
+- `memory_state`
+- `main_shape_predictions`
 
-ここで return head は raw return ではなく、
-
-`scale_h = sigma_realized * sqrt(h) + return_scale_epsilon`
-
-で正規化した空間を学習します。学習時の target は
-
-`y_std = clip(y_raw / scale_h, -standardized_return_clip, +standardized_return_clip)`
-
-で、推論時・評価時には
-
-`mu_raw = mu_std * scale_h`
-
-`sigma_raw = sigma_std * scale_h`
-
-で元の return 単位へ戻します。
-
-各 main timeframe latent から次を出力します。
-
-- `shape_predictions[tf]`: 次バー shape 3 成分
-
-overlay 側は `1h / 30m` latent と edge を結合して binary head に入れます。
-
-`edge = mu / sigma`
-
-`overlay_input = concat(fused_main, latent_1h, latent_30m, edge)`
-
-`overlay_logits = MLP(overlay_input)`
+`tie_policy_to_forecast_head=true` の場合だけ `policy_mu/sigma = forecast_mu/sigma` になります。
 
 ## 8. 損失関数
 
-総損失は
+現行の総損失は次です。
 
-`L = L_return + 0.35 L_dir + 0.25 L_shape + 0.10 L_overlay + 0.20 L_consistency`
-
-です。
+`L = w_return * L_return + w_shape * L_shape + w_profit * L_profit`
 
 ### 8.1 Return loss
 
-Heteroscedastic Huber loss を使います。対象は raw return ではなく、上記の standardized return です。
+`forecast_mu/sigma` に対する heteroscedastic Huber loss です。
 
-`e = y - mu`
+### 8.2 Shape loss
 
-`q = min(|e|, delta)`
+各 main timeframe の次バー shape に対する `smooth_l1_loss` の平均です。
 
-`l = |e| - q`
+### 8.3 Profit loss
 
-`Huber = 0.5 q^2 + delta l`
+`policy_mu/sigma` を differentiable な `smooth_policy_distribution` に通し、
 
-`L_return = mean(Huber / sigma^2 + log(sigma))`
-
-既定値は `delta = 0.02`、`standardized_return_clip = 6.0`、`return_scale_epsilon = 1e-4` です。
-
-### 8.2 Direction loss
-
-3 クラス softmax に対する focal loss です。
-
-- `gamma = 1.5`
-- class alpha = `[1.2, 0.7, 1.2]`
-- 各サンプルに `direction_weight` を掛ける
-
-### 8.3 Shape loss
-
-各 main timeframe の `smooth_l1_loss` の平均です。
-
-### 8.4 Overlay loss
-
-`binary_cross_entropy_with_logits` を使った binary loss です。
-
-### 8.5 Direction Consistency loss
-
-return head と direction head の整合を取るため、`(mu, sigma)` から implied direction probability を作り、direction logits と KL で近づけます。
-
-flat band は固定値ではなく、horizon ごとの direction threshold を標準化した
-
-`b_h = delta_h / scale_h`
-
-を使います。したがって、
-
-`p_up = 1 - Phi((b_h - mu) / sigma)`
-
-`p_down = Phi((-b_h - mu) / sigma)`
-
-`p_flat = 1 - p_up - p_down`
-
-を作り、
-
-`L_consistency = KL(log_softmax(direction_logits) || implied_probs)`
+`profit_loss = -mean(log(1 + pnl)) + lambda * CVaR_tail`
 
 を最小化します。
 
-## 9. 学習 split と OOF
+### 8.4 現在使っていない loss
+
+次は historical note であり、現行 code path には入りません。
+
+- direction loss
+- overlay loss
+- consistency loss
+
+## 9. 学習 split / blocked walk-forward / OOF
 
 ### 9.1 Holdout split
 
-sample 数を `N`、validation 希望数を
+train / purge / validation の contiguous split は従来どおりです。
 
-`n_valid = max(1, int(N * (1 - train_ratio)))`
+### 9.2 Blocked walk-forward
 
-とし、`n_valid <= N - 1` に切ります。
+`walk_forward_folds` は diagnostics だけでなく、checkpoint 選定と `tune-latest` candidate ranking に使います。validation block を contiguous folds に分け、fold 平均で
 
-purge 数は
+- `average_log_wealth`
+- `cvar_tail_loss`
+- `turnover`
+- `objective_log_wealth_minus_lambda_cvar`
 
-`purge = min(max_horizon, max(N - n_valid - 1, 0))`
+を集計します。
 
-です。最終的に
+### 9.3 OOF epoch window
 
-- train: `[0, train_end)`
-- purge: `[train_end, validation_start)`
-- validation: `[validation_start, N)`
-
-となるように切ります。
-
-これにより、purge と validation holdout が両立します。
-
-### 9.2 Walk-forward OOF
-
-policy fitting には `walk_forward_folds = 3` の OOF snapshot を使います。ここで fit するのは予測器本体ではなく、
-
-- correctness model
-- selector model
-- selection threshold
-- overlay threshold
-
-です。
+`oof_epochs` は blocked walk-forward 指標の rolling mean window として扱います。checkpoint 選定 metric が `exact_log_wealth` または `exact_log_wealth_minus_lambda_cvar` のとき、single split の 1 epoch 値よりも、直近 `oof_epochs` 本の blocked 指標平均を優先します。
 
 ## 10. Selection Policy
 
-現行版の policy は `policy_service.py` に実装されています。
+現行の policy は `policy_service.py` にある exact utility path が canonical です。
 
-### 10.1 Per-horizon row の特徴
+### 10.1 Horizon row
 
-各 horizon row から次を作ります。
+各 horizon について次を計算します。
 
-- `edge = |mu| / sigma`
-- `prob_gap = top1(direction_prob) - top2(direction_prob)`
-- `sign_agreement = actionable horizons のうち現在 sign と一致する比率`
-- `actionable_sign = argmax(p_down, p_up)` に基づく実行方向
-- `actionable_edge = max(actionable_sign * mu - cost, 0)`
+- `g_t`: scalar tradeability gate
+- `mu_t_tilde = g_t * mu`
+- `sigma_sq = max(sigma^2, min_policy_sigma^2)`
+- `cost_h = horizon_cost * policy_cost_multiplier`
+- `policy_utility`
+- `q_t_candidate`
 
-correctness model の入力は
+`g_t` は horizon-specific ではなく scalar を全 horizon に broadcast します。
 
-- `edge`
-- `p_down`, `p_flat`, `p_up`
-- `prob_gap`
-- `sign_agreement`
-- session one-hot
-- volatility ratio
-- trend strength
-- normalized horizon
+2026-04-07 JST の review follow-up では、この scalar broadcast を当面維持する判断にしました。blocked ablation では `tie_policy_to_forecast_head` を有効化しただけで horizon distribution が `18` 固定から `30` 主軸へ動いた一方、`shape_posterior_top_class_share` は全 variant で class `1` 固定のままでした。したがって現時点の第一ボトルネックは gate 次元ではなく head decoupling と small sample 下の branch specialization failure であり、horizon-specific `g_t` は future variant として保留します。
 
-selector model の入力は上記に加えて
+### 10.2 Exact policy
 
-- `q`
-- `top_gap`
+各 horizon の utility を比較し、最大 utility の horizon を `policy_horizon` とします。選ばれた horizon について
 
-を含みます。
+`q_t = clip(tanh(mu_t_tilde / (gamma * sigma_sq)), -q_max, +q_max)`
 
-両モデルとも、標準化した特徴量に対する線形 logistic model です。学習には class imbalance を反映した `pos_weight` と BCE を使い、selector 側には `selector_brier_weight = 0.2` の Brier 項を追加します。
+を基礎にし、no-trade band に入る場合は `q_t = q_t_prev` のまま維持します。
 
-### 10.2 Correctness score と selector score
+### 10.3 Smooth policy
 
-correctness model の出力を `q` とし、row score は
+学習時の `profit_loss` では softmax-like な smooth path を使い、推論・diagnostics では exact path を使います。`exact_smooth_horizon_agreement` などは両者の乖離監査用です。
 
-`score = q^alpha * actionable_edge^(1 - alpha)`
+## 11. 推論出力と表示契約
 
-です。既定値は `alpha = 0.7` です。
+artifact では forecast と policy driver を分けます。
 
-ただし次の場合は score を `0` にします。
+- `display forecast`: `mu_t`, `sigma_t`
+- `policy driver`: `policy_mu_t`, `policy_sigma_t`
 
-- `actionable_sign == 0`
-- `actionable_edge <= 0`
-
-selected horizon は
-
-1. `score` 最大
-2. tie の場合は `actionable_edge` 最大
-3. さらに tie の場合は `|mu|` 最大
-
-で決まります。
-
-### 10.3 Threshold calibration
-
-selection threshold は selected horizon に対する `selector_probability` 上で校正します。現行版で実際に使う scope は `global` のみで、`by_horizon` は保存フォーマット互換のために `null` placeholder を保持し、`by_regime` は空です。
-
-候補 threshold `tau` ごとに
-
-- `selected_count(tau)`
-- `success_count(tau)`
-- `precision(tau)`
-
-を計算し、Wilson 下側信頼限界
-
-`LCB(tau) = (p + z^2/(2n) - z * sqrt(p(1-p)/n + z^2/(4n^2))) / (1 + z^2/n)`
-
-を使います。ここで `p = k / n`, `k = success_count`, `n = selected_count`, `z = 1.96` です。
-
-feasible 条件は
-
-- `selected_count >= selection_min_support`
-- `LCB >= precision_target`
-
-です。既定値は
-
-- `selection_min_support = 5`
-- `precision_target = 0.8`
-
-です。
-
-feasible な候補がある場合は coverage 最大、同率なら threshold が低い方を採用します。feasible 候補が 1 つもない場合は
-
-- `selection_threshold = null`
-- `selection_thresholds.meta.global.feasible = false`
-
-さらに、infeasible run の比較用として
-
-- `best_selection_lcb`
-- `support_at_best_lcb`
-- `precision_at_best_lcb`
-- `tau_at_best_lcb`
-
-を保存します。
-
-となり、その run は accept できません。
-
-### 10.4 Overlay threshold
-
-overlay threshold は `hold_probability` に対する global threshold だけを持ちます。こちらは feasible gate ではなく、LCB と support が最大になる threshold を選び、`[0.05, 0.95]` に clip します。
-
-### 10.5 Alignment gate
-
-direction classifier と return head の矛盾 signal は reject します。
-
-- `expected_direction = sign(mu_selected)`
-- `direction_alignment = predicted_sign != 0 and predicted_sign == expected_direction`
-
-accept 条件は次の全てです。
-
-- `actionable_sign != 0`
-- `actionable_edge > 0`
-- `direction_alignment == true`
-- `selection_threshold is not null`
-- `selector_probability >= selection_threshold`
-
-threshold を適用する前の `pre_threshold_eligible` と、そのときの `pre_threshold_position` も評価用に保存します。
-
-## 11. 推論出力
-
-推論時は selection policy を通したうえで次を返します。
-
-- `selected_horizon`
-- `selected_direction`
-- `expected_log_returns`
-- `predicted_closes`
-- `uncertainties`
-- `accepted_signal`
-- `selection_probability`
-- `selection_threshold`
-- `correctness_probability`
-- `hold_probability`
-- `hold_threshold`
-- `overlay_action`
-- `direction_alignment`
-- `regime_id`
-- `current_close`
-
-ポジションは
-
-`raw_position = tanh(position_scale * mu_selected / sigma_selected)`
-
-をベースにし、accept されなければ `0`、最終ポジションは
-
-実装では `sigma_selected` をそのまま割らず、`max(sigma_selected, 1e-6)` を分母に使って極小分散時の不安定化を防ぎます。
-
-`position = raw_position * hold_probability`
-
-です。overlay action は
-
-- `hold` if `hold_probability >= hold_threshold`
-- `reduce` otherwise
-
-で決まります。
+`prediction.json` と `forecast_summary.json` には両方を入れ、`display_forecast.label` と `policy_driver.label` で明示します。dashboard もこの分離に従います。
 
 ## 12. 評価と tuning
 
-### 12.1 主な validation metrics
+### 12.1 Validation / diagnostics
 
-現行版で重視するのは次です。
+主に見る指標は次です。
 
-- `selection_precision`
-- `selection_support`
-- `precision_feasible`
-- `threshold_calibration_feasible`
-- `best_selection_lcb`
-- `support_at_best_lcb`
-- `precision_at_best_lcb`
-- `coverage_at_target_precision`
-- `pre_threshold_capture`
-- `alignment_rate`
-- `actionable_edge_rate`
-- `selection_brier_score`
-- `value_capture_ratio`
-- `directional_accuracy`
-- `overlay_accuracy`
+- `average_log_wealth`
+- `realized_pnl_per_anchor`
+- `cvar_tail_loss`
+- `turnover`
+- `no_trade_band_hit_rate`
+- `exact_smooth_*`
+- `policy_horizon_distribution`
+- `stateful_evaluation`
+- `blocked_walk_forward_evaluation`
 
-さらに `horizon_diagnostics` として各 horizon ごとに
+### 12.2 Checkpoint audit
 
-- `nonflat_rate`
-- `up_rate`
-- `down_rate`
-- `alignment_rate`
-- `actionable_edge_rate`
+各 epoch について
 
-を保存します。
+- single split exact wealth
+- exact wealth minus lambda CVaR
+- blocked objective mean
 
-`profit_factor` と `signal_sortino` は保存はしますが、accepted signal が `selection_min_support` 未満なら `0` とし、sparse signal の極端値が tuning を壊さないようにしています。
+を監査し、`checkpoint_audit` に保存します。
 
-### 12.2 Project value score
+### 12.3 tune-latest candidate ordering
 
-`utility_score` と `project_value_score` は依然として保存しますが、`precision_feasible == false` の run には強い penalty を掛けます。
+candidate は次を優先して並べます。
 
-- `utility_score *= 0.5`
-- `project_value_score *= 0.25`
+1. optimization gate pass
+2. `blocked_objective_log_wealth_minus_lambda_cvar_mean`
+3. `blocked_average_log_wealth_mean`
+4. `blocked_turnover_mean`
+5. 補助的に single split 指標
 
-つまり、主 KPI 未達 run が見かけ上 `positive` になりにくい仕様です。
-
-### 12.3 Leaderboard の並び順
-
-tuning の candidate 比較は、現在は次の順です。
-
-1. `precision_feasible` が真
-2. `selection_precision` が高い
-3. `coverage_at_target_precision` が高い
-4. `best_selection_lcb` が高い
-5. `support_at_best_lcb` が高い
-6. `alignment_rate` が高い
-7. `pre_threshold_capture` が高い
-8. `selection_brier_score` が低い
-9. `value_capture_ratio` が高い
-10. `directional_accuracy` が高い
-11. `best_validation_loss` が低い
-
-`profit_factor` や `signal_sortino` は leaderboard の主ソートキーには使いません。
+network hyperparameters だけでなく、`evaluation_state_reset_mode`, `min_policy_sigma`, `policy_cost_multiplier`, `policy_gamma_multiplier`, `q_max`, `cvar_weight`, `tie_policy_to_forecast_head`, `disable_overlay_branch` も cheap sweep に含めます。
 
 ## 13. 保存物
 
-artifact には少なくとも次が出力されます。
+canonical artifact には少なくとも次が出ます。
 
 - `config.json`
 - `metrics.json`
 - `prediction.json`
 - `forecast_summary.json`
+- `validation_summary.json`
+- `policy_summary.csv`
+- `horizon_diag.csv`
 - `analysis.json`
 - `research_report.md`
 
-これにより、モデル性能だけでなく
-
-- threshold が feasible だったか
-- signal が no-trade だったか
-- direction の不一致が起きたか
-- どの horizon で label 密度や整合率が偏ったか
-
-まで追跡できます。
-
-## 14. 現時点の制約
-
-現行実装は前進していますが、まだ次の制約があります。
-
-1. selection threshold は現状 `global` のみで、regime 別 partial pooling までは未実装です。
-2. selector は軽量な線形 logistic model で、複雑な non-linear meta-model は使っていません。
-3. standardized return 学習は導入済みですが、長期 forward simulation は未導入です。
-4. overlay は binary risk filter であり、多段 exit policy ではありません。
-
-## 15. 旧版からの読み替え
-
-旧文書を読んでいる場合は、次の読み替えをしてください。
-
-- `full_exit / hard_exit` は削除され、overlay は `reduce / hold` の 2 値です。
-- regime 別 selection threshold は現行版では使いません。
-- `accepted_signal` は単なる classifier 出力ではなく、selector threshold と alignment gate を通過したものだけです。
-- `selection_threshold = 1.0` を既定 fallback とする運用はやめ、feasible でなければ `null` を返します。
-- precision 未達 run は `project_value_score` が残っていても、研究上は low-confidence / infeasible として扱います。
+これにより、display forecast と policy driver の分離、checkpoint audit、blocked walk-forward、policy calibration sweep を一貫して追跡できます。

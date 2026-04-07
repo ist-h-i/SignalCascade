@@ -22,8 +22,17 @@ const outputPath = path.resolve(frontendRoot, 'public/dashboard-data.json')
 const liveDataDir = path.join(artifactRoot, 'live')
 const liveCsvPath = path.join(liveDataDir, 'xauusd_m30_latest.csv')
 const pyTorchPython = path.resolve(pyTorchRoot, '.venv/bin/python')
+const defaultLookbackDays = 360
+const defaultDownloadAttempts = 3
+const defaultDownloadRetryDelayMs = 5_000
 
 const targetDateJst = resolveTargetDateJst(process.env.SIGNAL_CASCADE_TARGET_DATE)
+const configuredLookbackDays = resolveLookbackDays()
+const configuredDownloadAttempts = resolvePositiveIntegerEnv('SIGNAL_CASCADE_DOWNLOAD_ATTEMPTS', defaultDownloadAttempts)
+const configuredDownloadRetryDelayMs = resolveNonNegativeIntegerEnv(
+  'SIGNAL_CASCADE_DOWNLOAD_RETRY_MS',
+  defaultDownloadRetryDelayMs,
+)
 const csvPath = resolveCsvPath(targetDateJst)
 ensureCurrentRun(csvPath)
 const metrics = JSON.parse(fs.readFileSync(metricsPath, 'utf8'))
@@ -129,6 +138,7 @@ const convergenceGain = history[0].validationTotal - bestEpochRow.validationTota
 const generalizationGap = bestEpochRow.validationTotal - bestEpochRow.trainTotal
 const validationMetrics = metrics.validation_metrics ?? null
 const artifactProvenance = resolveArtifactProvenance(sourceMeta)
+const governance = resolveCurrentGovernance(sourceMeta)
 const primaryStateResetMode =
   validationMetrics?.state_reset_mode ??
   validationSummary?.primary_state_reset_mode ??
@@ -178,6 +188,7 @@ const payload = {
     predictionAnchorTime: prediction.anchor_time ?? null,
     freshness,
   },
+  governance,
   run: {
     anchorTime: toIso(anchorBar.ts),
     anchorClose: anchorCloseDisplay,
@@ -429,6 +440,8 @@ function ensureCurrentRun(csvPath) {
       artifactRoot,
       '--csv',
       csvPath,
+      '--csv-lookback-days',
+      String(configuredLookbackDays),
     ],
     {
       cwd: pyTorchRoot,
@@ -492,6 +505,20 @@ function resolveArtifactProvenance(sourceMeta) {
   }
 }
 
+function resolveCurrentGovernance(sourceMeta) {
+  const governance = sourceMeta?.current_selection_governance ?? {}
+  const productionCurrent = governance?.production_current ?? {}
+  const acceptedCandidate = governance?.accepted_candidate ?? {}
+
+  return {
+    selectionMode: typeof governance?.selection_mode === 'string' ? governance.selection_mode : null,
+    overrideReason: typeof governance?.override_reason === 'string' ? governance.override_reason : null,
+    productionCurrentCandidate:
+      typeof productionCurrent?.candidate === 'string' ? productionCurrent.candidate : null,
+    acceptedCandidate: typeof acceptedCandidate?.candidate === 'string' ? acceptedCandidate.candidate : null,
+  }
+}
+
 function toRepoRelativePath(value) {
   if (!value || typeof value !== 'string') {
     return null
@@ -517,40 +544,38 @@ function refreshLatestCsv(targetDateJst) {
   const rawDownloadDir = fs.mkdtempSync(path.join(os.tmpdir(), 'signal-cascade-xauusd-'))
   const rawBaseName = 'xauusd_m30_dukascopy'
   const rawCsvPath = path.join(rawDownloadDir, `${rawBaseName}.csv`)
-  const fromDate = shiftDate(targetDateJst, -90)
+  const fromDate = shiftDate(targetDateJst, -configuredLookbackDays)
   const toDateExclusive = shiftDate(targetDateJst, 1)
-  const download = spawnSync(
-    'npx',
-    [
-      '--yes',
-      'dukascopy-node',
-      '-i',
-      'xauusd',
-      '-from',
-      fromDate,
-      '-to',
-      toDateExclusive,
-      '-t',
-      'm30',
-      '-f',
-      'csv',
-      '-v',
-      '-vu',
-      'units',
-      '-dir',
-      rawDownloadDir,
-      '-fn',
-      rawBaseName,
-    ],
-    {
-      cwd: repoRoot,
-      encoding: 'utf8',
-      env: {
-        ...process.env,
-        npm_config_cache: npmCacheDir,
-      },
+  const downloadArgs = [
+    '--yes',
+    'dukascopy-node',
+    '-i',
+    'xauusd',
+    '-from',
+    fromDate,
+    '-to',
+    toDateExclusive,
+    '-t',
+    'm30',
+    '-f',
+    'csv',
+    '-v',
+    '-vu',
+    'units',
+    '-dir',
+    rawDownloadDir,
+    '-fn',
+    rawBaseName,
+  ]
+  const downloadOptions = {
+    cwd: repoRoot,
+    encoding: 'utf8',
+    env: {
+      ...process.env,
+      npm_config_cache: npmCacheDir,
     },
-  )
+  }
+  const download = runDukascopyDownload(downloadArgs, downloadOptions)
 
   if (download.status !== 0) {
     throw new Error(`Failed to download XAUUSD market data: ${download.stderr || download.stdout}`)
@@ -558,8 +583,50 @@ function refreshLatestCsv(targetDateJst) {
 
   normalizeDukascopyCsv(rawCsvPath, liveCsvPath, endOfJstDayUtcMs(targetDateJst))
 
-  console.log(download.stdout.trim())
+  if (download.stdout.trim().length > 0) {
+    console.log(download.stdout.trim())
+  }
   return liveCsvPath
+}
+
+function runDukascopyDownload(args, options) {
+  let lastFailure = null
+  for (let attempt = 1; attempt <= configuredDownloadAttempts; attempt += 1) {
+    const result = spawnSync('npx', args, options)
+    if (result.status === 0) {
+      return result
+    }
+
+    lastFailure = result
+    if (attempt >= configuredDownloadAttempts) {
+      break
+    }
+
+    const failureOutput = (result.stderr || result.stdout || '').trim()
+    if (failureOutput.length > 0) {
+      console.warn(
+        `Dukascopy download attempt ${attempt}/${configuredDownloadAttempts} failed; retrying in ${configuredDownloadRetryDelayMs}ms.\n${failureOutput}`,
+      )
+    } else {
+      console.warn(
+        `Dukascopy download attempt ${attempt}/${configuredDownloadAttempts} failed; retrying in ${configuredDownloadRetryDelayMs}ms.`,
+      )
+    }
+    sleepMs(configuredDownloadRetryDelayMs)
+  }
+
+  return lastFailure ?? {
+    status: 1,
+    stdout: '',
+    stderr: 'Dukascopy download did not run.',
+  }
+}
+
+function sleepMs(durationMs) {
+  if (!Number.isFinite(durationMs) || durationMs <= 0) {
+    return
+  }
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, durationMs)
 }
 
 function toNonEmptyString(value) {
@@ -734,6 +801,43 @@ function resolveTargetDateJst(value) {
   }
 
   return `${year}-${month}-${day}`
+}
+
+function resolveLookbackDays() {
+  const rawValue = process.env.SIGNAL_CASCADE_LOOKBACK_DAYS
+  if (!rawValue) {
+    return defaultLookbackDays
+  }
+
+  return resolvePositiveIntegerEnv('SIGNAL_CASCADE_LOOKBACK_DAYS', defaultLookbackDays)
+}
+
+function resolvePositiveIntegerEnv(name, defaultValue) {
+  const rawValue = process.env[name]
+  if (!rawValue) {
+    return defaultValue
+  }
+
+  const parsed = Number.parseInt(rawValue, 10)
+  if (!Number.isFinite(parsed) || parsed < 1) {
+    throw new Error(`${name} must be a positive integer, received: ${rawValue}`)
+  }
+
+  return parsed
+}
+
+function resolveNonNegativeIntegerEnv(name, defaultValue) {
+  const rawValue = process.env[name]
+  if (!rawValue) {
+    return defaultValue
+  }
+
+  const parsed = Number.parseInt(rawValue, 10)
+  if (!Number.isFinite(parsed) || parsed < 0) {
+    throw new Error(`${name} must be a non-negative integer, received: ${rawValue}`)
+  }
+
+  return parsed
 }
 
 function shiftDate(dateYmd, days) {

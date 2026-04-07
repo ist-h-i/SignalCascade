@@ -248,6 +248,8 @@ class PredictionResult:
     regime_id: str
     policy_log_returns: dict[str, float] | None = None
     policy_uncertainties: dict[str, float] | None = None
+    policy_head_tied_to_forecast: bool = False
+    overlay_branch_disabled: bool = False
     inference_context_mode: str = "stateless"
     price_scale: float = 1.0
 

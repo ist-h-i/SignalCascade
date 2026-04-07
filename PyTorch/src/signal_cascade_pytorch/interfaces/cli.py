@@ -2,7 +2,9 @@ from __future__ import annotations
 
 import argparse
 
+from ..application.config import CHECKPOINT_SELECTION_METRICS
 from ..bootstrap import (
+    audit_checkpoints_command,
     export_diagnostics_command,
     predict_command,
     promote_current_command,
@@ -44,6 +46,16 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--state-dim", type=int, default=None)
     train_parser.add_argument("--shape-classes", type=int, default=None)
     train_parser.add_argument("--dropout", type=float, default=0.1)
+    train_parser.add_argument(
+        "--tie-policy-to-forecast-head",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    train_parser.add_argument(
+        "--disable-overlay-branch",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     train_parser.add_argument("--horizons", default=None, help="Comma-separated 4h horizons, e.g. 1,3,6")
     train_parser.add_argument("--walk-forward-folds", type=int, default=None)
     train_parser.add_argument("--base-cost", type=float, default=None)
@@ -55,6 +67,8 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--policy-sweep-cost-multipliers", default=None)
     train_parser.add_argument("--policy-sweep-gamma-multipliers", default=None)
     train_parser.add_argument("--policy-sweep-min-policy-sigmas", default=None)
+    train_parser.add_argument("--policy-sweep-q-max-values", default=None)
+    train_parser.add_argument("--policy-sweep-cvar-weights", default=None)
     train_parser.add_argument("--policy-sweep-state-reset-modes", default=None)
     train_parser.add_argument(
         "--allow-no-candidate",
@@ -73,7 +87,15 @@ def build_parser() -> argparse.ArgumentParser:
     train_parser.add_argument("--profit-loss-weight", type=float, default=None)
     train_parser.add_argument("--cvar-weight", type=float, default=None)
     train_parser.add_argument("--cvar-alpha", type=float, default=None)
+    train_parser.add_argument(
+        "--checkpoint-selection-metric",
+        choices=CHECKPOINT_SELECTION_METRICS,
+        default=None,
+    )
     train_parser.add_argument("--risk-aversion-gamma", type=float, default=None)
+    train_parser.add_argument("--policy-cost-multiplier", type=float, default=None)
+    train_parser.add_argument("--policy-gamma-multiplier", type=float, default=None)
+    train_parser.add_argument("--min-policy-sigma", type=float, default=None)
     train_parser.add_argument("--q-max", type=float, default=None)
     train_parser.add_argument("--previous-position", type=float, default=0.0)
     train_parser.add_argument("--synthetic-bars", type=int, default=10_080)
@@ -101,6 +123,25 @@ def build_parser() -> argparse.ArgumentParser:
         default=None,
         help="Deprecated compatibility option. New policy path always uses profit utility.",
     )
+    predict_parser.add_argument(
+        "--tie-policy-to-forecast-head",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    predict_parser.add_argument(
+        "--disable-overlay-branch",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    predict_parser.add_argument(
+        "--apply-selected-policy-calibration",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Apply policy_calibration_summary.selected_row from validation_summary.json before prediction.",
+    )
+    predict_parser.add_argument("--policy-cost-multiplier", type=float, default=None)
+    predict_parser.add_argument("--policy-gamma-multiplier", type=float, default=None)
+    predict_parser.add_argument("--min-policy-sigma", type=float, default=None)
     predict_parser.set_defaults(handler=predict_command)
 
     export_parser = subparsers.add_parser(
@@ -116,11 +157,26 @@ def build_parser() -> argparse.ArgumentParser:
     export_parser.add_argument("--csv", default=None, help="Override the data source with a CSV file.")
     export_parser.add_argument("--csv-lookback-days", type=int, default=None)
     export_parser.add_argument("--price-scale", type=float, default=None)
+    export_parser.add_argument(
+        "--tie-policy-to-forecast-head",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    export_parser.add_argument(
+        "--disable-overlay-branch",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     export_parser.add_argument("--evaluation-state-reset-mode", choices=state_reset_modes, default=None)
+    export_parser.add_argument("--policy-cost-multiplier", type=float, default=None)
+    export_parser.add_argument("--policy-gamma-multiplier", type=float, default=None)
+    export_parser.add_argument("--min-policy-sigma", type=float, default=None)
     export_parser.add_argument("--diagnostic-state-reset-modes", default=None)
     export_parser.add_argument("--policy-sweep-cost-multipliers", default=None)
     export_parser.add_argument("--policy-sweep-gamma-multipliers", default=None)
     export_parser.add_argument("--policy-sweep-min-policy-sigmas", default=None)
+    export_parser.add_argument("--policy-sweep-q-max-values", default=None)
+    export_parser.add_argument("--policy-sweep-cvar-weights", default=None)
     export_parser.add_argument("--policy-sweep-state-reset-modes", default=None)
     export_parser.add_argument(
         "--selection-threshold-mode",
@@ -153,6 +209,13 @@ def build_parser() -> argparse.ArgumentParser:
     tune_parser.add_argument("--csv", default=None, help="Path to the latest 30m OHLCV CSV file.")
     tune_parser.add_argument("--csv-lookback-days", type=int, default=None)
     tune_parser.add_argument("--price-scale", type=float, default=None)
+    tune_parser.add_argument("--candidate-limit", type=int, default=None)
+    tune_parser.add_argument(
+        "--quick-mode",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Evaluate only the first few generated candidates to get a fast blocked-first smoke run.",
+    )
     tune_parser.add_argument("--epochs", type=int, default=None)
     tune_parser.add_argument("--batch-size", type=int, default=None)
     tune_parser.add_argument("--learning-rate", type=float, default=None)
@@ -161,6 +224,16 @@ def build_parser() -> argparse.ArgumentParser:
     tune_parser.add_argument("--state-dim", type=int, default=None)
     tune_parser.add_argument("--shape-classes", type=int, default=None)
     tune_parser.add_argument("--dropout", type=float, default=None)
+    tune_parser.add_argument(
+        "--tie-policy-to-forecast-head",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
+    tune_parser.add_argument(
+        "--disable-overlay-branch",
+        action=argparse.BooleanOptionalAction,
+        default=None,
+    )
     tune_parser.add_argument("--horizons", default=None, help="Comma-separated 4h horizons, e.g. 1,3,6")
     tune_parser.add_argument("--walk-forward-folds", type=int, default=None)
     tune_parser.add_argument("--base-cost", type=float, default=None)
@@ -172,6 +245,8 @@ def build_parser() -> argparse.ArgumentParser:
     tune_parser.add_argument("--policy-sweep-cost-multipliers", default=None)
     tune_parser.add_argument("--policy-sweep-gamma-multipliers", default=None)
     tune_parser.add_argument("--policy-sweep-min-policy-sigmas", default=None)
+    tune_parser.add_argument("--policy-sweep-q-max-values", default=None)
+    tune_parser.add_argument("--policy-sweep-cvar-weights", default=None)
     tune_parser.add_argument("--policy-sweep-state-reset-modes", default=None)
     tune_parser.add_argument(
         "--allow-no-candidate",
@@ -191,7 +266,15 @@ def build_parser() -> argparse.ArgumentParser:
     tune_parser.add_argument("--profit-loss-weight", type=float, default=None)
     tune_parser.add_argument("--cvar-weight", type=float, default=None)
     tune_parser.add_argument("--cvar-alpha", type=float, default=None)
+    tune_parser.add_argument(
+        "--checkpoint-selection-metric",
+        choices=CHECKPOINT_SELECTION_METRICS,
+        default=None,
+    )
     tune_parser.add_argument("--risk-aversion-gamma", type=float, default=None)
+    tune_parser.add_argument("--policy-cost-multiplier", type=float, default=None)
+    tune_parser.add_argument("--policy-gamma-multiplier", type=float, default=None)
+    tune_parser.add_argument("--min-policy-sigma", type=float, default=None)
     tune_parser.add_argument("--q-max", type=float, default=None)
     tune_parser.add_argument("--seed", type=int, default=7)
     tune_parser.set_defaults(handler=tune_latest_command)
@@ -207,6 +290,18 @@ def build_parser() -> argparse.ArgumentParser:
         help="Path to the accepted training_run artifact directory to promote to current.",
     )
     promote_parser.set_defaults(handler=promote_current_command)
+
+    audit_parser = subparsers.add_parser(
+        "audit-checkpoints",
+        help="Re-rank stored epoch history for an artifact and write checkpoint_audit.json.",
+    )
+    audit_parser.add_argument("--output-dir", default="artifacts/demo")
+    audit_parser.add_argument(
+        "--audit-output",
+        default=None,
+        help="Optional output path for the audit JSON. Defaults to <output-dir>/checkpoint_audit.json.",
+    )
+    audit_parser.set_defaults(handler=audit_checkpoints_command)
 
     return parser
 

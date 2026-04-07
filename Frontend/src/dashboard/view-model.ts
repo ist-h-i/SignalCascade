@@ -183,24 +183,24 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
     }),
     reliabilityMeters: [
       {
-        label: 'Trust',
+        label: '確度',
         value: trustScore,
         valueLabel: `${trustScore}%`,
-        caption: 'Direction + range',
+        caption: '方向一致 + レンジ',
         tone: trustScore >= 72 ? 'cool' : trustScore >= 55 ? 'warm' : 'risk',
       },
       {
-        label: 'Freshness',
+        label: '鮮度',
         value: freshnessScore,
         valueLabel: `${freshnessScore}%`,
-        caption: 'Run quality + lag',
+        caption: '更新状態 + ラグ',
         tone: freshnessScore >= 72 ? 'cool' : freshnessScore >= 55 ? 'warm' : 'risk',
       },
       {
-        label: 'Uncertainty',
+        label: '不確実性',
         value: uncertaintyScore,
         valueLabel: `${uncertaintyScore}%`,
-        caption: `${selectedForecast.hours}H band`,
+        caption: `${selectedForecast.hours}H のブレ`,
         tone: uncertaintyScore <= 33 ? 'cool' : uncertaintyScore <= 66 ? 'warm' : 'risk',
       },
     ],
@@ -211,19 +211,19 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
     }),
     boundaryCards: [
       {
-        label: 'Upper',
+        label: '上限',
         value: formatCurrencyPrice(selectedForecast.upperClose),
         detail: formatSignedPercent(((selectedForecast.upperClose - data.run.anchorClose) / data.run.anchorClose) * 100),
         tone: 'upper',
       },
       {
-        label: 'Base',
+        label: '中心',
         value: formatCurrencyPrice(selectedForecast.predictedClose),
-        detail: `${selectedForecast.hours}H base`,
+        detail: `${selectedForecast.hours}H 中心値`,
         tone: 'pivot',
       },
       {
-        label: 'Lower',
+        label: '下限',
         value: formatCurrencyPrice(selectedForecast.lowerClose),
         detail: formatSignedPercent(((selectedForecast.lowerClose - data.run.anchorClose) / data.run.anchorClose) * 100),
         tone: 'lower',
@@ -243,7 +243,7 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
         value: formatTimestampJst(data.run.anchorTime),
       },
       {
-        label: 'Prediction lag',
+        label: '予測ラグ',
         value: formatNullableHours(freshness?.predictionLagHours),
         tone:
           freshness?.predictionLagHours !== null && freshness?.predictionLagHours !== undefined && freshness.predictionLagHours >= 48
@@ -251,7 +251,7 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
             : 'strong',
       },
       {
-        label: 'Artifact lag',
+        label: '更新ラグ',
         value: formatNullableHours(freshness?.artifactLagHours),
         tone:
           freshness?.artifactLagHours !== null && freshness?.artifactLagHours !== undefined && freshness.artifactLagHours >= 24
@@ -259,18 +259,18 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
             : 'watch',
       },
       {
-        label: 'Source',
+        label: 'データ元',
         value: data.provenance.sourceOriginPath ?? data.provenance.sourcePath ?? '-',
       },
     ],
     detailMetrics: [
       {
-        label: 'Hit rate',
+        label: '方向一致',
         value: formatNullablePercent(directionalAccuracy),
         hint: 'direction',
       },
       {
-        label: 'Band',
+        label: 'レンジ捕捉',
         value: formatNullablePercent(rangeCoverage),
         hint: 'coverage',
       },
@@ -280,7 +280,7 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
         hint: 'policy value',
       },
       {
-        label: 'Gen gap',
+        label: '汎化差',
         value: formatSignedDecimal(data.run.generalizationGap, 3),
         hint: 'train vs val',
       },
@@ -313,7 +313,7 @@ export function formatRelativeTick(value: number, anchorTs: number): string {
   const diffHours = Math.round((value - anchorTs) / (1000 * 60 * 60))
 
   if (diffHours === 0) {
-    return 'Now'
+    return '現在'
   }
 
   return `${diffHours > 0 ? '+' : '-'}${Math.abs(diffHours)}H`
@@ -381,6 +381,12 @@ export function getFocusedPriceDomain(rows: ChartRow[]): [number, number] {
       const acc: number[] = []
       if (row.close !== null) acc.push(row.close)
       if (row.forecastBase !== null) acc.push(row.forecastBase)
+      if (row.forecastLower !== null) acc.push(row.forecastLower)
+      if (row.forecastUpper !== null) acc.push(row.forecastUpper)
+      if (row.forecastInnerLower !== null) acc.push(row.forecastInnerLower)
+      if (row.forecastInnerLower !== null && row.forecastInnerSpread !== null) {
+        acc.push(row.forecastInnerLower + row.forecastInnerSpread)
+      }
       if (row.actualClose !== null) acc.push(row.actualClose)
       return acc
     })
@@ -454,17 +460,17 @@ function buildDecisionSummary({
 }): string {
   if (recommendedAction === 'Reduce') {
     if ((freshness?.predictionLagHours ?? 0) >= 48) {
-      return 'Stale signal'
+      return '更新が古いため、今回は見送り。'
     }
 
-    return `${hours}H setup, low priority`
+    return `${hours}H シグナルだが、今回は見送り。`
   }
 
   if (recommendedAction === 'Active') {
-    return `${hours}H setup, actionable`
+    return `${hours}H はエントリー候補。`
   }
 
-  return `${hours}H setup, wait`
+  return `${hours}H はタイミング待ち。`
 }
 
 function buildActionCards({
@@ -481,23 +487,23 @@ function buildActionCards({
   return [
     {
       key: 'follow' as const,
-      title: 'Aggressive',
-      summary: 'Active',
-      detail: `Trust ${trustScore}%`,
+      title: 'Go',
+      summary: '入る',
+      detail: `確度 ${trustScore}%`,
       isCurrent: recommendedAction === 'Active',
     },
     {
       key: 'hold' as const,
-      title: 'Neutral',
-      summary: 'Hold',
-      detail: `Uncertainty ${uncertaintyScore}%`,
+      title: 'Wait',
+      summary: '様子見',
+      detail: `不確実 ${uncertaintyScore}%`,
       isCurrent: recommendedAction === 'Hold',
     },
     {
       key: 'reduce' as const,
-      title: 'Defensive',
-      summary: 'Reduce',
-      detail: (freshness?.predictionLagHours ?? 0) >= 48 ? 'Stale signal' : 'Risk first',
+      title: 'Pass',
+      summary: '見送り',
+      detail: (freshness?.predictionLagHours ?? 0) >= 48 ? '鮮度不足' : '根拠不足',
       isCurrent: recommendedAction === 'Reduce',
     },
   ]
@@ -540,23 +546,23 @@ function buildReliabilityVerdict({
 }): ReliabilityVerdict {
   if (recommendedAction === 'Reduce') {
     return {
-      label: 'Stand down',
-      summary: 'Freshness low.',
+      label: 'Pass',
+      summary: '鮮度か根拠が不足している。',
       tone: 'caution',
     }
   }
 
   if (recommendedAction === 'Active' && freshnessScore >= 70 && trustScore >= 72) {
     return {
-      label: 'Usable',
-      summary: 'Trust + timing aligned.',
+      label: 'Go',
+      summary: '入る条件が揃っている。',
       tone: 'strong',
     }
   }
 
   return {
-    label: 'Check setup',
-    summary: 'Need confirmation.',
+    label: 'Wait',
+    summary: '方向性はあるが、入るにはまだ早い。',
     tone: 'watch',
   }
 }
@@ -580,38 +586,38 @@ function buildReasons({
 
   if (runQuality !== 'fresh' || (freshness?.predictionLagHours ?? 0) >= 48) {
     reasons.push({
-      title: 'Signal stale',
-      body: `Lag ${formatNullableHours(freshness?.predictionLagHours)}`,
+      title: '鮮度に注意',
+      body: `予測ラグ ${formatNullableHours(freshness?.predictionLagHours)}`,
       tone: 'caution',
     })
   }
 
   if (directionalAccuracy !== null) {
     reasons.push({
-      title: directionalAccuracy >= 0.7 ? 'Direction strong' : 'Direction weak',
-      body: `Hit ${formatNullablePercent(directionalAccuracy)}`,
+      title: directionalAccuracy >= 0.7 ? '方向一致が強い' : '方向一致は中位',
+      body: `一致率 ${formatNullablePercent(directionalAccuracy)}`,
       tone: directionalAccuracy >= 0.7 ? 'strong' : 'watch',
     })
   }
 
   if (rangeCoverage !== null) {
     reasons.push({
-      title: rangeCoverage >= 0.7 ? 'Band valid' : 'Band tight',
-      body: `Band ${formatNullablePercent(rangeCoverage)}`,
+      title: rangeCoverage >= 0.7 ? 'レンジ捕捉は十分' : 'レンジ捕捉は限定的',
+      body: `帯域 ${formatNullablePercent(rangeCoverage)}`,
       tone: rangeCoverage >= 0.7 ? 'strong' : 'watch',
     })
   }
 
   if (utilityScore !== null) {
     reasons.push({
-      title: utilityScore >= 0.6 ? 'Utility positive' : 'Utility weak',
-      body: `Score ${utilityScore.toFixed(3)}`,
+      title: utilityScore >= 0.6 ? 'Utility 良好' : 'Utility は弱め',
+      body: `score ${utilityScore.toFixed(3)}`,
       tone: utilityScore >= 0.6 ? 'strong' : 'watch',
     })
   }
 
   reasons.push({
-    title: uncertaintyScore <= 33 ? 'Low uncertainty' : uncertaintyScore <= 66 ? 'Mid uncertainty' : 'High uncertainty',
+    title: uncertaintyScore <= 33 ? '不確実性は低め' : uncertaintyScore <= 66 ? '不確実性は標準' : '不確実性は高め',
     body: `${uncertaintyScore}%`,
     tone: uncertaintyScore <= 33 ? 'strong' : uncertaintyScore <= 66 ? 'watch' : 'caution',
   })
@@ -641,23 +647,23 @@ function deriveFreshnessScore({
 
 function classifyHealth(expectedReturnPct: number, uncertaintyScore: number) {
   if (Math.abs(expectedReturnPct) < 0.4) {
-    return { label: 'Neutral', tone: 'neutral' as const }
+    return { label: '中立', tone: 'neutral' as const }
   }
   if (expectedReturnPct > 0 && uncertaintyScore <= 45) {
-    return { label: 'Bullish', tone: 'positive' as const }
+    return { label: '上向き', tone: 'positive' as const }
   }
   if (expectedReturnPct > 0) {
-    return { label: 'Constructive', tone: 'positive' as const }
+    return { label: 'やや上向き', tone: 'positive' as const }
   }
-  return { label: 'Risk', tone: 'risk' as const }
+  return { label: '警戒', tone: 'risk' as const }
 }
 
 function compactDirectionLabel(expectedReturnPct: number) {
   if (Math.abs(expectedReturnPct) < 0.2) {
-    return 'Flat'
+    return '横ばい'
   }
 
-  return expectedReturnPct > 0 ? 'Bullish' : 'Bearish'
+  return expectedReturnPct > 0 ? '上向き' : '下向き'
 }
 
 function getDecisionTone(value: RecommendedAction): DecisionTone {

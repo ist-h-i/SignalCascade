@@ -9,7 +9,7 @@ from ..infrastructure.persistence import load_json, save_json
 JST = timezone(timedelta(hours=9))
 UTC = timezone.utc
 METRICS_SCHEMA_VERSION = 4
-ANALYSIS_SCHEMA_VERSION = 6
+ANALYSIS_SCHEMA_VERSION = 10
 REQUIRED_LIVE_DIAGNOSTICS_FILES = (
     "validation_summary.json",
     "policy_summary.csv",
@@ -108,6 +108,8 @@ def _build_analysis(
     )
     policy_horizon = int(prediction.get("policy_horizon", prediction.get("proposed_horizon", 0)))
     expected_log_returns = dict(prediction.get("mu_t", prediction.get("expected_log_returns", {})))
+    display_forecast = dict(prediction.get("display_forecast", {}))
+    policy_driver = dict(prediction.get("policy_driver", {}))
     predicted_closes = dict(
         prediction.get(
             "median_predicted_close_by_horizon",
@@ -126,8 +128,18 @@ def _build_analysis(
         prediction.get("shape_posterior", prediction.get("shape_probabilities", {}))
     )
     stateful_evaluation = dict(diagnostics_summary.get("stateful_evaluation", {}))
+    blocked_walk_forward_evaluation = dict(
+        diagnostics_summary.get("blocked_walk_forward_evaluation", {})
+    )
     policy_calibration_sweep = list(diagnostics_summary.get("policy_calibration_sweep", []))
-    policy_calibration_summary = dict(diagnostics_summary.get("policy_calibration_summary", {}))
+    policy_calibration_summary = _resolve_policy_calibration_summary(
+        diagnostics_summary.get("policy_calibration_summary", {}),
+        config,
+    )
+    state_vector_summary = dict(diagnostics_summary.get("state_vector_summary", {}))
+    current_alias_contract = dict(source_payload.get("current_alias_contract", {}))
+    current_selection_governance = dict(source_payload.get("current_selection_governance", {}))
+    checkpoint_audit = _resolve_checkpoint_audit(metrics, config)
     rows = []
     anchor_time = datetime.fromisoformat(str(prediction["anchor_time"]))
     for horizon_key in sorted(expected_log_returns, key=lambda value: int(value)):
@@ -178,15 +190,32 @@ def _build_analysis(
         "training": {
             "best_validation_loss": float(metrics.get("best_validation_loss", 0.0)),
             "best_epoch": float(metrics.get("best_epoch", 0.0)),
+            "best_epoch_by_exact_log_wealth": checkpoint_audit.get(
+                "best_epoch_by_exact_log_wealth"
+            ),
+            "best_epoch_by_exact_log_wealth_minus_lambda_cvar": checkpoint_audit.get(
+                "best_epoch_by_exact_log_wealth_minus_lambda_cvar"
+            ),
+            "best_epoch_by_blocked_objective_log_wealth_minus_lambda_cvar": checkpoint_audit.get(
+                "best_epoch_by_blocked_objective_log_wealth_minus_lambda_cvar"
+            ),
             "epochs": int(config.get("epochs", 0)),
             "warmup_epochs": int(config.get("warmup_epochs", 0)),
+            "oof_epochs": int(config.get("oof_epochs", 0)),
             "shape_classes": int(config.get("shape_classes", 0)),
             "state_dim": int(config.get("state_dim", 0)),
+            "walk_forward_folds": int(config.get("walk_forward_folds", 0)),
+            "checkpoint_audit": checkpoint_audit,
         },
         "validation_metrics": validation,
+        "state_vector_summary": state_vector_summary,
         "stateful_evaluation": stateful_evaluation,
+        "blocked_walk_forward_evaluation": blocked_walk_forward_evaluation,
         "policy_calibration_sweep": policy_calibration_sweep,
         "policy_calibration_summary": policy_calibration_summary,
+        "artifact_contract": current_alias_contract,
+        "governance": current_selection_governance,
+        "claim_hardening": _build_claim_hardening(state_vector_summary),
         "forecast": {
             "anchor_time_utc": str(prediction["anchor_time"]),
             "anchor_time_jst": anchor_time.astimezone(JST).isoformat(),
@@ -220,6 +249,9 @@ def _build_analysis(
                 ).items()
             },
             "shape_posterior": shape_posterior,
+            "display_forecast": display_forecast,
+            "policy_driver": policy_driver,
+            "overlay_branch_contract": prediction.get("overlay_branch_contract"),
             "rows": rows,
         },
         "project_assessment": {
@@ -236,6 +268,49 @@ def _build_summary(
     selected_policy_utility = float(
         prediction.get("selected_policy_utility", prediction.get("policy_score", 0.0))
     )
+
+
+def _resolve_policy_calibration_summary(
+    policy_calibration_summary: object,
+    config: dict[str, object],
+) -> dict[str, object]:
+    summary = dict(policy_calibration_summary) if isinstance(policy_calibration_summary, dict) else {}
+    if "applied_runtime_policy" not in summary:
+        applied_runtime_policy = {
+            "row_key": (
+                "state_reset_mode="
+                f"{config.get('evaluation_state_reset_mode', '-')}"
+                f"|cost_multiplier={float(config.get('policy_cost_multiplier', 0.0)):.12g}"
+                f"|gamma_multiplier={float(config.get('policy_gamma_multiplier', 0.0)):.12g}"
+                f"|min_policy_sigma={float(config.get('min_policy_sigma', 0.0)):.12g}"
+                f"|q_max={float(config.get('q_max', 0.0)):.12g}"
+                f"|cvar_weight={float(config.get('cvar_weight', 0.0)):.12g}"
+            ),
+            "state_reset_mode": config.get("evaluation_state_reset_mode"),
+            "cost_multiplier": config.get("policy_cost_multiplier"),
+            "gamma_multiplier": config.get("policy_gamma_multiplier"),
+            "min_policy_sigma": config.get("min_policy_sigma"),
+            "q_max": config.get("q_max"),
+            "cvar_weight": config.get("cvar_weight"),
+        }
+        selected_row = summary.get("selected_row")
+        summary.update(
+            {
+                "applied_runtime_policy": applied_runtime_policy,
+                "applied_runtime_row_key": applied_runtime_policy["row_key"],
+                "applied_runtime_policy_role": "authoritative_runtime_config",
+                "selected_row_role": summary.get(
+                    "selected_row_role",
+                    "diagnostic_recommendation_not_applied_runtime_config",
+                ),
+                "selected_row_matches_applied_runtime": (
+                    False
+                    if not isinstance(selected_row, dict)
+                    else selected_row.get("row_key") == applied_runtime_policy["row_key"]
+                ),
+            }
+        )
+    return summary
     return (
         "新 spec の主経路は threshold policy ではなく "
         "`shape -> return distribution -> q_t*` です。"
@@ -247,23 +322,259 @@ def _build_summary(
         f" q_t={float(prediction.get('q_t', prediction.get('position', 0.0))):.4f},"
         f" g_t={g_t:.4f},"
         f" selected_policy_utility={selected_policy_utility:.4f}。"
+        " 表示 forecast (`mu_t/sigma_t`) と policy driver "
+        "(`policy_mu_t/policy_sigma_t`) は分離して読む必要があります。"
+        " 現時点の evidence は continuous posterior weighting までで、"
+        " shape-aware routing / regime-aware routing を再主張できる状態ではありません。"
     )
+
+
+def _build_claim_hardening(state_vector_summary: dict[str, object]) -> dict[str, object]:
+    top_class_share = state_vector_summary.get("shape_posterior_top_class_share")
+    resolved_top_class_share = (
+        dict(top_class_share) if isinstance(top_class_share, dict) else {}
+    )
+    dominant_class = None
+    dominant_share = None
+    if resolved_top_class_share:
+        dominant_class, dominant_share = max(
+            resolved_top_class_share.items(),
+            key=lambda item: float(item[1]),
+        )
+    return {
+        "supported_claims": [
+            "continuous posterior weighting is present in the current artifact",
+            "head coupling can move policy_horizon without restoring shape routing",
+        ],
+        "unsupported_claims": [
+            "shape-aware routing",
+            "regime-aware routing",
+        ],
+        "shape_top_class_collapse": {
+            "dominant_class": dominant_class,
+            "dominant_share": dominant_share,
+        },
+        "required_evidence_to_restore_claim": (
+            "blocked folds must show materially lower shape top-class concentration and a "
+            "paired variant must improve frontier metrics through richer shape usage"
+        ),
+    }
+
+
+def _resolve_checkpoint_audit(
+    metrics: dict[str, object],
+    config: dict[str, object],
+) -> dict[str, object]:
+    existing = metrics.get("checkpoint_audit")
+    if isinstance(existing, dict) and existing:
+        return existing
+
+    history_payload = metrics.get("history")
+    if not isinstance(history_payload, list):
+        return {}
+
+    ranked_rows = [
+        row
+        for row in history_payload
+        if isinstance(row, dict)
+        and "epoch" in row
+        and "validation_exact_log_wealth" in row
+        and "validation_selection_score" in row
+    ]
+    if not ranked_rows:
+        return {}
+
+    cvar_weight = float(config.get("cvar_weight", 0.0) or 0.0)
+    selection_rank = sorted(
+        ranked_rows,
+        key=lambda row: (
+            float(row["validation_selection_score"]),
+            float(row["epoch"]),
+        ),
+    )
+    wealth_rank = sorted(
+        ranked_rows,
+        key=lambda row: (
+            -float(row["validation_exact_log_wealth"]),
+            float(row["epoch"]),
+        ),
+    )
+    selected_row = selection_rank[0]
+    best_wealth_row = wealth_rank[0]
+    selected_epoch = int(float(selected_row["epoch"]))
+    audit: dict[str, object] = {
+        "selection_metric": metrics.get(
+            "checkpoint_selection_metric",
+            "exact_log_wealth_minus_lambda_cvar",
+        ),
+        "cvar_weight": cvar_weight,
+        "selected_epoch": float(selected_epoch),
+        "best_epoch_by_selection_score": float(selected_epoch),
+        "best_epoch_by_exact_log_wealth": float(best_wealth_row["epoch"]),
+        "selected_epoch_rank_by_exact_log_wealth": float(
+            next(
+                index
+                for index, row in enumerate(wealth_rank, start=1)
+                if int(float(row["epoch"])) == selected_epoch
+            )
+        ),
+        "selected_epoch_exact_log_wealth": float(selected_row["validation_exact_log_wealth"]),
+        "best_exact_log_wealth": float(best_wealth_row["validation_exact_log_wealth"]),
+        "delta_to_best_exact_log_wealth": float(best_wealth_row["validation_exact_log_wealth"])
+        - float(selected_row["validation_exact_log_wealth"]),
+    }
+
+    if all("validation_exact_cvar_tail_loss" in row for row in ranked_rows):
+        wealth_minus_cvar_rank = sorted(
+            ranked_rows,
+            key=lambda row: (
+                -(
+                    float(row["validation_exact_log_wealth"])
+                    - (cvar_weight * float(row["validation_exact_cvar_tail_loss"]))
+                ),
+                float(row["epoch"]),
+            ),
+        )
+        best_wealth_minus_cvar_row = wealth_minus_cvar_rank[0]
+        selected_wealth_minus_cvar = float(selected_row["validation_exact_log_wealth"]) - (
+            cvar_weight * float(selected_row["validation_exact_cvar_tail_loss"])
+        )
+        best_wealth_minus_cvar = float(best_wealth_minus_cvar_row["validation_exact_log_wealth"]) - (
+            cvar_weight * float(best_wealth_minus_cvar_row["validation_exact_cvar_tail_loss"])
+        )
+        audit.update(
+            {
+                "best_epoch_by_exact_log_wealth_minus_lambda_cvar": float(
+                    best_wealth_minus_cvar_row["epoch"]
+                ),
+                "selected_epoch_rank_by_exact_log_wealth_minus_lambda_cvar": float(
+                    next(
+                        index
+                        for index, row in enumerate(wealth_minus_cvar_rank, start=1)
+                        if int(float(row["epoch"])) == selected_epoch
+                    )
+                ),
+                "selected_epoch_exact_log_wealth_minus_lambda_cvar": selected_wealth_minus_cvar,
+                "best_exact_log_wealth_minus_lambda_cvar": best_wealth_minus_cvar,
+                "delta_to_best_exact_log_wealth_minus_lambda_cvar": (
+                    best_wealth_minus_cvar - selected_wealth_minus_cvar
+                ),
+            }
+        )
+
+    if all(
+        "validation_blocked_objective_log_wealth_minus_lambda_cvar_mean" in row
+        for row in ranked_rows
+    ):
+        blocked_rank = sorted(
+            ranked_rows,
+            key=lambda row: (
+                -float(row["validation_blocked_objective_log_wealth_minus_lambda_cvar_mean"]),
+                float(row["epoch"]),
+            ),
+        )
+        best_blocked_row = blocked_rank[0]
+        audit.update(
+            {
+                "best_epoch_by_blocked_objective_log_wealth_minus_lambda_cvar": float(
+                    best_blocked_row["epoch"]
+                ),
+                "selected_epoch_rank_by_blocked_objective_log_wealth_minus_lambda_cvar": float(
+                    next(
+                        index
+                        for index, row in enumerate(blocked_rank, start=1)
+                        if int(float(row["epoch"])) == selected_epoch
+                    )
+                ),
+                "selected_epoch_blocked_objective_log_wealth_minus_lambda_cvar": float(
+                    selected_row["validation_blocked_objective_log_wealth_minus_lambda_cvar_mean"]
+                ),
+                "best_blocked_objective_log_wealth_minus_lambda_cvar": float(
+                    best_blocked_row["validation_blocked_objective_log_wealth_minus_lambda_cvar_mean"]
+                ),
+                "delta_to_best_blocked_objective_log_wealth_minus_lambda_cvar": (
+                    float(best_blocked_row["validation_blocked_objective_log_wealth_minus_lambda_cvar_mean"])
+                    - float(selected_row["validation_blocked_objective_log_wealth_minus_lambda_cvar_mean"])
+                ),
+            }
+        )
+
+    return audit
 
 
 def _render_markdown_report(analysis: dict[str, object]) -> str:
     dataset = analysis["dataset"]
     training = analysis["training"]
     validation = analysis["validation_metrics"]
+    state_vector_summary = analysis.get("state_vector_summary", {})
     artifact_provenance = analysis.get("artifact_provenance", {})
+    artifact_contract = analysis.get("artifact_contract", {})
+    governance = analysis.get("governance", {})
+    claim_hardening = analysis.get("claim_hardening", {})
     stateful_evaluation = analysis["stateful_evaluation"]
+    blocked_walk_forward_evaluation = analysis.get("blocked_walk_forward_evaluation", {})
     policy_calibration_sweep = analysis["policy_calibration_sweep"]
     policy_calibration_summary = analysis["policy_calibration_summary"]
     forecast = analysis["forecast"]
     rows = forecast["rows"]
+    blocked_modes = (
+        dict(blocked_walk_forward_evaluation.get("state_reset_modes", {}))
+        if isinstance(blocked_walk_forward_evaluation, dict)
+        else {}
+    )
+    blocked_carry_on = dict(blocked_modes.get("carry_on", {}))
+    blocked_reset_session = dict(blocked_modes.get("reset_each_session_or_window", {}))
     selected_sweep_row = (
         dict(policy_calibration_summary.get("selected_row", {}))
         if policy_calibration_summary.get("selected_row") is not None
         else None
+    )
+    applied_runtime_policy = (
+        dict(policy_calibration_summary.get("applied_runtime_policy", {}))
+        if policy_calibration_summary.get("applied_runtime_policy") is not None
+        else {}
+    )
+    authoritative_paths = (
+        dict(artifact_contract.get("authoritative_paths", {}))
+        if isinstance(artifact_contract.get("authoritative_paths"), dict)
+        else {}
+    )
+    runtime_contract = (
+        dict(artifact_contract.get("runtime_contract", {}))
+        if isinstance(artifact_contract.get("runtime_contract"), dict)
+        else {}
+    )
+    governance_best = (
+        dict(governance.get("best_candidate", {}))
+        if isinstance(governance.get("best_candidate"), dict)
+        else {}
+    )
+    governance_current = (
+        dict(governance.get("production_current", {}))
+        if isinstance(governance.get("production_current"), dict)
+        else {}
+    )
+    governance_accepted = (
+        dict(governance.get("accepted_candidate", {}))
+        if isinstance(governance.get("accepted_candidate"), dict)
+        else {}
+    )
+    paired_frontier = (
+        dict(governance.get("paired_frontier", {}))
+        if isinstance(governance.get("paired_frontier"), dict)
+        else {}
+    )
+    frontier_delta = (
+        dict(paired_frontier.get("delta_production_minus_accepted", {}))
+        if isinstance(paired_frontier.get("delta_production_minus_accepted"), dict)
+        else {}
+    )
+    supported_claims = claim_hardening.get("supported_claims", [])
+    unsupported_claims = claim_hardening.get("unsupported_claims", [])
+    shape_collapse = (
+        dict(claim_hardening.get("shape_top_class_collapse", {}))
+        if isinstance(claim_hardening.get("shape_top_class_collapse"), dict)
+        else {}
     )
     artifact_lines = [
         "## Artifact",
@@ -318,10 +629,49 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f"- train / validation: `{dataset['train_samples']}` / `{dataset['validation_samples']}`",
             f"- source_rows_original / used: `{dataset['source_rows_original']}` / `{dataset['source_rows_used']}`",
             "",
+            "## Contract",
+            f"- current alias role: `{artifact_contract.get('alias_role', '-')}`",
+            f"- authoritative runtime config: `{authoritative_paths.get('runtime_config', '-')}`",
+            f"- diagnostic recommendation pointer: "
+            f"`{runtime_contract.get('diagnostic_recommendation_pointer', '-')}`",
+            f"- top-level report role / path: "
+            f"`{artifact_contract.get('top_level_report_role', '-')}` / "
+            f"`{authoritative_paths.get('top_level_report', '-')}`",
+            f"- current research report / prediction / forecast / source: "
+            f"`{authoritative_paths.get('research_report', '-')}` / "
+            f"`{authoritative_paths.get('prediction', '-')}` / "
+            f"`{authoritative_paths.get('forecast_summary', '-')}` / "
+            f"`{authoritative_paths.get('source', '-')}`",
+            f"- source-of-truth summary: `{artifact_contract.get('source_of_truth_summary', '-')}`",
+            "",
             "## Training",
             f"- best_validation_loss: `{float(training['best_validation_loss']):.6f}`",
             f"- best_epoch: `{float(training['best_epoch']):.0f}`",
-            f"- epochs / warmup_epochs: `{training['epochs']}` / `{training['warmup_epochs']}`",
+            f"- best_epoch_by_exact_log_wealth: "
+            f"`{_display_int_or_missing(training.get('best_epoch_by_exact_log_wealth'))}`",
+            f"- best_epoch_by_exact_log_wealth_minus_lambda_cvar: "
+            f"`{_display_int_or_missing(training.get('best_epoch_by_exact_log_wealth_minus_lambda_cvar'))}`",
+            f"- best_epoch_by_blocked_objective_log_wealth_minus_lambda_cvar: "
+            f"`{_display_int_or_missing(training.get('best_epoch_by_blocked_objective_log_wealth_minus_lambda_cvar'))}`",
+            (
+                f"- selected_epoch_rank_by_exact_log_wealth / delta_to_best_exact_log_wealth: "
+                f"`{_display_int_or_missing(training.get('checkpoint_audit', {}).get('selected_epoch_rank_by_exact_log_wealth'))}` / "
+                f"`{_display_or_missing(training.get('checkpoint_audit', {}).get('delta_to_best_exact_log_wealth'))}`"
+            ),
+            (
+                f"- selected_epoch_rank_by_exact_log_wealth_minus_lambda_cvar / "
+                f"delta_to_best_exact_log_wealth_minus_lambda_cvar: "
+                f"`{_display_int_or_missing(training.get('checkpoint_audit', {}).get('selected_epoch_rank_by_exact_log_wealth_minus_lambda_cvar'))}` / "
+                f"`{_display_or_missing(training.get('checkpoint_audit', {}).get('delta_to_best_exact_log_wealth_minus_lambda_cvar'))}`"
+            ),
+            (
+                f"- selected_epoch_rank_by_blocked_objective_log_wealth_minus_lambda_cvar / "
+                f"delta_to_best_blocked_objective_log_wealth_minus_lambda_cvar: "
+                f"`{_display_int_or_missing(training.get('checkpoint_audit', {}).get('selected_epoch_rank_by_blocked_objective_log_wealth_minus_lambda_cvar'))}` / "
+                f"`{_display_or_missing(training.get('checkpoint_audit', {}).get('delta_to_best_blocked_objective_log_wealth_minus_lambda_cvar'))}`"
+            ),
+            f"- epochs / warmup_epochs / oof_epochs: `{training['epochs']}` / `{training['warmup_epochs']}` / `{training.get('oof_epochs', 0)}`",
+            f"- walk_forward_folds: `{training.get('walk_forward_folds', 0)}`",
             f"- shape_classes / state_dim: `{training['shape_classes']}` / `{training['state_dim']}`",
             "",
             "## Validation",
@@ -338,6 +688,8 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f"`{_display_or_missing(validation.get('exact_smooth_utility_regret'))}`",
             f"- shape_gate_usage: `{_display_or_missing(validation.get('shape_gate_usage'))}`",
             f"- expert_entropy: `{_display_or_missing(validation.get('expert_entropy'))}`",
+            f"- shape_posterior_top_class_share: "
+            f"`{state_vector_summary.get('shape_posterior_top_class_share', {})}`",
             f"- mu_calibration / sigma_calibration: "
             f"`{_display_or_missing(validation.get('mu_calibration'))}` / "
             f"`{_display_or_missing(validation.get('sigma_calibration'))}`",
@@ -353,6 +705,16 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f"- reset_each_example average_log_wealth: `{_display_or_missing(stateful_evaluation.get('reset_each_example', {}).get('average_log_wealth'))}`",
             f"- reset_each_session_or_window average_log_wealth: "
             f"`{_display_or_missing(stateful_evaluation.get('reset_each_session_or_window', {}).get('average_log_wealth'))}`",
+            f"- blocked_walk_forward_folds / best_state_reset_mode_by_mean_log_wealth: "
+            f"`{_display_int_or_missing(blocked_walk_forward_evaluation.get('fold_count'))}` / "
+            f"`{blocked_walk_forward_evaluation.get('best_state_reset_mode_by_mean_log_wealth', '-')}`",
+            f"- blocked carry_on mean/min/max average_log_wealth: "
+            f"`{_display_or_missing(blocked_carry_on.get('average_log_wealth_mean'))}` / "
+            f"`{_display_or_missing(blocked_carry_on.get('average_log_wealth_min'))}` / "
+            f"`{_display_or_missing(blocked_carry_on.get('average_log_wealth_max'))}`",
+            f"- blocked reset_each_session_or_window mean average_log_wealth / turnover_mean: "
+            f"`{_display_or_missing(blocked_reset_session.get('average_log_wealth_mean'))}` / "
+            f"`{_display_or_missing(blocked_reset_session.get('turnover_mean'))}`",
             f"- policy sweep rows / pareto_optimal: "
             f"`{_display_int_or_missing(policy_calibration_summary.get('row_count', len(policy_calibration_sweep) if policy_calibration_sweep else None))}` / "
             f"`{_display_int_or_missing(policy_calibration_summary.get('pareto_optimal_count'))}`",
@@ -364,10 +726,33 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
                 f"cost x`{float(selected_sweep_row['cost_multiplier']):.2f}`, "
                 f"gamma x`{float(selected_sweep_row['gamma_multiplier']):.2f}`, "
                 f"min_sigma=`{float(selected_sweep_row['min_policy_sigma']):.6f}`, "
-                f"log_wealth=`{float(selected_sweep_row['average_log_wealth']):.6f}`"
+                f"q_max=`{_display_or_missing(selected_sweep_row.get('q_max'), digits=4)}`, "
+                f"cvar_weight=`{_display_or_missing(selected_sweep_row.get('cvar_weight'), digits=4)}`, "
+                f"blocked_objective_mean="
+                f"`{_display_or_missing(selected_sweep_row.get('blocked_objective_log_wealth_minus_lambda_cvar_mean'))}`"
                 if selected_sweep_row is not None
                 else "- selected policy sweep: none"
             ),
+            (
+                f"- selected policy sweep blocked mean wealth / cvar / turnover: "
+                f"`{_display_or_missing(selected_sweep_row.get('blocked_average_log_wealth_mean'))}` / "
+                f"`{_display_or_missing(selected_sweep_row.get('blocked_cvar_tail_loss_mean'))}` / "
+                f"`{_display_or_missing(selected_sweep_row.get('blocked_turnover_mean'))}`"
+                if selected_sweep_row is not None
+                else "- selected policy sweep blocked mean wealth / cvar / turnover: `-`"
+            ),
+            (
+                f"- applied runtime policy: reset=`{applied_runtime_policy.get('state_reset_mode', '-')}`, "
+                f"cost x`{_display_or_missing(applied_runtime_policy.get('cost_multiplier'), digits=4)}`, "
+                f"gamma x`{_display_or_missing(applied_runtime_policy.get('gamma_multiplier'), digits=4)}`, "
+                f"min_sigma=`{_display_or_missing(applied_runtime_policy.get('min_policy_sigma'), digits=6)}`, "
+                f"q_max=`{_display_or_missing(applied_runtime_policy.get('q_max'), digits=4)}`, "
+                f"cvar_weight=`{_display_or_missing(applied_runtime_policy.get('cvar_weight'), digits=4)}`"
+                if applied_runtime_policy
+                else "- applied runtime policy: `-`"
+            ),
+            f"- selected_row_matches_applied_runtime: "
+            f"`{policy_calibration_summary.get('selected_row_matches_applied_runtime', '-')}`",
             f"- selected row key: `{policy_calibration_summary.get('selected_row_key', '-')}`",
             (
                 f"- policy sweep rows sha256: "
@@ -385,7 +770,82 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f"- no_trade_band_hit: `{forecast['no_trade_band_hit']}`",
             f"- g_t / shape_entropy / selected_policy_utility: "
             f"`{float(forecast['g_t']):.4f}` / `{float(forecast['shape_entropy']):.4f}` / `{float(forecast['selected_policy_utility']):.4f}`",
+            (
+                f"- display forecast label / policy driver label / head relationship: "
+                f"`{forecast.get('display_forecast', {}).get('label', '-')}` / "
+                f"`{forecast.get('policy_driver', {}).get('label', '-')}` / "
+                f"`{forecast.get('policy_driver', {}).get('head_relationship', '-')}`"
+            ),
+            f"- overlay branch contract: `{forecast.get('overlay_branch_contract', '-')}`",
             row_lines or "- forecast rows: none",
+            "",
+            "## Governance",
+            f"- selection mode / rule / version: "
+            f"`{governance.get('selection_mode', '-')}` / "
+            f"`{governance.get('selection_rule', '-')}` / "
+            f"`{governance.get('selection_rule_version', '-')}`",
+            f"- decision summary: `{governance.get('decision_summary', '-')}`",
+            f"- best / accepted / production current: "
+            f"`{governance_best.get('candidate', '-')}` / "
+            f"`{governance_accepted.get('candidate', '-')}` / "
+            f"`{governance_current.get('candidate', '-')}`",
+            f"- production current user_value_score / chart_fidelity / sigma_band / execution_stability: "
+            f"`{_display_or_missing(governance_current.get('user_value_score'))}` / "
+            f"`{_display_or_missing(governance_current.get('user_value_chart_fidelity_score'))}` / "
+            f"`{_display_or_missing(governance_current.get('user_value_sigma_band_score'))}` / "
+            f"`{_display_or_missing(governance_current.get('user_value_execution_stability_score'))}`",
+            (
+                f"- accepted snapshot user_value_score / chart_fidelity / sigma_band / execution_stability: "
+                f"`{_display_or_missing(governance_accepted.get('user_value_score'))}` / "
+                f"`{_display_or_missing(governance_accepted.get('user_value_chart_fidelity_score'))}` / "
+                f"`{_display_or_missing(governance_accepted.get('user_value_sigma_band_score'))}` / "
+                f"`{_display_or_missing(governance_accepted.get('user_value_execution_stability_score'))}`"
+                if governance_accepted
+                else "- accepted snapshot user_value_score / chart_fidelity / sigma_band / execution_stability: `-`"
+            ),
+            f"- production current blocked objective / blocked turnover / max_drawdown / "
+            f"exact_smooth_position_mae / trade_delta / policy_horizon: "
+            f"`{_display_or_missing(governance_current.get('blocked_objective_log_wealth_minus_lambda_cvar_mean'))}` / "
+            f"`{_display_or_missing(governance_current.get('blocked_turnover_mean'))}` / "
+            f"`{_display_or_missing(governance_current.get('max_drawdown'))}` / "
+            f"`{_display_or_missing(governance_current.get('exact_smooth_position_mae'))}` / "
+            f"`{_display_or_missing(governance_current.get('trade_delta'))}` / "
+            f"`{governance_current.get('policy_horizon', '-')}`",
+            (
+                f"- accepted snapshot blocked objective / blocked turnover / max_drawdown / "
+                f"exact_smooth_position_mae / trade_delta / policy_horizon: "
+                f"`{_display_or_missing(governance_accepted.get('blocked_objective_log_wealth_minus_lambda_cvar_mean'))}` / "
+                f"`{_display_or_missing(governance_accepted.get('blocked_turnover_mean'))}` / "
+                f"`{_display_or_missing(governance_accepted.get('max_drawdown'))}` / "
+                f"`{_display_or_missing(governance_accepted.get('exact_smooth_position_mae'))}` / "
+                f"`{_display_or_missing(governance_accepted.get('trade_delta'))}` / "
+                f"`{governance_accepted.get('policy_horizon', '-')}`"
+                if governance_accepted
+                else "- accepted snapshot blocked objective / blocked turnover / max_drawdown / exact_smooth_position_mae / trade_delta / policy_horizon: `-`"
+            ),
+            (
+                f"- production minus accepted delta (avg_log_wealth / blocked_objective / "
+                f"blocked_turnover / max_drawdown / exact_smooth_position_mae / trade_delta / policy_horizon): "
+                f"`{_display_or_missing(frontier_delta.get('average_log_wealth'))}` / "
+                f"`{_display_or_missing(frontier_delta.get('blocked_objective_log_wealth_minus_lambda_cvar_mean'))}` / "
+                f"`{_display_or_missing(frontier_delta.get('blocked_turnover_mean'))}` / "
+                f"`{_display_or_missing(frontier_delta.get('max_drawdown'))}` / "
+                f"`{_display_or_missing(frontier_delta.get('exact_smooth_position_mae'))}` / "
+                f"`{_display_or_missing(frontier_delta.get('trade_delta'))}` / "
+                f"`{_display_or_missing(frontier_delta.get('policy_horizon'))}`"
+                if frontier_delta
+                else "- production minus accepted delta (avg_log_wealth / blocked_objective / blocked_turnover / max_drawdown / exact_smooth_position_mae / trade_delta / policy_horizon): `-`"
+            ),
+            f"- override priority metrics: `{governance.get('override_priority_metrics', [])}`",
+            "",
+            "## Claim Hardening",
+            f"- supported claims: `{supported_claims}`",
+            f"- unsupported claims: `{unsupported_claims}`",
+            f"- dominant shape class / share: "
+            f"`{shape_collapse.get('dominant_class', '-')}` / "
+            f"`{_display_or_missing(shape_collapse.get('dominant_share'))}`",
+            f"- restore-claim evidence gate: "
+            f"`{claim_hardening.get('required_evidence_to_restore_claim', '-')}`",
             "",
             "## Assessment",
             f"- {analysis['project_assessment']['summary']}",

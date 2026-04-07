@@ -11,6 +11,8 @@
   - canonical target spec
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/logic_multiframe_candlestick_model.md`
   - 現在の実装ロジック説明
+- `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/review_followup_milestones.md`
+  - dossier review 指摘に対する現行の実行タスクとマイルストーン
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend/README.md`
   - dashboard 開発とデータ同期の運用手順
 - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/docs/UI_UX_DESIGN_RULES.md`

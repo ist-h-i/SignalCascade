@@ -102,6 +102,23 @@ if (diagnosticsGeneratedAt !== expectedDiagnosticsGeneratedAt) {
   )
 }
 
+const expectedProductionCurrentCandidate = toNonEmptyString(sourceMeta.current_selection_governance?.production_current?.candidate)
+if (
+  expectedProductionCurrentCandidate !== null &&
+  dashboardData.governance?.productionCurrentCandidate !== expectedProductionCurrentCandidate
+) {
+  throw new Error(
+    `dashboard-data productionCurrentCandidate mismatch: dashboard=${dashboardData.governance?.productionCurrentCandidate ?? 'null'} current=${expectedProductionCurrentCandidate}`,
+  )
+}
+
+const expectedAcceptedCandidate = toNonEmptyString(sourceMeta.current_selection_governance?.accepted_candidate?.candidate)
+if (expectedAcceptedCandidate !== null && dashboardData.governance?.acceptedCandidate !== expectedAcceptedCandidate) {
+  throw new Error(
+    `dashboard-data acceptedCandidate mismatch: dashboard=${dashboardData.governance?.acceptedCandidate ?? 'null'} current=${expectedAcceptedCandidate}`,
+  )
+}
+
 const priceScaleAlias = toPositiveNumber(dashboardData.run?.priceScale)
 if (priceScaleAlias !== null && !numbersMatch(priceScaleAlias, effectivePriceScale)) {
   throw new Error(

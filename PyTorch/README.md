@@ -18,6 +18,33 @@
   に移動しています。
 - active docs の Source of Truth は上の 3 本だけです。
 
+## Current Alias SoT
+
+`artifacts/gold_xauusd_m30/current` は local alias view であり、新しい artifact kind ではありません。運用上の authoritative SoT は次で固定します。
+
+- applied runtime config
+  - `artifacts/gold_xauusd_m30/current/config.json`
+- current forecast / policy driver / lineage
+  - `artifacts/gold_xauusd_m30/current/prediction.json`
+  - `artifacts/gold_xauusd_m30/current/forecast_summary.json`
+  - `artifacts/gold_xauusd_m30/current/source.json`
+  - `artifacts/gold_xauusd_m30/current/research_report.md`
+- top-level report
+  - `report_signalcascade_xauusd.md` は `current/research_report.md` の synchronized mirror
+- accepted snapshot report
+  - tuning session 直下の accepted candidate `research_report.md`
+
+`validation_summary.json.policy_calibration_summary.selected_row` は diagnostics recommendation であり、applied runtime config ではありません。runtime は常に `current/config.json` を読む前提で扱います。
+
+`accepted_candidate` と `production current` は同一とは限りません。`accepted_candidate` は blocked objective と optimization gate の勝者、`production current` は chart fidelity / sigma-band reliability / execution stability を加味した `user_value_score` の自動選抜結果です。
+
+## Claim Hardening
+
+`policy_mode=shape_aware_profit_maximization` は互換 identifier として残っていますが、2026-04-07 JST 時点の current evidence は `continuous posterior weighting` と `head coupling` までです。
+
+- `shape_posterior_top_class_share={'1': 1.0}` が残っているため、current artifact を `shape-aware routing` や `regime-aware routing` と読まない
+- `shape-aware` を再主張する条件は、blocked folds で top-class concentration が下がり、その差が frontier 改善に結び付く追加 evidence を得ること
+
 この実装は、以下を最小構成でカバーします。
 
 - 30分足ベースの OHLCV 生成または CSV 読み込み
@@ -197,7 +224,8 @@ npm run sync:data:fast
   - `directional_accuracy >= 0.50`
   - `no_trade_band_hit_rate <= 0.80`
 - pass した candidate が 1 件以上ある場合:
-  - best pass candidate を `current` と `best_params.json` に反映する
+  - blocked-first の best pass candidate を `accepted_candidate` と `best_params.json` に反映する
+  - pass 済み candidate の中から `user_value_score` 最大の candidate を `production current` として `current` に反映する
 - pass した candidate が 0 件の場合:
   - `current` は更新しない
   - session 配下の `leaderboard.json` / `manifest.json` に fail 理由を残す
