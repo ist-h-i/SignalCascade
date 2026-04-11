@@ -33,6 +33,14 @@ export type ReliabilityMeter = {
   tone: 'cool' | 'warm' | 'risk'
 }
 
+export type HorizonMixRow = {
+  label: string
+  share: number
+  shareLabel: string
+  detail: string
+  tone: 'positive' | 'neutral' | 'risk'
+}
+
 export type ReliabilityVerdict = {
   label: string
   summary: string
@@ -70,6 +78,7 @@ export type DashboardViewModel = {
   anchorTs: number
   chartWindowHours: number
   trustScore: number
+  economicScore: number
   uncertaintyScore: number
   uncertaintyLabel: string
   directionalAccuracy: number | null
@@ -82,6 +91,7 @@ export type DashboardViewModel = {
   selectedRangeLabel: string
   actionCards: ActionCard[]
   systemHealthRows: SystemHealthRow[]
+  horizonMixRows: HorizonMixRow[]
   reliabilityMeters: ReliabilityMeter[]
   reliabilityVerdict: ReliabilityVerdict
   boundaryCards: BoundaryCard[]
@@ -93,24 +103,32 @@ export type DashboardViewModel = {
 export function buildDashboardViewModel(data: DashboardData, activeHorizon: number): DashboardViewModel {
   const selectedForecast = data.horizons.find((row) => row.horizon === activeHorizon) ?? data.horizons[0]
   const validation = data.metrics.validation
+  const blocked = data.metrics.blocked ?? null
+  const live = data.metrics.live ?? null
+  const structure = data.metrics.structure ?? null
+  const horizonDiagnostics = data.metrics.horizonDiagnostics ?? []
   const availableHorizons = data.horizons.filter(
     (row) => row.actualClose !== null && row.actualReturnPct !== null,
   )
   const directionalAccuracy =
+    live?.directionalAccuracy ??
+    blocked?.directionalAccuracyMean ??
     validation?.directionalAccuracy ??
     (availableHorizons.length > 0
       ? availableHorizons.filter((row) => Math.sign(row.expectedReturnPct) === Math.sign(row.actualReturnPct ?? 0)).length /
         availableHorizons.length
       : null)
   const rangeCoverage =
-    validation?.noTradeBandHitRate !== null && validation?.noTradeBandHitRate !== undefined
-      ? 1 - validation.noTradeBandHitRate
-      : availableHorizons.length > 0
-        ? availableHorizons.filter(
-            (row) => (row.actualClose ?? Number.NaN) >= row.lowerClose && (row.actualClose ?? Number.NaN) <= row.upperClose,
-          ).length / availableHorizons.length
-        : null
+    live?.interval1SigmaCoverage ??
+    blocked?.interval1SigmaCoverageMean ??
+    validation?.interval1SigmaCoverage ??
+    (availableHorizons.length > 0
+      ? availableHorizons.filter(
+          (row) => (row.actualClose ?? Number.NaN) >= row.lowerClose && (row.actualClose ?? Number.NaN) <= row.upperClose,
+        ).length / availableHorizons.length
+      : null)
   const averagePriceErrorPct =
+    live?.meanAbsoluteErrorPct ??
     validation?.muCalibration ??
     (availableHorizons.length > 0
       ? availableHorizons.reduce((sum, row) => {
@@ -118,15 +136,49 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
           return sum + Math.abs((actualClose - row.predictedClose) / actualClose)
         }, 0) / availableHorizons.length
       : null)
-  const normalizedUncertainty = getNormalizedUncertainty(selectedForecast.uncertainty, data.horizons)
+  const probabilisticCalibrationScore =
+    live?.probabilisticCalibrationScore ??
+    blocked?.probabilisticCalibrationScoreMean ??
+    validation?.probabilisticCalibrationScore ??
+    null
+  const runtimeAlignmentScore = structure?.runtimePolicyAlignmentScore ?? 1
+  const shapeConcentration = structure?.dominantShapeClassShare ?? null
   const normalizedGap = clamp01(1 - Math.min(Math.abs(data.run.generalizationGap), 1))
   const normalizedError = averagePriceErrorPct === null ? 0.5 : clamp01(1 - Math.min(averagePriceErrorPct / 0.05, 1))
+  const normalizedCoverage = rangeCoverage === null ? 0.5 : clamp01(rangeCoverage)
+  const normalizedProbabilistic = probabilisticCalibrationScore === null ? 0.5 : clamp01(probabilisticCalibrationScore)
+  const normalizedRuntimeAlignment = clamp01(runtimeAlignmentScore)
   const trustScore = Math.round(
     (
-      normalizedUncertainty * 0.28 +
-      normalizedGap * 0.24 +
-      (directionalAccuracy ?? 0.5) * 0.28 +
-      normalizedError * 0.2
+      normalizedCoverage * 0.24 +
+      (directionalAccuracy ?? 0.5) * 0.24 +
+      normalizedProbabilistic * 0.18 +
+      normalizedRuntimeAlignment * 0.12 +
+      normalizedError * 0.12 +
+      normalizedGap * 0.10
+    ) * 100,
+  )
+  const blockedObjective = blocked?.objectiveLogWealthMinusLambdaCvarMean ?? null
+  const normalizedBlockedObjective =
+    blockedObjective === null ? 0.35 : clamp01((blockedObjective + 0.001) / 0.002)
+  const normalizedPnl =
+    validation?.realizedPnlPerAnchor === null || validation?.realizedPnlPerAnchor === undefined
+      ? 0.4
+      : clamp01((validation.realizedPnlPerAnchor + 0.001) / 0.002)
+  const normalizedDrawdown =
+    validation?.maxDrawdown === null || validation?.maxDrawdown === undefined
+      ? 0.5
+      : clamp01(1 - Math.min(validation.maxDrawdown / 0.15, 1))
+  const normalizedUtility =
+    validation?.utilityScore === null || validation?.utilityScore === undefined
+      ? 0.5
+      : clamp01(validation.utilityScore)
+  const economicScore = Math.round(
+    (
+      normalizedBlockedObjective * 0.36 +
+      normalizedUtility * 0.26 +
+      normalizedPnl * 0.18 +
+      normalizedDrawdown * 0.20
     ) * 100,
   )
   const uncertaintyScore = getUncertaintyScore(selectedForecast.uncertainty, data.horizons)
@@ -137,6 +189,7 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
     policyStatus: data.run.policyStatus,
     predictionLagHours: freshness?.predictionLagHours ?? null,
     trustScore,
+    economicScore,
     directionalAccuracy,
     utilityScore,
   })
@@ -157,6 +210,7 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
     anchorTs: data.chart.rows.find((row) => row.phase === 'forecast')?.ts ?? new Date(data.run.anchorTime).getTime(),
     chartWindowHours: selectedForecast.hours,
     trustScore,
+    economicScore,
     uncertaintyScore,
     uncertaintyLabel,
     directionalAccuracy,
@@ -174,33 +228,42 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
     actionCards: buildActionCards({
       recommendedAction,
       trustScore,
+      economicScore,
       uncertaintyScore,
       freshness,
     }),
     systemHealthRows: buildSystemHealthRows({
-      horizons: data.horizons,
+      structure,
       selectedHorizon: selectedForecast.horizon,
     }),
+    horizonMixRows: buildHorizonMixRows(horizonDiagnostics),
     reliabilityMeters: [
       {
-        label: '確度',
+        label: '信頼',
         value: trustScore,
         valueLabel: `${trustScore}%`,
-        caption: '方向一致 + レンジ',
+        caption: '方向一致・1σ・runtime',
         tone: trustScore >= 72 ? 'cool' : trustScore >= 55 ? 'warm' : 'risk',
+      },
+      {
+        label: '収益',
+        value: economicScore,
+        valueLabel: `${economicScore}%`,
+        caption: blockedObjective === null ? '収益評価は未取得' : '収益評価と方策価値',
+        tone: economicScore >= 62 ? 'cool' : economicScore >= 46 ? 'warm' : 'risk',
       },
       {
         label: '鮮度',
         value: freshnessScore,
         valueLabel: `${freshnessScore}%`,
-        caption: '更新状態 + ラグ',
+        caption: '更新状態とラグ',
         tone: freshnessScore >= 72 ? 'cool' : freshnessScore >= 55 ? 'warm' : 'risk',
       },
       {
         label: '不確実性',
         value: uncertaintyScore,
         valueLabel: `${uncertaintyScore}%`,
-        caption: `${selectedForecast.hours}H のブレ`,
+        caption: `${selectedForecast.hours}H の振れ幅`,
         tone: uncertaintyScore <= 33 ? 'cool' : uncertaintyScore <= 66 ? 'warm' : 'risk',
       },
     ],
@@ -208,6 +271,7 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
       recommendedAction,
       freshnessScore,
       trustScore,
+      economicScore,
     }),
     boundaryCards: [
       {
@@ -236,10 +300,13 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
       rangeCoverage,
       utilityScore,
       uncertaintyScore,
+      economicScore,
+      runtimeAlignmentScore,
+      shapeConcentration,
     }),
     freshnessFacts: [
       {
-        label: 'Anchor',
+        label: '基準時刻',
         value: formatTimestampJst(data.run.anchorTime),
       },
       {
@@ -258,31 +325,42 @@ export function buildDashboardViewModel(data: DashboardData, activeHorizon: numb
             ? 'caution'
             : 'watch',
       },
-      {
-        label: 'データ元',
-        value: data.provenance.sourceOriginPath ?? data.provenance.sourcePath ?? '-',
-      },
     ],
     detailMetrics: [
       {
         label: '方向一致',
         value: formatNullablePercent(directionalAccuracy),
-        hint: 'direction',
+        hint: '方向の一致',
       },
       {
-        label: 'レンジ捕捉',
+        label: '1σ捕捉',
         value: formatNullablePercent(rangeCoverage),
-        hint: 'coverage',
+        hint: '実績が1σ内',
       },
       {
-        label: 'Utility',
+        label: '確率校正',
+        value: formatNullablePercent(probabilisticCalibrationScore),
+        hint: 'カバレッジと PIT',
+      },
+      {
+        label: '収益評価',
+        value: formatNullableSignedMetric(blockedObjective, 5),
+        hint: 'wealth - λ*CVaR',
+      },
+      {
+        label: 'Runtime整合',
+        value: formatNullablePercent(runtimeAlignmentScore),
+        hint: 'runtime 設定との整合',
+      },
+      {
+        label: 'Shape偏り',
+        value: formatNullablePercent(shapeConcentration),
+        hint: '最頻クラスの集中',
+      },
+      {
+        label: '方策価値',
         value: formatNullableScore(validation?.utilityScore),
-        hint: 'policy value',
-      },
-      {
-        label: '汎化差',
-        value: formatSignedDecimal(data.run.generalizationGap, 3),
-        hint: 'train vs val',
+        hint: '方策の価値',
       },
     ],
   }
@@ -375,6 +453,14 @@ export function formatSignedDecimal(value: number, digits = 2): string {
   return `${value >= 0 ? '+' : ''}${value.toFixed(digits)}`
 }
 
+export function formatNullableSignedMetric(value: number | null | undefined, digits = 4): string {
+  if (value === null || value === undefined) {
+    return '-'
+  }
+
+  return `${value >= 0 ? '+' : ''}${value.toFixed(digits)}`
+}
+
 export function getFocusedPriceDomain(rows: ChartRow[]): [number, number] {
   const values = rows
     .flatMap((row) => {
@@ -425,12 +511,14 @@ function deriveRecommendedAction({
   policyStatus,
   predictionLagHours,
   trustScore,
+  economicScore,
   directionalAccuracy,
   utilityScore,
 }: {
   policyStatus: string
   predictionLagHours: number | null
   trustScore: number
+  economicScore: number
   directionalAccuracy: number | null
   utilityScore: number | null
 }): RecommendedAction {
@@ -438,11 +526,11 @@ function deriveRecommendedAction({
     return 'Reduce'
   }
 
-  if (trustScore >= 72 && (directionalAccuracy ?? 0) >= 0.7 && (utilityScore ?? 0) >= 0.6) {
+  if (trustScore >= 70 && economicScore >= 58 && (directionalAccuracy ?? 0) >= 0.55 && (utilityScore ?? 0) >= 0.55) {
     return 'Active'
   }
 
-  if (trustScore >= 55) {
+  if (trustScore >= 55 && economicScore >= 42) {
     return 'Hold'
   }
 
@@ -476,11 +564,13 @@ function buildDecisionSummary({
 function buildActionCards({
   recommendedAction,
   trustScore,
+  economicScore,
   uncertaintyScore,
   freshness,
 }: {
   recommendedAction: RecommendedAction
   trustScore: number
+  economicScore: number
   uncertaintyScore: number
   freshness: DashboardData['provenance']['freshness']
 }) {
@@ -489,7 +579,7 @@ function buildActionCards({
       key: 'follow' as const,
       title: 'Go',
       summary: '入る',
-      detail: `確度 ${trustScore}%`,
+      detail: `信頼 ${trustScore}% / 収益 ${economicScore}%`,
       isCurrent: recommendedAction === 'Active',
     },
     {
@@ -510,58 +600,120 @@ function buildActionCards({
 }
 
 function buildSystemHealthRows({
-  horizons,
+  structure,
   selectedHorizon,
 }: {
-  horizons: HorizonRow[]
+  structure: DashboardData['metrics']['structure']
   selectedHorizon: number
-}) {
-  const short = horizons[0]
-  const current = horizons.find((row) => row.horizon === selectedHorizon) ?? horizons[0]
-  const long = horizons[horizons.length - 1] ?? current
-  const rows = [short, current, long].filter(
-    (row, index, list) => list.findIndex((candidate) => candidate.horizon === row.horizon) === index,
-  )
+}): SystemHealthRow[] {
+  const runtimeAlignmentScore = structure?.runtimePolicyAlignmentScore ?? null
+  const dominantShapeClassShare = structure?.dominantShapeClassShare ?? null
+  const dominantHorizon = structure?.dominantHorizon ?? selectedHorizon
+  const dominantHorizonShare = structure?.dominantHorizonShare ?? null
 
-  return rows.slice(0, 3).map((row) => {
-    const uncertaintyScore = getUncertaintyScore(row.uncertainty, horizons)
-    const state = classifyHealth(row.expectedReturnPct, uncertaintyScore)
+  return [
+    {
+      label: 'Runtime',
+      status: runtimeAlignmentScore === null ? '-' : `一致 ${formatNullablePercent(runtimeAlignmentScore)}`,
+      tone:
+        runtimeAlignmentScore === null
+          ? 'neutral'
+          : runtimeAlignmentScore >= 0.8
+            ? 'positive'
+            : runtimeAlignmentScore >= 0.6
+              ? 'neutral'
+              : 'risk' as const,
+    },
+    {
+      label: 'Shape',
+      status:
+        dominantShapeClassShare === null
+          ? '-'
+          : `上位 ${formatNullablePercent(dominantShapeClassShare)}`,
+      tone:
+        dominantShapeClassShare === null
+          ? 'neutral'
+          : dominantShapeClassShare <= 0.55
+            ? 'positive'
+            : dominantShapeClassShare <= 0.75
+              ? 'neutral'
+              : 'risk' as const,
+    },
+    {
+      label: 'Policy',
+      status:
+        dominantHorizonShare === null
+          ? `${dominantHorizon * 4}H`
+          : `${dominantHorizon * 4}H ${formatNullablePercent(dominantHorizonShare)}`,
+      tone:
+        dominantHorizonShare === null
+          ? 'neutral'
+          : dominantHorizonShare <= 0.55
+            ? 'positive'
+            : dominantHorizonShare <= 0.75
+              ? 'neutral'
+              : 'risk' as const,
+    },
+  ]
+}
 
-    return {
-      label: `${row.hours}H`,
-      status: state.label,
-      tone: state.tone,
-    }
-  })
+function buildHorizonMixRows(horizonDiagnostics: DashboardData['metrics']['horizonDiagnostics']): HorizonMixRow[] {
+  return [...(horizonDiagnostics ?? [])]
+    .sort((left, right) => left.horizon - right.horizon)
+    .map((row) => {
+      const share = row.policyHorizonShare ?? row.selectionRate ?? 0
+      const coverage = row.interval1SigmaCoverage
+      const tone =
+        share > 0.75
+          ? 'risk'
+          : coverage !== null && coverage >= 0.65
+            ? 'positive'
+            : share > 0.3
+              ? 'neutral'
+              : 'neutral'
+
+      return {
+        label: `${row.hours}H`,
+        share: Math.round(clamp01(share) * 100),
+        shareLabel: formatNullablePercent(share),
+        detail:
+          coverage === null
+            ? '選択率のみ'
+            : `1σ ${formatNullablePercent(coverage)} / 方向 ${formatNullablePercent(row.directionalAccuracy)}`,
+        tone,
+      }
+    })
 }
 
 function buildReliabilityVerdict({
   recommendedAction,
   freshnessScore,
   trustScore,
+  economicScore,
 }: {
   recommendedAction: RecommendedAction
   freshnessScore: number
   trustScore: number
+  economicScore: number
 }): ReliabilityVerdict {
   if (recommendedAction === 'Reduce') {
     return {
-      label: 'Pass',
-      summary: '鮮度か根拠が不足している。',
+      label: '見送り',
+      summary: '鮮度・信頼・収益のどれかが不足している。',
       tone: 'caution',
     }
   }
 
-  if (recommendedAction === 'Active' && freshnessScore >= 70 && trustScore >= 72) {
+  if (recommendedAction === 'Active' && freshnessScore >= 70 && trustScore >= 70 && economicScore >= 58) {
     return {
-      label: 'Go',
-      summary: '入る条件が揃っている。',
+      label: '強気',
+      summary: '信頼と収益の両方が基準を超えている。',
       tone: 'strong',
     }
   }
 
   return {
-    label: 'Wait',
+    label: '様子見',
     summary: '方向性はあるが、入るにはまだ早い。',
     tone: 'watch',
   }
@@ -574,6 +726,9 @@ function buildReasons({
   rangeCoverage,
   utilityScore,
   uncertaintyScore,
+  economicScore,
+  runtimeAlignmentScore,
+  shapeConcentration,
 }: {
   runQuality: string
   freshness: DashboardData['provenance']['freshness']
@@ -581,6 +736,9 @@ function buildReasons({
   rangeCoverage: number | null
   utilityScore: number | null
   uncertaintyScore: number
+  economicScore: number
+  runtimeAlignmentScore: number | null
+  shapeConcentration: number | null
 }): DetailReason[] {
   const reasons: DetailReason[] = []
 
@@ -594,33 +752,51 @@ function buildReasons({
 
   if (directionalAccuracy !== null) {
     reasons.push({
-      title: directionalAccuracy >= 0.7 ? '方向一致が強い' : '方向一致は中位',
+      title: directionalAccuracy >= 0.6 ? '方向一致が維持' : '方向一致は弱め',
       body: `一致率 ${formatNullablePercent(directionalAccuracy)}`,
-      tone: directionalAccuracy >= 0.7 ? 'strong' : 'watch',
+      tone: directionalAccuracy >= 0.6 ? 'strong' : 'watch',
     })
   }
 
   if (rangeCoverage !== null) {
     reasons.push({
-      title: rangeCoverage >= 0.7 ? 'レンジ捕捉は十分' : 'レンジ捕捉は限定的',
-      body: `帯域 ${formatNullablePercent(rangeCoverage)}`,
-      tone: rangeCoverage >= 0.7 ? 'strong' : 'watch',
+      title: rangeCoverage >= 0.6 ? '1σ帯域は機能' : '1σ帯域は弱い',
+      body: `捕捉率 ${formatNullablePercent(rangeCoverage)}`,
+      tone: rangeCoverage >= 0.6 ? 'strong' : 'watch',
     })
   }
 
-  if (utilityScore !== null) {
+  if (runtimeAlignmentScore !== null && runtimeAlignmentScore < 0.8) {
     reasons.push({
-      title: utilityScore >= 0.6 ? 'Utility 良好' : 'Utility は弱め',
-      body: `score ${utilityScore.toFixed(3)}`,
-      tone: utilityScore >= 0.6 ? 'strong' : 'watch',
+      title: runtimeAlignmentScore >= 0.6 ? 'Runtime設定にズレ' : 'Runtime設定が大きくズレ',
+      body: `整合 ${formatNullablePercent(runtimeAlignmentScore)}`,
+      tone: runtimeAlignmentScore >= 0.6 ? 'watch' : 'caution',
     })
   }
 
-  reasons.push({
-    title: uncertaintyScore <= 33 ? '不確実性は低め' : uncertaintyScore <= 66 ? '不確実性は標準' : '不確実性は高め',
-    body: `${uncertaintyScore}%`,
-    tone: uncertaintyScore <= 33 ? 'strong' : uncertaintyScore <= 66 ? 'watch' : 'caution',
-  })
+  if (shapeConcentration !== null && shapeConcentration > 0.75) {
+    reasons.push({
+      title: 'shape が偏っている',
+      body: `上位比率 ${formatNullablePercent(shapeConcentration)}`,
+      tone: 'caution',
+    })
+  }
+
+  if (utilityScore !== null && economicScore < 50) {
+    reasons.push({
+      title: '収益面はまだ弱い',
+      body: `方策価値 ${utilityScore.toFixed(3)} / 収益 ${economicScore}%`,
+      tone: 'watch',
+    })
+  }
+
+  if (reasons.length < 3) {
+    reasons.push({
+      title: uncertaintyScore <= 33 ? '不確実性は低め' : uncertaintyScore <= 66 ? '不確実性は標準' : '不確実性は高め',
+      body: `${uncertaintyScore}%`,
+      tone: uncertaintyScore <= 33 ? 'strong' : uncertaintyScore <= 66 ? 'watch' : 'caution',
+    })
+  }
 
   return reasons.slice(0, 3)
 }
@@ -643,19 +819,6 @@ function deriveFreshnessScore({
           : 0
 
   return clampRange(base - penalty, 12, 96)
-}
-
-function classifyHealth(expectedReturnPct: number, uncertaintyScore: number) {
-  if (Math.abs(expectedReturnPct) < 0.4) {
-    return { label: '中立', tone: 'neutral' as const }
-  }
-  if (expectedReturnPct > 0 && uncertaintyScore <= 45) {
-    return { label: '上向き', tone: 'positive' as const }
-  }
-  if (expectedReturnPct > 0) {
-    return { label: 'やや上向き', tone: 'positive' as const }
-  }
-  return { label: '警戒', tone: 'risk' as const }
 }
 
 function compactDirectionLabel(expectedReturnPct: number) {

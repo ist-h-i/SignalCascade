@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+from contextlib import redirect_stdout
 from dataclasses import asdict
 from datetime import datetime, timezone
+import io
 from pathlib import Path
 from tempfile import TemporaryDirectory
 import json
@@ -878,17 +880,17 @@ class PolicyAndTrainingTests(unittest.TestCase):
                 "validation": {"average_log_wealth": 0.02},
                 "blocked_walk_forward_evaluation": {
                     "best_state_reset_mode_by_mean_log_wealth": "carry_on",
-                    "state_reset_modes": {
-                        "carry_on": {
-                            "average_log_wealth_mean": 0.02,
-                            "turnover_mean": 1.0,
-                            "directional_accuracy_mean": 0.7,
-                            "exact_smooth_position_mae_mean": 0.1,
-                            "folds": [
-                                {"cvar_tail_loss": 0.01},
-                                {"cvar_tail_loss": 0.01},
-                                {"cvar_tail_loss": 0.01},
-                            ],
+                        "state_reset_modes": {
+                            "carry_on": {
+                                "average_log_wealth_mean": 0.02,
+                                "turnover_mean": 1.0,
+                                "directional_accuracy_mean": 0.7,
+                                "exact_smooth_position_mae_mean": 0.03,
+                                "folds": [
+                                    {"cvar_tail_loss": 0.01},
+                                    {"cvar_tail_loss": 0.01},
+                                    {"cvar_tail_loss": 0.01},
+                                ],
                         }
                     },
                 },
@@ -1101,7 +1103,7 @@ class PolicyAndTrainingTests(unittest.TestCase):
         self.assertIsNotNone(production)
         self.assertEqual(production["candidate"], "candidate_05")
 
-    def test_tune_latest_dataset_updates_current_with_auto_user_value_candidate(self) -> None:
+    def test_tune_latest_dataset_updates_current_with_deployment_score_override(self) -> None:
         base_prediction = {
             "anchor_time": "2026-03-24T00:00:00+00:00",
             "current_close": 100.0,
@@ -1149,7 +1151,7 @@ class PolicyAndTrainingTests(unittest.TestCase):
                         "max_drawdown": 0.0142,
                         "no_trade_band_hit_rate": 0.44,
                         "mu_calibration": 0.1552,
-                        "sigma_calibration": 0.1749,
+                        "sigma_calibration": 0.0749,
                         "directional_accuracy": 0.7778,
                         "turnover": 0.5869,
                         "exact_smooth_position_mae": 0.0161,
@@ -1169,7 +1171,7 @@ class PolicyAndTrainingTests(unittest.TestCase):
                         "sigma_calibration": 0.0272,
                         "directional_accuracy": 0.6111,
                         "turnover": 2.7757,
-                        "exact_smooth_position_mae": 0.1617,
+                        "exact_smooth_position_mae": 0.0417,
                     },
                 },
             ]
@@ -1184,7 +1186,7 @@ class PolicyAndTrainingTests(unittest.TestCase):
                         "project_value_score": 0.6041,
                         "utility_score": 0.58,
                         "mu_calibration": 0.1552,
-                        "sigma_calibration": 0.1749,
+                        "sigma_calibration": 0.0749,
                         "directional_accuracy": 0.7778,
                         "exact_smooth_position_mae": 0.0161,
                         "max_drawdown": 0.0142,
@@ -1230,7 +1232,7 @@ class PolicyAndTrainingTests(unittest.TestCase):
                                 "average_log_wealth_mean": 0.0096,
                                 "turnover_mean": 1.4590,
                                 "directional_accuracy_mean": 0.7222,
-                                "exact_smooth_position_mae_mean": 0.1957,
+                                "exact_smooth_position_mae_mean": 0.0457,
                                 "folds": [
                                     {"cvar_tail_loss": 0.0114},
                                     {"cvar_tail_loss": 0.0114},
@@ -1325,7 +1327,11 @@ class PolicyAndTrainingTests(unittest.TestCase):
             self.assertEqual(manifest["production_current_candidate"]["candidate"], "candidate_01")
             self.assertEqual(
                 manifest["production_current_selection"]["selection_mode"],
-                "auto_user_value_selection",
+                "deployment_score_override",
+            )
+            self.assertEqual(
+                manifest["production_current_selection"]["selection_status"],
+                "accepted_and_production_diverged",
             )
             current_config = json.loads((artifact_root / "current" / "config.json").read_text(encoding="utf-8"))
             self.assertEqual(current_config["epochs"], 14)
@@ -1334,7 +1340,11 @@ class PolicyAndTrainingTests(unittest.TestCase):
             current_source = json.loads((artifact_root / "current" / "source.json").read_text(encoding="utf-8"))
             self.assertEqual(
                 current_source["current_selection_governance"]["selection_mode"],
-                "auto_user_value_selection",
+                "deployment_score_override",
+            )
+            self.assertEqual(
+                current_source["current_selection_governance"]["selection_status"],
+                "accepted_and_production_diverged",
             )
             self.assertEqual(
                 current_source["current_selection_governance"]["accepted_candidate"]["candidate"],
@@ -1729,11 +1739,13 @@ class PolicyAndTrainingTests(unittest.TestCase):
                 "--candidate-limit",
                 "3",
                 "--quick-mode",
+                "--warm-start-from-current",
             ]
         )
 
         self.assertEqual(args.candidate_limit, 3)
         self.assertTrue(args.quick_mode)
+        self.assertTrue(args.warm_start_from_current)
 
     def test_tune_latest_command_forwards_csv_lookback_days(self) -> None:
         with TemporaryDirectory() as temp_dir:
@@ -1780,10 +1792,107 @@ class PolicyAndTrainingTests(unittest.TestCase):
 
             self.assertEqual(exit_code, 0)
             self.assertEqual(mocked.call_args.kwargs["lookback_days"], 360)
+            self.assertFalse(mocked.call_args.kwargs["warm_start_from_current"])
             self.assertEqual(
                 mocked.call_args.kwargs["csv_path"],
                 artifact_root.resolve() / "live" / "xauusd_m30_latest.csv",
             )
+
+    def test_tune_latest_command_forwards_warm_start_from_current(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir) / "artifact_root"
+            artifact_root.mkdir()
+            manifest = {
+                "current_dir": str(artifact_root / "current"),
+                "archive_session_dir": str(artifact_root / "archive" / "session_20260407T000000Z"),
+                "leaderboard_path": str(artifact_root / "archive" / "session_20260407T000000Z" / "leaderboard.json"),
+                "best_candidate": {
+                    "candidate": "candidate_01",
+                    "best_validation_loss": -0.1,
+                    "project_value_score": 0.2,
+                    "average_log_wealth": 0.01,
+                    "cvar_tail_loss": 0.005,
+                    "policy_horizon": 6,
+                },
+                "accepted_candidate": {
+                    "candidate": "candidate_01",
+                },
+                "production_current_candidate": {
+                    "candidate": "candidate_01",
+                },
+                "optimization_gate": {
+                    "status": "passed",
+                    "passed_candidate_count": 1,
+                    "candidate_count": 1,
+                },
+            }
+            args = SimpleNamespace(
+                artifact_root=str(artifact_root),
+                csv=None,
+                seed=7,
+                csv_lookback_days=360,
+                candidate_limit=None,
+                quick_mode=False,
+                warm_start_from_current=True,
+            )
+
+            with patch(
+                "signal_cascade_pytorch.bootstrap.tune_latest_dataset",
+                return_value=manifest,
+            ) as mocked:
+                exit_code = tune_latest_command(args)
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(mocked.call_args.kwargs["warm_start_from_current"])
+
+    def test_tune_latest_command_reports_current_not_updated_for_quick_mode(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir) / "artifact_root"
+            artifact_root.mkdir()
+            manifest = {
+                "current_dir": str(artifact_root / "current"),
+                "archive_session_dir": str(artifact_root / "archive" / "session_20260407T000000Z"),
+                "leaderboard_path": str(artifact_root / "archive" / "session_20260407T000000Z" / "leaderboard.json"),
+                "best_candidate": {
+                    "candidate": "candidate_01",
+                    "best_validation_loss": -0.1,
+                    "project_value_score": 0.2,
+                    "average_log_wealth": 0.01,
+                    "cvar_tail_loss": 0.005,
+                    "policy_horizon": 6,
+                },
+                "accepted_candidate": {
+                    "candidate": "candidate_01",
+                },
+                "production_current_candidate": None,
+                "current_updated": False,
+                "optimization_gate": {
+                    "status": "passed",
+                    "passed_candidate_count": 1,
+                    "candidate_count": 1,
+                },
+            }
+            args = SimpleNamespace(
+                artifact_root=str(artifact_root),
+                csv=None,
+                seed=7,
+                csv_lookback_days=360,
+                candidate_limit=None,
+                quick_mode=True,
+            )
+
+            stdout = io.StringIO()
+            with patch(
+                "signal_cascade_pytorch.bootstrap.tune_latest_dataset",
+                return_value=manifest,
+            ) as mocked, redirect_stdout(stdout):
+                exit_code = tune_latest_command(args)
+
+            self.assertEqual(exit_code, 0)
+            self.assertTrue(mocked.called)
+            self.assertIn("accepted candidate: candidate_01", stdout.getvalue())
+            self.assertIn("production current candidate: none", stdout.getvalue())
+            self.assertIn("current updated: False", stdout.getvalue())
 
     def test_resolve_session_candidates_uses_quick_mode_default_limit(self) -> None:
         candidates = [{"epochs": index} for index in range(6)]
@@ -1794,9 +1903,212 @@ class PolicyAndTrainingTests(unittest.TestCase):
             quick_mode=True,
         )
 
-        self.assertEqual(resolved_limit, 4)
-        self.assertEqual(len(evaluated), 4)
-        self.assertEqual(evaluated[-1]["epochs"], 3)
+        self.assertEqual(resolved_limit, len(candidates))
+        self.assertEqual(len(evaluated), len(candidates))
+        self.assertEqual(evaluated[0]["epochs"], 0)
+
+    def test_tune_latest_dataset_warm_starts_only_compatible_candidates(self) -> None:
+        summary_rows = iter(
+            [
+                {
+                    "best_validation_loss": 0.8,
+                    "validation_metrics": {
+                        "project_value_score": 0.62,
+                        "utility_score": 0.55,
+                        "average_log_wealth": 0.022,
+                        "realized_pnl_per_anchor": 0.010,
+                        "cvar_tail_loss": 0.015,
+                        "max_drawdown": 0.03,
+                        "no_trade_band_hit_rate": 0.1,
+                        "mu_calibration": 0.013,
+                        "sigma_calibration": 0.021,
+                        "directional_accuracy": 0.64,
+                    },
+                },
+                {
+                    "best_validation_loss": 0.8,
+                    "validation_metrics": {
+                        "project_value_score": 0.60,
+                        "utility_score": 0.53,
+                        "average_log_wealth": 0.020,
+                        "realized_pnl_per_anchor": 0.009,
+                        "cvar_tail_loss": 0.016,
+                        "max_drawdown": 0.035,
+                        "no_trade_band_hit_rate": 0.1,
+                        "mu_calibration": 0.015,
+                        "sigma_calibration": 0.023,
+                        "directional_accuracy": 0.62,
+                    },
+                },
+            ]
+        )
+        diagnostics_template = {
+            "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+            "generated_at_utc": "2026-04-06T04:40:00+00:00",
+            "validation": {"average_log_wealth": 0.022},
+            "blocked_walk_forward_evaluation": {
+                "best_state_reset_mode_by_mean_log_wealth": "carry_on",
+                "state_reset_modes": {
+                    "carry_on": {
+                        "average_log_wealth_mean": 0.022,
+                        "turnover_mean": 1.1,
+                        "directional_accuracy_mean": 0.64,
+                        "exact_smooth_position_mae_mean": 0.16,
+                        "folds": [
+                            {"cvar_tail_loss": 0.013},
+                            {"cvar_tail_loss": 0.013},
+                            {"cvar_tail_loss": 0.013},
+                        ],
+                    }
+                },
+            },
+        }
+        predictions = iter(
+            [
+                PredictionResult(
+                    anchor_time="2026-03-24T00:00:00+00:00",
+                    current_close=100.0,
+                    policy_horizon=1,
+                    executed_horizon=1,
+                    previous_position=0.0,
+                    position=0.12,
+                    trade_delta=0.12,
+                    no_trade_band_hit=False,
+                    tradeability_gate=0.8,
+                    shape_entropy=0.3,
+                    policy_score=0.05,
+                    expected_log_returns={"1": 0.01},
+                    predicted_closes={"1": 101.0},
+                    uncertainties={"1": 0.01},
+                    horizon_utilities={"1": 0.01},
+                    horizon_positions={"1": 0.12},
+                    shape_probabilities={"0": 0.4, "1": 0.6},
+                    regime_id="asia|low|trend",
+                ),
+                PredictionResult(
+                    anchor_time="2026-03-24T00:00:00+00:00",
+                    current_close=100.0,
+                    policy_horizon=1,
+                    executed_horizon=1,
+                    previous_position=0.0,
+                    position=0.12,
+                    trade_delta=0.12,
+                    no_trade_band_hit=False,
+                    tradeability_gate=0.8,
+                    shape_entropy=0.3,
+                    policy_score=0.05,
+                    expected_log_returns={"1": 0.01},
+                    predicted_closes={"1": 101.0},
+                    uncertainties={"1": 0.01},
+                    horizon_utilities={"1": 0.01},
+                    horizon_positions={"1": 0.12},
+                    shape_probabilities={"0": 0.4, "1": 0.6},
+                    regime_id="asia|low|trend",
+                ),
+            ]
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir) / "artifact_root"
+            current_dir = artifact_root / "current"
+            current_dir.mkdir(parents=True)
+            (current_dir / "model.pt").write_bytes(b"checkpoint")
+            current_config = TrainingConfig(
+                output_dir=str(current_dir),
+                horizons=(1,),
+                hidden_dim=48,
+            )
+            (current_dir / "config.json").write_text(
+                json.dumps(current_config.to_dict()),
+                encoding="utf-8",
+            )
+            csv_path = artifact_root / "latest.csv"
+            csv_path.write_text("timestamp,open,high,low,close,volume\n", encoding="utf-8")
+            warm_start_paths: list[str | None] = []
+
+            def fake_export_review_diagnostics(*, output_dir, **_kwargs):
+                (output_dir / "validation_rows.csv").write_text("sample_id\n0\n", encoding="utf-8")
+                (output_dir / "policy_summary.csv").write_text("horizon\n1\n", encoding="utf-8")
+                (output_dir / "horizon_diag.csv").write_text("horizon\n1\n", encoding="utf-8")
+                (output_dir / "validation_summary.json").write_text(
+                    json.dumps(diagnostics_template),
+                    encoding="utf-8",
+                )
+                return diagnostics_template
+
+            def fake_train_model(_examples, _config, _output_dir, *, warm_start_checkpoint_path=None):
+                warm_start_paths.append(
+                    None
+                    if warm_start_checkpoint_path is None
+                    else str(warm_start_checkpoint_path)
+                )
+                return object(), next(summary_rows)
+
+            with patch(
+                "signal_cascade_pytorch.application.tuning_service.CsvMarketDataSource.load_bars",
+                return_value=["bar"],
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.build_training_examples_from_bars",
+                return_value=[object()],
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.train_model",
+                side_effect=fake_train_model,
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.predict_latest",
+                side_effect=lambda *args, **kwargs: next(predictions),
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.generate_research_report",
+                return_value=None,
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.export_review_diagnostics",
+                side_effect=fake_export_review_diagnostics,
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service._build_candidate_parameters",
+                return_value=[
+                    {
+                        "epochs": 14,
+                        "batch_size": 16,
+                        "learning_rate": 8e-4,
+                        "hidden_dim": 48,
+                        "dropout": 0.1,
+                        "weight_decay": 1e-4,
+                        "evaluation_state_reset_mode": "carry_on",
+                        "min_policy_sigma": 1e-4,
+                        "policy_cost_multiplier": 1.0,
+                        "policy_gamma_multiplier": 1.0,
+                        "q_max": 1.0,
+                        "cvar_weight": 0.2,
+                        "tie_policy_to_forecast_head": False,
+                        "disable_overlay_branch": False,
+                    },
+                    {
+                        "epochs": 14,
+                        "batch_size": 16,
+                        "learning_rate": 8e-4,
+                        "hidden_dim": 64,
+                        "dropout": 0.1,
+                        "weight_decay": 1e-4,
+                        "evaluation_state_reset_mode": "carry_on",
+                        "min_policy_sigma": 1e-4,
+                        "policy_cost_multiplier": 1.0,
+                        "policy_gamma_multiplier": 1.0,
+                        "q_max": 1.0,
+                        "cvar_weight": 0.2,
+                        "tie_policy_to_forecast_head": False,
+                        "disable_overlay_branch": False,
+                    },
+                ],
+            ):
+                tune_latest_dataset(
+                    csv_path=csv_path,
+                    artifact_root=artifact_root,
+                    config_overrides={"horizons": (1,)},
+                    candidate_limit=2,
+                    warm_start_from_current=True,
+                )
+
+        self.assertEqual(warm_start_paths[0], str((current_dir / "model.pt").resolve()))
+        self.assertIsNone(warm_start_paths[1])
 
     def test_quick_mode_prioritizes_structural_ablation_candidates(self) -> None:
         candidates = _build_candidate_parameters(
@@ -1833,6 +2145,148 @@ class PolicyAndTrainingTests(unittest.TestCase):
         )
         self.assertEqual(prioritized[0]["policy_cost_multiplier"], 6.0)
         self.assertEqual(prioritized[0]["policy_gamma_multiplier"], 4.0)
+
+    def test_tune_latest_dataset_marks_quick_mode_as_non_promotable(self) -> None:
+        summary_rows = iter(
+            [
+                {
+                    "best_validation_loss": 0.8,
+                    "validation_metrics": {
+                        "project_value_score": 0.62,
+                        "utility_score": 0.55,
+                        "average_log_wealth": 0.022,
+                        "realized_pnl_per_anchor": 0.010,
+                        "cvar_tail_loss": 0.015,
+                        "max_drawdown": 0.03,
+                        "no_trade_band_hit_rate": 0.1,
+                        "mu_calibration": 0.013,
+                        "sigma_calibration": 0.021,
+                        "directional_accuracy": 0.64,
+                    },
+                }
+            ]
+        )
+
+        diagnostics_rows = iter(
+            [
+                {
+                    "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+                    "generated_at_utc": "2026-04-06T04:40:00+00:00",
+                    "validation": {"average_log_wealth": 0.022},
+                    "blocked_walk_forward_evaluation": {
+                        "best_state_reset_mode_by_mean_log_wealth": "carry_on",
+                        "state_reset_modes": {
+                            "carry_on": {
+                                "average_log_wealth_mean": 0.022,
+                                "turnover_mean": 1.1,
+                                "directional_accuracy_mean": 0.64,
+                                "exact_smooth_position_mae_mean": 0.016,
+                                "folds": [
+                                    {"cvar_tail_loss": 0.013},
+                                    {"cvar_tail_loss": 0.013},
+                                    {"cvar_tail_loss": 0.013},
+                                ],
+                            }
+                        },
+                    },
+                }
+            ]
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir) / "artifact_root"
+            artifact_root.mkdir()
+            csv_path = artifact_root / "latest.csv"
+            csv_path.write_text("timestamp,open,high,low,close,volume\n", encoding="utf-8")
+
+            def fake_export_review_diagnostics(*, output_dir, **_kwargs):
+                diagnostics_summary = next(diagnostics_rows)
+                (output_dir / "validation_rows.csv").write_text("sample_id\n0\n", encoding="utf-8")
+                (output_dir / "policy_summary.csv").write_text("horizon\n1\n", encoding="utf-8")
+                (output_dir / "horizon_diag.csv").write_text("horizon\n1\n", encoding="utf-8")
+                (output_dir / "validation_summary.json").write_text(
+                    json.dumps(diagnostics_summary),
+                    encoding="utf-8",
+                )
+                return diagnostics_summary
+
+            with patch(
+                "signal_cascade_pytorch.application.tuning_service.CsvMarketDataSource.load_bars",
+                return_value=["bar"],
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.build_training_examples_from_bars",
+                return_value=[object()],
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.train_model",
+                side_effect=lambda *args, **kwargs: (object(), next(summary_rows)),
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.predict_latest",
+                return_value=PredictionResult(
+                    anchor_time="2026-03-24T00:00:00+00:00",
+                    current_close=100.0,
+                    policy_horizon=1,
+                    executed_horizon=1,
+                    previous_position=0.0,
+                    position=0.12,
+                    trade_delta=0.12,
+                    no_trade_band_hit=False,
+                    tradeability_gate=0.8,
+                    shape_entropy=0.3,
+                    policy_score=0.05,
+                    expected_log_returns={"1": 0.01},
+                    predicted_closes={"1": 101.0},
+                    uncertainties={"1": 0.01},
+                    horizon_utilities={"1": 0.01},
+                    horizon_positions={"1": 0.12},
+                    shape_probabilities={"0": 0.4, "1": 0.6},
+                    regime_id="asia|low|trend",
+                ),
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.generate_research_report",
+                return_value=None,
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service.export_review_diagnostics",
+                side_effect=fake_export_review_diagnostics,
+            ), patch(
+                "signal_cascade_pytorch.application.tuning_service._build_candidate_parameters",
+                return_value=[
+                    {
+                        "epochs": 14,
+                        "batch_size": 16,
+                        "learning_rate": 8e-4,
+                        "hidden_dim": 48,
+                        "dropout": 0.1,
+                        "weight_decay": 1e-4,
+                        "evaluation_state_reset_mode": "carry_on",
+                        "min_policy_sigma": 1e-4,
+                        "policy_cost_multiplier": 1.0,
+                        "policy_gamma_multiplier": 1.0,
+                        "q_max": 1.0,
+                        "cvar_weight": 0.2,
+                        "tie_policy_to_forecast_head": False,
+                        "disable_overlay_branch": False,
+                    }
+                ],
+            ):
+                manifest = tune_latest_dataset(
+                    csv_path=csv_path,
+                    artifact_root=artifact_root,
+                    config_overrides={"horizons": (1,)},
+                    quick_mode=True,
+                )
+
+        self.assertTrue(manifest["quick_mode"])
+        self.assertEqual(manifest["selection_status"], "quick_mode_non_promotable")
+        self.assertIsNone(manifest["production_current_candidate"])
+        self.assertEqual(manifest["accepted_candidate"]["candidate"], "candidate_01")
+        self.assertEqual(
+            manifest["production_current_selection"]["selection_mode"],
+            "quick_mode_non_promotable",
+        )
+        self.assertEqual(
+            manifest["production_current_selection"]["selection_status"],
+            "quick_mode_non_promotable",
+        )
 
     def test_materialize_replay_artifact_copies_model_into_overlay(self) -> None:
         with TemporaryDirectory() as temp_dir:

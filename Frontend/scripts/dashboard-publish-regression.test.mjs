@@ -16,7 +16,7 @@ const sourceCurrentRunDir = path.join(sourceArtifactRoot, 'current')
 const sourceLiveCsvPath = path.join(sourceArtifactRoot, 'live', 'xauusd_m30_latest.csv')
 
 test(
-  'predict -> sync:data:fast publishes dashboard data from the predicted current artifact',
+  'predict -> sync:data:fast falls back to the live CSV when the stored snapshot is stale',
   { timeout: 300_000 },
   (t) => {
     assert.ok(fs.existsSync(pyTorchPython), `Python runtime was not found: ${pyTorchPython}`)
@@ -76,7 +76,6 @@ test(
       env: {
         ...process.env,
         SIGNAL_CASCADE_DISABLE_TRAINING: '1',
-        SIGNAL_CASCADE_CSV_PATH: tempLiveCsvPath,
       },
     })
     assert.equal(sync.status, 0, formatFailure('sync:data:fast', sync))
@@ -109,8 +108,16 @@ test(
       dashboardData.governance?.acceptedCandidate,
       sourceMeta.current_selection_governance?.accepted_candidate?.candidate ?? null,
     )
+    assert.equal(
+      dashboardData.governance?.selectionStatus,
+      sourceMeta.current_selection_governance?.selection_status ?? null,
+    )
     assert.equal(dashboardData.run.selectedHorizon, prediction.policy_horizon)
     assert.equal(dashboardData.run.position, prediction.position)
+    assert.ok(dashboardData.metrics?.live)
+    assert.ok(dashboardData.metrics?.structure)
+    assert.ok(Array.isArray(dashboardData.metrics?.horizonDiagnostics))
+    assert.ok(dashboardData.metrics.horizonDiagnostics.length > 0)
   },
 )
 

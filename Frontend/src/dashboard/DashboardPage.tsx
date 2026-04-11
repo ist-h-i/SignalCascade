@@ -33,6 +33,7 @@ type GlyphName =
   | 'signal'
   | 'size'
   | 'trust'
+  | 'economy'
   | 'lag'
   | 'direction'
   | 'range'
@@ -73,46 +74,63 @@ function DashboardPage({ data }: { data: DashboardData }) {
   const lagHours = data.provenance.freshness?.predictionLagHours ?? null
   const productionCurrentCandidate = data.governance?.productionCurrentCandidate ?? null
   const acceptedCandidate = data.governance?.acceptedCandidate ?? null
-  const showAcceptedCandidate = acceptedCandidate !== null && acceptedCandidate !== productionCurrentCandidate
-  const chartSummary = [
-    { label: '中心値', value: view.selectedForecastPriceLabel },
-    { label: '想定レンジ', value: view.selectedRangeLabel },
-    { label: '現在値', value: formatCurrencyPrice(data.run.anchorClose) },
-  ]
-  const heroStats = [
-    {
-      icon: 'signal' as const,
-      label: '期待値',
-      value: view.selectedExpectedReturnLabel.replace(/^Exp\.\s*/, ''),
-    },
+  const decisionFacts = [
     {
       icon: 'trust' as const,
-      label: '確度',
+      label: 'Confidence',
       value: `${view.trustScore}%`,
+      detail: view.reliabilityVerdict.label,
+    },
+    {
+      icon: 'fresh' as const,
+      label: 'Freshness',
+      value: formatLag(lagHours),
+      detail: getFreshnessCaption(data.run.runQuality, lagHours),
+    },
+    {
+      icon: 'range' as const,
+      label: 'Prediction band',
+      value: `${view.boundaryCards[2]?.detail ?? '-'} / ${view.boundaryCards[0]?.detail ?? '-'}`,
+      detail: `${view.selectedForecast.hours}H ${view.uncertaintyLabel}`,
     },
     {
       icon: 'size' as const,
-      label: 'サイズ',
-      value: formatExposure(data.run.position),
-    },
-    {
-      icon: 'lag' as const,
-      label: '更新',
-      value: formatLag(lagHours),
+      label: 'Position delta',
+      value: formatExposure(data.run.tradeDelta),
+      detail: `保有 ${formatExposure(data.run.position)}`,
     },
   ]
-  const freshnessItems = [
+  const chartLegend = [
+    { key: 'history', label: '履歴', detail: 'solid line' },
+    { key: 'forecast', label: '予測', detail: 'bold line' },
+    { key: 'band', label: '想定帯', detail: 'dashed band' },
+    { key: 'actual', label: '実績', detail: 'dashed line' },
+  ]
+  const railFreshnessFacts = view.freshnessFacts.slice(0, 3)
+  const provenanceFacts = [
     {
-      label: '更新',
-      value: formatTimestampJst(data.run.anchorTime),
+      label: 'Source',
+      value: data.provenance.sourceOriginPath ?? data.provenance.sourcePath ?? '-',
     },
     {
-      label: 'ラグ',
-      value: formatLag(lagHours),
+      label: 'Artifact',
+      value: formatShortHash(data.provenance.artifactId),
     },
     {
-      label: '差分',
-      value: formatExposure(data.run.tradeDelta),
+      label: 'Generated',
+      value: formatTimestampJst(data.generatedAt),
+    },
+    {
+      label: 'Git',
+      value: `${formatShortHash(data.provenance.gitCommitSha)}${data.provenance.gitDirty ? ' / dirty' : ''}`,
+    },
+    {
+      label: 'Production',
+      value: productionCurrentCandidate ?? '-',
+    },
+    {
+      label: 'Accepted',
+      value: acceptedCandidate ?? '-',
     },
   ]
   const narrativeSegments = (data.narrative.segments ?? []).map((segment) => ({
@@ -141,21 +159,7 @@ function DashboardPage({ data }: { data: DashboardData }) {
             <header className="stage-topline">
               <div className="stage-topline__copy">
                 <p className="ops-eyebrow">SignalCascade / {data.instrument}</p>
-                <strong id="dashboard-page-title" className="stage-kicker">
-                  {view.selectedForecast.hours}H Signal Brief
-                </strong>
-                {productionCurrentCandidate ? (
-                  <div className="stage-governance" aria-label="displayed candidate">
-                    <span className="stage-governance__chip stage-governance__chip--production">
-                      Production {productionCurrentCandidate}
-                    </span>
-                    {showAcceptedCandidate ? (
-                      <span className="stage-governance__chip stage-governance__chip--accepted">
-                        Accepted {acceptedCandidate}
-                      </span>
-                    ) : null}
-                  </div>
-                ) : null}
+                <strong className="stage-kicker">{view.selectedForecast.hours}H Forecast Chart</strong>
               </div>
 
               <div className="series-controls stage-series" role="toolbar" aria-label="chart series">
@@ -184,60 +188,22 @@ function DashboardPage({ data }: { data: DashboardData }) {
               </div>
             </header>
 
-            <div className="stage-hero">
-              <div className={`stage-mark stage-mark--${view.decisionTone}`} aria-hidden="true">
-                <Glyph name={getActionGlyph(view.recommendedAction)} />
-              </div>
-
-              <div className="stage-copy">
-                <span className={`stage-bias stage-bias--${getBiasTone(view.selectedForecast.expectedReturnPct)}`}>{biasWord}</span>
-                <strong>{getActionWord(view.recommendedAction)}</strong>
-                <p>{getHeroSummary(view.recommendedAction, view.selectedForecast.expectedReturnPct, lagHours)}</p>
-              </div>
-
-              <dl className="stage-ledger">
-                {heroStats.map((stat) => (
-                  <div
-                    key={stat.label}
-                    className="stage-ledger__item"
-                    data-lk-component="card"
-                    data-lk-card-element="surface"
-                    data-lk-card-variant="fill"
-                    data-lk-card-material="glass"
-                    data-lk-slot={`hero-stat-${stat.label}`}
-                  >
-                    <dt>
-                      <span className="stage-ledger__icon" aria-hidden="true">
-                        <Glyph name={stat.icon} />
-                      </span>
-                      {stat.label}
-                    </dt>
-                    <dd>{stat.value}</dd>
-                  </div>
-                ))}
-              </dl>
-            </div>
-
-            <section className="stage-chart">
+            <section className="stage-chart" aria-labelledby="stage-chart-label">
               <header className="stage-chart__head">
                 <div>
-                  <PanelHeader id="stage-chart-label" label="価格の見立て" />
-                  <p className="chart-shell__caption">価格帯と実績で、いまの判断を確認する</p>
+                  <PanelHeader id="stage-chart-label" label="Forecast Chart" />
+                  <p className="chart-shell__caption">actual / forecast / band を同じ時間軸で確認する</p>
                 </div>
 
-                <dl className="stage-summary">
-                  {chartSummary.map((item) => (
-                    <div
-                      key={item.label}
-                      data-lk-component="card"
-                      data-lk-card-variant="fill"
-                      data-lk-card-material="glass"
-                    >
-                      <dt>{item.label}</dt>
-                      <dd>{item.value}</dd>
-                    </div>
+                <ul className="chart-legend" aria-label="chart legend">
+                  {chartLegend.map((item) => (
+                    <li key={item.key} className={`chart-legend__item chart-legend__item--${item.key}`}>
+                      <i aria-hidden="true" />
+                      <span>{item.label}</span>
+                      <em>{item.detail}</em>
+                    </li>
                   ))}
-                </dl>
+                </ul>
               </header>
 
               <div className="stage-chart__canvas">
@@ -266,7 +232,7 @@ function DashboardPage({ data }: { data: DashboardData }) {
                     <Line
                       type="monotone"
                       dataKey="close"
-                      stroke="var(--text-history)"
+                      stroke="var(--chart-history-line)"
                       strokeWidth={1.45}
                       strokeOpacity={historyOpacity}
                       dot={false}
@@ -276,7 +242,7 @@ function DashboardPage({ data }: { data: DashboardData }) {
                     <Line
                       type="monotone"
                       dataKey="forecastBase"
-                      stroke="var(--accent-cyan)"
+                      stroke="var(--chart-forecast-line)"
                       strokeWidth={2.5}
                       strokeOpacity={forecastOpacity}
                       dot={false}
@@ -286,7 +252,7 @@ function DashboardPage({ data }: { data: DashboardData }) {
                     <Line
                       type="monotone"
                       dataKey="forecastLower"
-                      stroke="var(--accent-cyan-line)"
+                      stroke="var(--chart-band-line)"
                       strokeWidth={1.15}
                       strokeDasharray="6 5"
                       strokeOpacity={forecastOpacity}
@@ -297,7 +263,7 @@ function DashboardPage({ data }: { data: DashboardData }) {
                     <Line
                       type="monotone"
                       dataKey="forecastUpper"
-                      stroke="var(--accent-cyan-line)"
+                      stroke="var(--chart-band-line)"
                       strokeWidth={1.15}
                       strokeDasharray="6 5"
                       strokeOpacity={forecastOpacity}
@@ -308,7 +274,7 @@ function DashboardPage({ data }: { data: DashboardData }) {
                     <Line
                       type="linear"
                       dataKey="actualClose"
-                      stroke="var(--accent-sand)"
+                      stroke="var(--chart-actual-line)"
                       strokeDasharray="7 4"
                       strokeWidth={2}
                       strokeOpacity={actualOpacity}
@@ -326,11 +292,11 @@ function DashboardPage({ data }: { data: DashboardData }) {
                       x={view.anchorTs}
                       y={data.run.anchorClose}
                       r={5}
-                      fill="var(--accent-cyan)"
-                      stroke="var(--accent-cyan-soft)"
+                      fill="var(--chart-forecast-line)"
+                      stroke="var(--chart-forecast-soft)"
                       strokeWidth={2}
                       ifOverflow="extendDomain"
-                      label={{ value: 'Live', position: 'right', fill: 'var(--accent-cyan-soft)', fontSize: 10 }}
+                      label={{ value: 'Live', position: 'right', fill: 'var(--chart-forecast-soft)', fontSize: 10 }}
                     />
                   </ComposedChart>
                 </ResponsiveContainer>
@@ -338,6 +304,13 @@ function DashboardPage({ data }: { data: DashboardData }) {
             </section>
 
             <footer className="stage-foot">
+              <div className="stage-foot__head">
+                <div>
+                  <PanelHeader id="stage-horizon-label" label="Horizon" />
+                  <p className="stage-foot__copy">時間軸を替えると、予測帯と判断 rail が更新される</p>
+                </div>
+              </div>
+
               <nav className="horizon-switch" aria-label="Horizon">
                 {view.horizonOptions.map((option) => {
                   const isActive = option.horizon === activeHorizon
@@ -363,125 +336,52 @@ function DashboardPage({ data }: { data: DashboardData }) {
                   )
                 })}
               </nav>
-
-              <div className="stage-band" aria-label="forecast range">
-                {view.boundaryCards.map((card) => (
-                  <article
-                    key={card.label}
-                    className={`stage-band__item stage-band__item--${card.tone}`}
-                    data-lk-component="card"
-                    data-lk-card-element="surface"
-                    data-lk-card-variant="fill"
-                    data-lk-card-material="glass"
-                    data-lk-slot={`boundary-${card.label}`}
-                  >
-                    <span>{card.label}</span>
-                    <strong>{card.value}</strong>
-                  </article>
-                ))}
-              </div>
             </footer>
         </motion.section>
 
-        <motion.aside
-          className="decision-dossier"
-          data-lk-component="card"
-          data-lk-card-element="surface"
-          data-lk-card-variant="fill"
-          data-lk-card-material="flat"
-          data-lk-card-optical-correction="y"
-          data-lk-slot="decision-rail"
-          {...(getMotionProps(shouldReduceMotion, 0.08) ?? {})}
-        >
-          <section
-            className={`dossier-primary dossier-primary--${view.decisionTone}`}
+        <div className="signal-side">
+          <motion.aside
+            className={`decision-dossier decision-dossier--${view.decisionTone}`}
             data-lk-component="card"
             data-lk-card-element="surface"
             data-lk-card-variant="fill"
             data-lk-card-material="flat"
-            data-lk-slot="decision-primary"
+            data-lk-card-optical-correction="y"
+            data-lk-slot="decision-rail"
+            {...(getMotionProps(shouldReduceMotion, 0.08) ?? {})}
           >
-            <header className="dossier-primary__head">
-              <PanelHeader id="decision-label" label="判断" />
-              <span className="decision-chip">{biasWord}</span>
-            </header>
-
-            <div className="dossier-primary__body">
-              <div className="decision-call__icon" aria-hidden="true">
+            <section className="rail-action" aria-labelledby="dashboard-page-title">
+              <div className={`stage-mark stage-mark--${view.decisionTone}`} aria-hidden="true">
                 <Glyph name={getActionGlyph(view.recommendedAction)} />
               </div>
-
-              <div className="dossier-copy">
-                <strong>{getActionLabel(view.recommendedAction)}</strong>
-                <p>{getRailSummary(view.recommendedAction, view.selectedForecast.expectedReturnPct, lagHours)}</p>
+              <div className="rail-action__copy">
+                <PanelHeader id="decision-label" label="Decision Rail" />
+                <h1 id="dashboard-page-title">{getActionEnglish(view.recommendedAction)}</h1>
+                <p>{getHeroSummary(view.recommendedAction, view.selectedForecast.expectedReturnPct, lagHours)}</p>
               </div>
-            </div>
-
-            <div className="dossier-inline">
-              <div
-                data-lk-component="card"
-                data-lk-card-element="surface"
-                data-lk-card-variant="transparent"
-                data-lk-card-material="flat"
-                data-lk-slot="position"
-              >
-                <span>保有</span>
-                <strong>{formatExposure(data.run.position)}</strong>
+              <div className="rail-tags" aria-label="action and bias">
+                <span className="decision-chip">{getActionLabel(view.recommendedAction)}</span>
+                <span className={`stage-bias stage-bias--${getBiasTone(view.selectedForecast.expectedReturnPct)}`}>{biasWord}</span>
               </div>
-              <div
-                data-lk-component="card"
-                data-lk-card-element="surface"
-                data-lk-card-variant="transparent"
-                data-lk-card-material="flat"
-                data-lk-slot="delta"
-              >
-                <span>変化</span>
-                <strong>{formatExposure(data.run.tradeDelta)}</strong>
-              </div>
-            </div>
+            </section>
 
-            <div
-              className={`verdict-note verdict-note--${view.reliabilityVerdict.tone}`}
-              data-lk-component="card"
-              data-lk-card-element="surface"
-              data-lk-card-variant="transparent"
-              data-lk-card-material="flat"
-              data-lk-slot="verdict-note"
-            >
-              <span>{view.reliabilityVerdict.label}</span>
-              <p>{view.reliabilityVerdict.summary}</p>
-            </div>
-          </section>
-
-          <section className="dossier-section">
-            <PanelHeader id="trust-label" label="信頼度" />
-            <div className="meter-list">
-              {view.reliabilityMeters.map((meter) => (
-                <article
-                  key={meter.label}
-                  className={`meter-row meter-row--${meter.tone}`}
-                  data-lk-component="card"
-                  data-lk-card-element="surface"
-                  data-lk-card-variant="transparent"
-                  data-lk-card-material="flat"
-                  data-lk-slot={`meter-${meter.label}`}
-                >
-                  <div className="meter-row__head">
-                    <span>{meter.label}</span>
-                    <strong>{meter.valueLabel}</strong>
-                  </div>
-                  <div className="meter-row__track" aria-hidden="true">
-                    <i style={{ width: `${meter.value}%` }} />
-                  </div>
-                  <p>{meter.caption}</p>
-                </article>
+            <dl className="rail-facts" aria-label="decision facts">
+              {decisionFacts.map((fact) => (
+                <div key={fact.label} className="rail-fact">
+                  <dt>
+                    <span className="rail-fact__icon" aria-hidden="true">
+                      <Glyph name={fact.icon} />
+                    </span>
+                    {fact.label}
+                  </dt>
+                  <dd>{fact.value}</dd>
+                  <p>{fact.detail}</p>
+                </div>
               ))}
-            </div>
-          </section>
+            </dl>
 
-          <div className="dossier-grid">
-            <section className="dossier-section dossier-section--compact">
-              <PanelHeader id="reasons-label" label="判断理由" />
+            <section className="rail-section" aria-labelledby="why-label">
+              <PanelHeader id="why-label" label="Why now / Why not now" />
               <div className="reason-lines">
                 {view.reasons.map((reason) => (
                   <article
@@ -500,106 +400,98 @@ function DashboardPage({ data }: { data: DashboardData }) {
               </div>
             </section>
 
-            <section className="dossier-section dossier-section--compact">
-              <PanelHeader id="freshness-label" label="更新状況" />
-              <div className="timing-list">
-                {freshnessItems.map((item) => (
-                  <div
-                    key={item.label}
-                    className="timing-item"
+            <section className="rail-section rail-section--freshness" aria-labelledby="freshness-label">
+              <PanelHeader id="freshness-label" label="Freshness" />
+              <div className="fact-list">
+                {railFreshnessFacts.map((fact) => (
+                  <article
+                    key={fact.label}
+                    className={`fact-row${fact.tone ? ` fact-row--${fact.tone}` : ''}`}
                     data-lk-component="card"
                     data-lk-card-element="surface"
                     data-lk-card-variant="transparent"
                     data-lk-card-material="flat"
-                    data-lk-slot={`timing-${item.label}`}
+                    data-lk-slot={`fact-${fact.label}`}
                   >
-                    <span>{item.label}</span>
-                    <strong>{item.value}</strong>
-                  </div>
-                ))}
-              </div>
-            </section>
-          </div>
-
-          <section className="dossier-section">
-            <PanelHeader id="compare-label" label="比較" />
-            <div className="choice-list" aria-label="action ladder">
-              {view.actionCards.map((card) => (
-                <article
-                  key={card.key}
-                  className={`choice-row${card.isCurrent ? ' is-current' : ''}${card.key === 'follow' ? ' is-follow' : card.key === 'hold' ? ' is-watch' : ' is-pass'}`}
-                  data-lk-component="card"
-                  data-lk-card-element="surface"
-                  data-lk-card-variant="transparent"
-                  data-lk-card-material="flat"
-                  data-lk-slot={`choice-${card.key}`}
-                >
-                  <div className="choice-row__head">
-                    <strong>{card.title}</strong>
-                    <span>{card.summary}</span>
-                  </div>
-                  <p>{card.detail}</p>
-                </article>
-              ))}
-            </div>
-          </section>
-        </motion.aside>
-
-        <section className="support-grid">
-          <motion.section
-            className="support-panel"
-            data-lk-component="card"
-            data-lk-card-element="surface"
-            data-lk-card-variant="fill"
-            data-lk-card-material="flat"
-            data-lk-slot="scenario-panel"
-            {...(getMotionProps(shouldReduceMotion, 0.16) ?? {})}
-          >
-            <header className="panel-head">
-              <div>
-                <PanelHeader id="scenario-label" label="シナリオ" />
-                <h2>{view.selectedForecast.hours}H シナリオ</h2>
-              </div>
-            </header>
-
-            <ol className="segment-list">
-              {narrativeSegments.map((segment) => (
-                <li key={`${segment.fromStep}-${segment.toStep}`} className="segment-item">
-                  <span className={`segment-chip segment-chip--${segment.tone}`}>{segment.label}</span>
-                  <strong>{segment.title}</strong>
-                </li>
-              ))}
-            </ol>
-          </motion.section>
-
-          <motion.section
-            className="support-panel"
-            data-lk-component="card"
-            data-lk-card-element="surface"
-            data-lk-card-variant="fill"
-            data-lk-card-material="flat"
-            data-lk-slot="evidence-panel"
-            {...(getMotionProps(shouldReduceMotion, 0.22) ?? {})}
-          >
-            <header className="panel-head">
-              <div>
-                <PanelHeader id="evidence-label" label="検証" />
-                <h2>判断の裏付け</h2>
-              </div>
-            </header>
-
-            <div className="proof-grid">
-              <div className="proof-metrics">
-                {view.detailMetrics.map((metric) => (
-                  <article key={metric.label} className="proof-metric">
-                    <span>{metric.label}</span>
-                    <strong>{metric.value}</strong>
+                    <span>{fact.label}</span>
+                    <strong>{fact.value}</strong>
                   </article>
                 ))}
               </div>
+            </section>
 
+            <section className="rail-section rail-section--ladder" aria-labelledby="action-ladder-label">
+              <PanelHeader id="action-ladder-label" label="Action Ladder" />
+              <div className="choice-strip" aria-label="Go Wait Pass">
+                {view.actionCards.map((card) => (
+                  <article
+                    key={card.key}
+                    className={`choice-row${card.isCurrent ? ' is-current' : ''}${card.key === 'follow' ? ' is-follow' : card.key === 'hold' ? ' is-watch' : ' is-pass'}`}
+                    data-lk-component="card"
+                    data-lk-card-element="surface"
+                    data-lk-card-variant="transparent"
+                    data-lk-card-material="flat"
+                    data-lk-slot={`choice-${card.key}`}
+                  >
+                    <div className="choice-row__head">
+                      <strong>{card.title}</strong>
+                      <span>{card.summary}</span>
+                    </div>
+                    <p>{card.detail}</p>
+                  </article>
+                ))}
+              </div>
+            </section>
+
+            <a className="primary-cta" data-lk-component="button" data-lk-button-variant="fill" href="#validation-summary">
+              <StateLayer />
+              <span data-lk-button-content-wrap>検証詳細を見る</span>
+            </a>
+          </motion.aside>
+        </div>
+
+        <motion.section
+          id="validation-summary"
+          className="support-panel support-panel--evidence"
+          data-lk-component="card"
+          data-lk-card-element="surface"
+          data-lk-card-variant="fill"
+          data-lk-card-material="flat"
+          data-lk-slot="evidence-panel"
+          {...(getMotionProps(shouldReduceMotion, 0.22) ?? {})}
+        >
+          <header className="panel-head">
+            <div>
+              <PanelHeader id="evidence-label" label="Validation Summary" />
+              <h2>検証サマリー</h2>
+              <p className="panel-copy">収益、校正、構造の偏りをここでまとめて確認する</p>
+            </div>
+            <dl className="panel-kpis panel-kpis--evidence" aria-label="evidence highlights">
+              <div className="panel-kpi">
+                <dt>信頼</dt>
+                <dd>{view.trustScore}%</dd>
+              </div>
+              <div className="panel-kpi">
+                <dt>収益</dt>
+                <dd>{view.economicScore}%</dd>
+              </div>
+            </dl>
+          </header>
+
+          <div className="proof-grid">
+            <div className="proof-metrics">
+              {view.detailMetrics.map((metric) => (
+                <article key={metric.label} className="proof-metric">
+                  <span>{metric.label}</span>
+                  <strong>{metric.value}</strong>
+                  <p>{metric.hint}</p>
+                </article>
+              ))}
+            </div>
+
+            <div className="proof-sidecar">
               <section className="proof-health" aria-labelledby="proof-health-label">
-                <PanelHeader id="proof-health-label" label="時間軸の状態" />
+                <PanelHeader id="proof-health-label" label="構造の状態" />
                 <div className="health-list">
                   {view.systemHealthRows.map((row) => (
                     <div key={row.label} className="health-list__row">
@@ -612,9 +504,96 @@ function DashboardPage({ data }: { data: DashboardData }) {
                   ))}
                 </div>
               </section>
+
+              <section className="proof-distribution" aria-labelledby="proof-distribution-label">
+                <PanelHeader id="proof-distribution-label" label="時間軸の偏り" />
+                <div className="distribution-list">
+                  {view.horizonMixRows.map((row) => (
+                    <article key={row.label} className={`distribution-row distribution-row--${row.tone}`}>
+                      <div className="distribution-row__head">
+                        <strong>{row.label}</strong>
+                        <span>{row.shareLabel}</span>
+                      </div>
+                      <div className="distribution-row__track" aria-hidden="true">
+                        <i style={{ width: `${row.share}%` }} />
+                      </div>
+                      <p>{row.detail}</p>
+                    </article>
+                  ))}
+                </div>
+              </section>
             </div>
-          </motion.section>
-        </section>
+          </div>
+        </motion.section>
+
+        <motion.section
+          className="support-panel support-panel--provenance"
+          data-lk-component="card"
+          data-lk-card-element="surface"
+          data-lk-card-variant="fill"
+          data-lk-card-material="flat"
+          data-lk-slot="provenance-panel"
+          {...(getMotionProps(shouldReduceMotion, 0.26) ?? {})}
+        >
+          <header className="panel-head">
+            <div>
+              <PanelHeader id="provenance-label" label="Provenance" />
+              <h2>出所と候補</h2>
+              <p className="panel-copy">first view から外した運用メタ情報をここで確認する</p>
+            </div>
+          </header>
+
+          <dl className="provenance-list" aria-label="provenance details">
+            {provenanceFacts.map((fact) => (
+              <div key={fact.label} className="provenance-row">
+                <dt>{fact.label}</dt>
+                <dd>{fact.value}</dd>
+              </div>
+            ))}
+          </dl>
+        </motion.section>
+
+        <motion.section
+          className="support-panel support-panel--scenario"
+          data-lk-component="card"
+          data-lk-card-element="surface"
+          data-lk-card-variant="fill"
+          data-lk-card-material="flat"
+          data-lk-slot="scenario-panel"
+          {...(getMotionProps(shouldReduceMotion, 0.16) ?? {})}
+        >
+          <header className="panel-head">
+            <div>
+              <PanelHeader id="scenario-label" label="Similar-case Replay" />
+              <h2>類似ケースの再生</h2>
+              <p className="panel-copy">{view.selectedForecast.hours}H までの判断変化を短いステップで追う</p>
+            </div>
+            <dl className="panel-kpis" aria-label="scenario highlights">
+              <div className="panel-kpi">
+                <dt>方向</dt>
+                <dd>{biasWord}</dd>
+              </div>
+              <div className="panel-kpi">
+                <dt>期待値</dt>
+                <dd>{view.selectedExpectedReturnLabel.replace(/^Exp\.\s*/, '')}</dd>
+              </div>
+              <div className="panel-kpi">
+                <dt>中心</dt>
+                <dd>{view.selectedForecastPriceLabel}</dd>
+              </div>
+            </dl>
+          </header>
+
+          <ol className="segment-list scenario-ribbon">
+            {narrativeSegments.map((segment) => (
+              <li key={`${segment.fromStep}-${segment.toStep}`} className="segment-item">
+                <span className={`segment-chip segment-chip--${segment.tone}`}>{segment.label}</span>
+                <strong>{segment.title}</strong>
+                <p>{segment.summary}</p>
+              </li>
+            ))}
+          </ol>
+        </motion.section>
       </section>
     </main>
   )
@@ -760,6 +739,13 @@ function Glyph({ name }: { name: GlyphName }) {
           <circle cx="12" cy="14" r="1.2" fill="currentColor" stroke="none" />
         </svg>
       )
+    case 'economy':
+      return (
+        <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.8" strokeLinecap="round" strokeLinejoin="round">
+          <path d="m4 17 5-5 3 3 8-8" />
+          <path d="M16 7h4v4" />
+        </svg>
+      )
     case 'lag':
     case 'fresh':
       return (
@@ -804,17 +790,6 @@ function getActionGlyph(action: RecommendedAction): GlyphName {
   return 'wait'
 }
 
-function getActionWord(action: RecommendedAction) {
-  if (action === 'Active') {
-    return 'GO'
-  }
-  if (action === 'Reduce') {
-    return 'PASS'
-  }
-
-  return 'WAIT'
-}
-
 function getActionLabel(action: RecommendedAction) {
   if (action === 'Active') {
     return '強気'
@@ -826,6 +801,17 @@ function getActionLabel(action: RecommendedAction) {
   return '様子見'
 }
 
+function getActionEnglish(action: RecommendedAction) {
+  if (action === 'Active') {
+    return 'Go'
+  }
+  if (action === 'Reduce') {
+    return 'Pass'
+  }
+
+  return 'Wait'
+}
+
 function getHeroSummary(action: RecommendedAction, expectedReturnPct: number, lagHours: number | null) {
   if (action === 'Reduce' && lagHours !== null && lagHours >= 48) {
     return '更新が古い。今回は見送り。'
@@ -835,20 +821,6 @@ function getHeroSummary(action: RecommendedAction, expectedReturnPct: number, la
   }
   if (action === 'Active') {
     return `${getBiasNarrative(expectedReturnPct)}入る条件が揃っている。`
-  }
-
-  return `${getBiasNarrative(expectedReturnPct)}エントリーはまだ早い。`
-}
-
-function getRailSummary(action: RecommendedAction, expectedReturnPct: number, lagHours: number | null) {
-  if (action === 'Reduce' && lagHours !== null && lagHours >= 48) {
-    return '更新が古いため、今回は見送る。'
-  }
-  if (action === 'Reduce') {
-    return '根拠がまだ弱い。'
-  }
-  if (action === 'Active') {
-    return '入る条件が揃っている。'
   }
 
   return `${getBiasNarrative(expectedReturnPct)}エントリーはまだ早い。`
@@ -919,6 +891,28 @@ function formatLag(value: number | null | undefined) {
   }
 
   return `${value.toFixed(1)}h`
+}
+
+function getFreshnessCaption(runQuality: string, lagHours: number | null | undefined) {
+  if (lagHours === null || lagHours === undefined) {
+    return runQuality === 'fresh' ? 'fresh' : runQuality
+  }
+  if (lagHours >= 48) {
+    return 'stale'
+  }
+  if (lagHours >= 24) {
+    return 'watch'
+  }
+
+  return 'fresh'
+}
+
+function formatShortHash(value: string | null | undefined) {
+  if (!value) {
+    return '-'
+  }
+
+  return value.length > 12 ? `${value.slice(0, 12)}` : value
 }
 
 function useViewportWidth() {

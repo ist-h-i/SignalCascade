@@ -18,6 +18,7 @@ const manifestPath = path.join(currentRunDir, 'manifest.json')
 const validationSummaryPath = path.join(currentRunDir, 'validation_summary.json')
 const policySummaryPath = path.join(currentRunDir, 'policy_summary.csv')
 const horizonDiagPath = path.join(currentRunDir, 'horizon_diag.csv')
+const validationRowsPath = path.join(currentRunDir, 'validation_rows.csv')
 const outputPath = path.resolve(frontendRoot, 'public/dashboard-data.json')
 const liveDataDir = path.join(artifactRoot, 'live')
 const liveCsvPath = path.join(liveDataDir, 'xauusd_m30_latest.csv')
@@ -33,8 +34,8 @@ const configuredDownloadRetryDelayMs = resolveNonNegativeIntegerEnv(
   'SIGNAL_CASCADE_DOWNLOAD_RETRY_MS',
   defaultDownloadRetryDelayMs,
 )
-const csvPath = resolveCsvPath(targetDateJst)
-ensureCurrentRun(csvPath)
+const initialCsvPath = resolveCsvPath(targetDateJst)
+ensureCurrentRun(initialCsvPath)
 const metrics = JSON.parse(fs.readFileSync(metricsPath, 'utf8'))
 const config = JSON.parse(fs.readFileSync(configPath, 'utf8'))
 const sourceMeta = fs.existsSync(sourceMetaPath)
@@ -48,19 +49,21 @@ const manifest = fs.existsSync(manifestPath)
   ? JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
   : null
 const validationSummary = loadRequiredCurrentDiagnosticsSummary()
+const validationRowsTable = loadRequiredDiagnosticsCsv(validationRowsPath)
+const horizonDiagTable = loadRequiredDiagnosticsCsv(horizonDiagPath)
 const diagnosticsGeneratedAt = validationSummary.generated_at_utc
 const manifestGeneratedAt = resolveManifestGeneratedAt(manifest)
-const allCsvRows = parseCsv(fs.readFileSync(csvPath, 'utf8'))
-const requiredSourceRows = resolveRequiredSourceRows(metrics, allCsvRows.length)
-const csvRows = allCsvRows.slice(-requiredSourceRows)
-const bars4h = resampleTo4h(csvRows)
-
 const anchorTime = normalizeDate(prediction.anchor_time)
-const anchorIndex = bars4h.findIndex((row) => row.ts === anchorTime.getTime())
-
-if (anchorIndex < 0) {
-  throw new Error(`Anchor time ${prediction.anchor_time} was not found in the 4h resampled series.`)
-}
+const {
+  csvPath,
+  csvRows,
+  bars4h,
+  anchorIndex,
+} = resolveDashboardCsvContext({
+  initialCsvPath,
+  metrics,
+  prediction,
+})
 
 const anchorBar = bars4h[anchorIndex]
 const priceScale = resolvePositiveNumber(
@@ -106,6 +109,13 @@ const horizonRows = buildHorizonRows({
   predictedCloseByHorizon,
   priceScale,
 })
+const validationRowDiagnostics = buildValidationRowDiagnostics(validationRowsTable)
+const horizonDiagnostics = buildHorizonDiagnostics({
+  horizonRows,
+  horizonDiagTable,
+  validationRowDiagnostics,
+  validationSummary,
+})
 const chartRows = buildChartRows({
   rawRows: csvRows,
   anchorTime,
@@ -143,6 +153,15 @@ const primaryStateResetMode =
   validationMetrics?.state_reset_mode ??
   validationSummary?.primary_state_reset_mode ??
   null
+const blockedMetrics = buildBlockedMetrics({
+  validationSummary,
+  primaryStateResetMode,
+  cvarWeight: config.cvar_weight ?? validationSummary?.checkpoint_audit?.cvar_weight ?? 0.2,
+})
+const structureMetrics = buildStructureMetrics({
+  validationSummary,
+  config,
+})
 const operatingPoint = {
   stateResetMode: primaryStateResetMode,
   costMultiplier: validationMetrics?.cost_multiplier ?? 1.0,
@@ -157,7 +176,14 @@ const freshness = buildFreshness({
   predictionAnchorTime: prediction.anchor_time ?? null,
 })
 const interruptedTuning = Boolean(manifest?.interrupted_tuning)
-const runQuality = deriveRunQuality({ interruptedTuning, freshness })
+const runQuality = deriveRunQuality({
+  freshness,
+  interruptedTuning,
+})
+const liveMetrics = buildLiveMetrics({
+  horizonRows,
+  selectedHorizon,
+})
 const overlayAction = prediction.no_trade_band_hit ? 'hold' : 'reduce'
 const payload = {
   schemaVersion: 6,
@@ -267,8 +293,19 @@ const payload = {
           turnover: validationMetrics.turnover ?? null,
           maxDrawdown: validationMetrics.max_drawdown ?? null,
           utilityScore: validationMetrics.utility_score ?? null,
+          interval1SigmaCoverage: validationMetrics.interval_1sigma_coverage ?? null,
+          interval2SigmaCoverage: validationMetrics.interval_2sigma_coverage ?? null,
+          pitMean: validationMetrics.pit_mean ?? null,
+          pitVariance: validationMetrics.pit_variance ?? null,
+          normalizedAbsError: validationMetrics.normalized_abs_error ?? null,
+          gaussianNll: validationMetrics.gaussian_nll ?? null,
+          probabilisticCalibrationScore: validationMetrics.probabilistic_calibration_score ?? null,
         }
       : null,
+    blocked: blockedMetrics,
+    live: liveMetrics,
+    structure: structureMetrics,
+    horizonDiagnostics,
   },
   narrative: buildNarrative({ prediction, horizonRows }),
 }
@@ -381,6 +418,7 @@ function loadRequiredCurrentDiagnosticsSummary() {
     ['validation_summary.json', validationSummaryPath],
     ['policy_summary.csv', policySummaryPath],
     ['horizon_diag.csv', horizonDiagPath],
+    ['validation_rows.csv', validationRowsPath],
   ].filter(([, filePath]) => !fs.existsSync(filePath))
 
   if (missingFiles.length > 0) {
@@ -400,6 +438,13 @@ function loadRequiredCurrentDiagnosticsSummary() {
   }
 
   return validationSummary
+}
+
+function loadRequiredDiagnosticsCsv(filePath) {
+  if (!fs.existsSync(filePath)) {
+    throw new Error(`diagnostics CSV is missing: ${filePath}`)
+  }
+  return parseStructuredCsv(fs.readFileSync(filePath, 'utf8'))
 }
 
 function resolveCsvPath(targetDateJst) {
@@ -484,6 +529,49 @@ function resolveStoredCsvPath() {
   throw new Error('No stored CSV source was found for the current SignalCascade run.')
 }
 
+function resolveDashboardCsvContext({ initialCsvPath, metrics, prediction }) {
+  const anchorTime = normalizeDate(prediction.anchor_time)
+  const initialContext = buildDashboardCsvContext(initialCsvPath, metrics)
+  const initialAnchorIndex = initialContext.bars4h.findIndex((row) => row.ts === anchorTime.getTime())
+
+  if (initialAnchorIndex >= 0) {
+    return {
+      ...initialContext,
+      anchorIndex: initialAnchorIndex,
+    }
+  }
+
+  const initialResolvedPath = path.resolve(initialCsvPath)
+  const liveResolvedPath = path.resolve(liveCsvPath)
+  if (initialResolvedPath !== liveResolvedPath && fs.existsSync(liveResolvedPath)) {
+    const liveContext = buildDashboardCsvContext(liveResolvedPath, metrics)
+    const liveAnchorIndex = liveContext.bars4h.findIndex((row) => row.ts === anchorTime.getTime())
+    if (liveAnchorIndex >= 0) {
+      return {
+        ...liveContext,
+        anchorIndex: liveAnchorIndex,
+      }
+    }
+  }
+
+  throw new Error(
+    `Anchor time ${prediction.anchor_time} was not found in the 4h resampled series.`,
+  )
+}
+
+function buildDashboardCsvContext(csvPath, metrics) {
+  const allCsvRows = parseCsv(fs.readFileSync(csvPath, 'utf8'))
+  const requiredSourceRows = resolveRequiredSourceRows(metrics, allCsvRows.length)
+  const csvRows = allCsvRows.slice(-requiredSourceRows)
+  const bars4h = resampleTo4h(csvRows)
+
+  return {
+    csvPath,
+    csvRows,
+    bars4h,
+  }
+}
+
 function resolveArtifactProvenance(sourceMeta) {
   const artifactSchemaVersion = Number.isInteger(sourceMeta?.artifact_schema_version)
     ? sourceMeta.artifact_schema_version
@@ -513,6 +601,7 @@ function resolveCurrentGovernance(sourceMeta) {
   return {
     selectionMode: typeof governance?.selection_mode === 'string' ? governance.selection_mode : null,
     overrideReason: typeof governance?.override_reason === 'string' ? governance.override_reason : null,
+    selectionStatus: typeof governance?.selection_status === 'string' ? governance.selection_status : null,
     productionCurrentCandidate:
       typeof productionCurrent?.candidate === 'string' ? productionCurrent.candidate : null,
     acceptedCandidate: typeof acceptedCandidate?.candidate === 'string' ? acceptedCandidate.candidate : null,
@@ -672,8 +761,8 @@ function buildFreshness({
   }
 }
 
-function deriveRunQuality({ interruptedTuning, freshness }) {
-  if (interruptedTuning) {
+function deriveRunQuality({ freshness, interruptedTuning }) {
+  if (Boolean(interruptedTuning)) {
     return 'degraded'
   }
 
@@ -740,6 +829,24 @@ function normalizeDukascopyCsv(inputPath, outputPath, cutoffTs) {
   fs.writeFileSync(outputPath, `${content}\n`)
 }
 
+function parseStructuredCsv(content) {
+  const lines = content
+    .trim()
+    .split(/\r?\n/)
+    .filter(Boolean)
+  if (lines.length === 0) {
+    return []
+  }
+
+  const headers = lines[0].split(',')
+  return lines.slice(1).map((line) => {
+    const cells = line.split(',')
+    return Object.fromEntries(
+      headers.map((header, index) => [header, cells[index] ?? '']),
+    )
+  })
+}
+
 function parseCsv(content) {
   const lines = content
     .trim()
@@ -756,6 +863,446 @@ function parseCsv(content) {
       volume: Number(volume),
     }
   })
+}
+
+function buildValidationRowDiagnostics(rows) {
+  const byHorizon = new Map()
+
+  for (const row of rows) {
+    const horizon = resolveFiniteNumber(row.horizon)
+    const actual = resolveFiniteNumber(row.y_raw)
+    const predicted = resolveFiniteNumber(row.mu_t)
+    const sigma = resolveFiniteNumber(row.sigma_t)
+    const positionIfChosen = resolveFiniteNumber(row.position_if_chosen)
+    const policyUtility = resolveFiniteNumber(row.policy_utility)
+    const selectionFlag = resolveFiniteNumber(row.selected) ?? resolveFiniteNumber(row.policy_horizon_selected)
+
+    if (horizon === null || actual === null || predicted === null) {
+      continue
+    }
+
+    const horizonKey = Math.trunc(horizon)
+    const sigmaSafe = Math.max(Math.abs(sigma ?? 0), 1e-6)
+    const absError = Math.abs(actual - predicted)
+    const sigmaAbsError = Math.abs(absError - sigmaSafe)
+    const zScore = (actual - predicted) / sigmaSafe
+    const pit = gaussianPit(zScore)
+    const gaussianNll = 0.5 * Math.log(2 * Math.PI * sigmaSafe * sigmaSafe) + (0.5 * zScore * zScore)
+    const bucket = byHorizon.get(horizonKey) ?? {
+      sampleCount: 0,
+      selectionCount: 0,
+      absErrorSum: 0,
+      sigmaAbsErrorSum: 0,
+      directionCorrectCount: 0,
+      interval1SigmaHits: 0,
+      interval2SigmaHits: 0,
+      pitSum: 0,
+      pitSqSum: 0,
+      normalizedAbsErrorSum: 0,
+      gaussianNllSum: 0,
+      meanPositionSum: 0,
+      meanPolicyUtilitySum: 0,
+    }
+
+    bucket.sampleCount += 1
+    bucket.selectionCount += selectionFlag === 1 ? 1 : 0
+    bucket.absErrorSum += absError
+    bucket.sigmaAbsErrorSum += sigmaAbsError
+    bucket.directionCorrectCount += Math.sign(actual) === Math.sign(predicted) ? 1 : 0
+    bucket.interval1SigmaHits += absError <= sigmaSafe ? 1 : 0
+    bucket.interval2SigmaHits += absError <= (2 * sigmaSafe) ? 1 : 0
+    bucket.pitSum += pit
+    bucket.pitSqSum += pit * pit
+    bucket.normalizedAbsErrorSum += absError / sigmaSafe
+    bucket.gaussianNllSum += gaussianNll
+    bucket.meanPositionSum += positionIfChosen ?? 0
+    bucket.meanPolicyUtilitySum += policyUtility ?? 0
+    byHorizon.set(horizonKey, bucket)
+  }
+
+  return new Map(
+    [...byHorizon.entries()].map(([horizon, bucket]) => {
+      const sampleCount = bucket.sampleCount
+      const pitMean = sampleCount > 0 ? bucket.pitSum / sampleCount : null
+      const pitVariance =
+        sampleCount > 0 && pitMean !== null ? (bucket.pitSqSum / sampleCount) - (pitMean * pitMean) : null
+      const interval1SigmaCoverage = sampleCount > 0 ? bucket.interval1SigmaHits / sampleCount : null
+      const interval2SigmaCoverage = sampleCount > 0 ? bucket.interval2SigmaHits / sampleCount : null
+
+      return [
+        horizon,
+        {
+          horizon,
+          sampleCount,
+          selectionRate: sampleCount > 0 ? bucket.selectionCount / sampleCount : null,
+          meanPolicyUtility: sampleCount > 0 ? bucket.meanPolicyUtilitySum / sampleCount : null,
+          meanPosition: sampleCount > 0 ? bucket.meanPositionSum / sampleCount : null,
+          muCalibration: sampleCount > 0 ? bucket.absErrorSum / sampleCount : null,
+          sigmaCalibration: sampleCount > 0 ? bucket.sigmaAbsErrorSum / sampleCount : null,
+          directionalAccuracy: sampleCount > 0 ? bucket.directionCorrectCount / sampleCount : null,
+          interval1SigmaCoverage,
+          interval2SigmaCoverage,
+          pitMean,
+          pitVariance,
+          normalizedAbsError: sampleCount > 0 ? bucket.normalizedAbsErrorSum / sampleCount : null,
+          gaussianNll: sampleCount > 0 ? bucket.gaussianNllSum / sampleCount : null,
+          probabilisticCalibrationScore:
+            interval1SigmaCoverage === null || interval2SigmaCoverage === null || pitMean === null || pitVariance === null
+              ? null
+              : probabilisticCalibrationScore({
+                  interval1SigmaCoverage,
+                  interval2SigmaCoverage,
+                  pitMean,
+                  pitVariance,
+                }),
+        },
+      ]
+    }),
+  )
+}
+
+function buildHorizonDiagnostics({
+  horizonRows,
+  horizonDiagTable,
+  validationRowDiagnostics,
+  validationSummary,
+}) {
+  const policyDistribution = validationSummary?.validation?.policy_horizon_distribution ?? {}
+  const horizons = new Set(
+    [
+      ...horizonRows.map((row) => row.horizon),
+      ...horizonDiagTable.map((row) => Number(row.horizon)),
+      ...Object.keys(policyDistribution).map((value) => Number(value)),
+      ...validationRowDiagnostics.keys(),
+    ].filter((value) => Number.isFinite(value)),
+  )
+
+  return [...horizons]
+    .sort((left, right) => left - right)
+    .map((horizon) => {
+      const csvRow = horizonDiagTable.find((row) => Number(row.horizon) === horizon) ?? null
+      const derived = validationRowDiagnostics.get(horizon) ?? null
+      return {
+        horizon,
+        hours: horizon * 4,
+        sampleCount:
+          resolveFiniteNumber(csvRow?.sample_count) ??
+          derived?.sampleCount ??
+          null,
+        policyHorizonShare:
+          resolveFiniteNumber(policyDistribution[String(horizon)]) ??
+          resolveFiniteNumber(csvRow?.policy_horizon_share) ??
+          derived?.selectionRate ??
+          null,
+        selectionRate:
+          resolveFiniteNumber(csvRow?.selection_rate) ??
+          derived?.selectionRate ??
+          null,
+        meanPolicyUtility:
+          resolveFiniteNumber(csvRow?.mean_policy_utility) ??
+          derived?.meanPolicyUtility ??
+          null,
+        meanPosition:
+          resolveFiniteNumber(csvRow?.mean_position) ??
+          derived?.meanPosition ??
+          null,
+        muCalibration:
+          resolveFiniteNumber(csvRow?.mu_calibration) ??
+          derived?.muCalibration ??
+          null,
+        sigmaCalibration:
+          resolveFiniteNumber(csvRow?.sigma_calibration) ??
+          derived?.sigmaCalibration ??
+          null,
+        directionalAccuracy:
+          resolveFiniteNumber(csvRow?.directional_accuracy) ??
+          derived?.directionalAccuracy ??
+          null,
+        interval1SigmaCoverage:
+          resolveFiniteNumber(csvRow?.interval_1sigma_coverage) ??
+          derived?.interval1SigmaCoverage ??
+          null,
+        interval2SigmaCoverage:
+          resolveFiniteNumber(csvRow?.interval_2sigma_coverage) ??
+          derived?.interval2SigmaCoverage ??
+          null,
+        pitMean:
+          resolveFiniteNumber(csvRow?.pit_mean) ??
+          derived?.pitMean ??
+          null,
+        pitVariance:
+          resolveFiniteNumber(csvRow?.pit_variance) ??
+          derived?.pitVariance ??
+          null,
+        normalizedAbsError:
+          resolveFiniteNumber(csvRow?.normalized_abs_error) ??
+          derived?.normalizedAbsError ??
+          null,
+        gaussianNll:
+          resolveFiniteNumber(csvRow?.gaussian_nll) ??
+          derived?.gaussianNll ??
+          null,
+        probabilisticCalibrationScore:
+          resolveFiniteNumber(csvRow?.probabilistic_calibration_score) ??
+          derived?.probabilisticCalibrationScore ??
+          null,
+      }
+    })
+}
+
+function buildBlockedMetrics({ validationSummary, primaryStateResetMode, cvarWeight }) {
+  const blockedEvaluation = validationSummary?.blocked_walk_forward_evaluation
+  const stateResetModes = blockedEvaluation?.state_reset_modes
+  if (!stateResetModes || typeof stateResetModes !== 'object') {
+    return null
+  }
+
+  const resolvedMode =
+    primaryStateResetMode ??
+    validationSummary?.primary_state_reset_mode ??
+    blockedEvaluation?.best_state_reset_mode_by_mean_log_wealth ??
+    null
+  const modePayload = resolvedMode ? stateResetModes[resolvedMode] : null
+  if (!modePayload || typeof modePayload !== 'object') {
+    return null
+  }
+
+  const averageLogWealthMean = resolveFiniteNumber(modePayload.average_log_wealth_mean)
+  const cvarTailLossMean =
+    resolveFiniteNumber(modePayload.cvar_tail_loss_mean) ??
+    averageFinite(modePayload.folds, 'cvar_tail_loss')
+  return {
+    stateResetMode: resolvedMode,
+    averageLogWealthMean,
+    turnoverMean: resolveFiniteNumber(modePayload.turnover_mean),
+    directionalAccuracyMean: resolveFiniteNumber(modePayload.directional_accuracy_mean),
+    exactSmoothPositionMaeMean: resolveFiniteNumber(modePayload.exact_smooth_position_mae_mean),
+    cvarTailLossMean,
+    objectiveLogWealthMinusLambdaCvarMean:
+      resolveFiniteNumber(modePayload.objective_log_wealth_minus_lambda_cvar_mean) ??
+      resolveFiniteNumber(modePayload.blocked_objective_log_wealth_minus_lambda_cvar_mean) ??
+      (
+        averageLogWealthMean !== null && cvarTailLossMean !== null
+          ? averageLogWealthMean - (Number(cvarWeight) * cvarTailLossMean)
+          : null
+      ),
+    interval1SigmaCoverageMean: resolveFiniteNumber(modePayload.interval_1sigma_coverage_mean),
+    interval2SigmaCoverageMean: resolveFiniteNumber(modePayload.interval_2sigma_coverage_mean),
+    probabilisticCalibrationScoreMean: resolveFiniteNumber(modePayload.probabilistic_calibration_score_mean),
+  }
+}
+
+function buildStructureMetrics({ validationSummary, config }) {
+  const policyCalibration = validationSummary?.policy_calibration_summary ?? {}
+  const selectedRow = policyCalibration.selected_row ?? null
+  const appliedRuntimePolicy =
+    policyCalibration.applied_runtime_policy ??
+    buildRuntimePolicyPayload(config)
+  const shapeTopClassShare = validationSummary?.state_vector_summary?.shape_posterior_top_class_share ?? {}
+  const shapePosteriorMean = validationSummary?.state_vector_summary?.shape_posterior_mean ?? {}
+  const dominantShapeEntry = Object.entries(shapeTopClassShare)
+    .map(([shapeId, share]) => [shapeId, resolveFiniteNumber(share)]).filter(([, share]) => share !== null)
+    .sort((left, right) => right[1] - left[1])[0] ?? [null, null]
+  const policyHorizonDistribution = Object.entries(
+    validationSummary?.validation?.policy_horizon_distribution ?? {},
+  )
+    .map(([horizon, share]) => ({
+      horizon: Number(horizon),
+      share: resolveFiniteNumber(share),
+    }))
+    .filter((entry) => Number.isFinite(entry.horizon) && entry.share !== null)
+    .sort((left, right) => left.horizon - right.horizon)
+  const dominantHorizon = [...policyHorizonDistribution]
+    .sort((left, right) => (right.share ?? 0) - (left.share ?? 0))[0] ?? null
+  const runtimePolicyAlignmentScore = computeRuntimePolicyAlignmentScore({
+    selectedRow,
+    appliedRuntimePolicy,
+  })
+
+  return {
+    selectedRowMatchesRuntime:
+      typeof policyCalibration.selected_row_matches_applied_runtime === 'boolean'
+        ? policyCalibration.selected_row_matches_applied_runtime
+        : runtimePolicyAlignmentScore >= 0.999,
+    runtimePolicyAlignmentScore,
+    selectedRowRole: toNonEmptyString(policyCalibration.selected_row_role),
+    dominantShapeClass: dominantShapeEntry[0],
+    dominantShapeClassShare: dominantShapeEntry[1],
+    activeShapeCount: Object.values(shapePosteriorMean).filter((value) => (resolveFiniteNumber(value) ?? 0) >= 0.05).length,
+    policyHorizonDistribution: policyHorizonDistribution.map((entry) => ({
+      horizon: entry.horizon,
+      share: entry.share,
+    })),
+    dominantHorizon: dominantHorizon?.horizon ?? null,
+    dominantHorizonShare: dominantHorizon?.share ?? null,
+  }
+}
+
+function buildLiveMetrics({ horizonRows, selectedHorizon }) {
+  const available = horizonRows.filter((row) => row.actualClose !== null && row.actualReturnPct !== null)
+  if (available.length === 0) {
+    return {
+      sampleCount: 0,
+      directionalAccuracy: null,
+      interval1SigmaCoverage: null,
+      interval2SigmaCoverage: null,
+      meanAbsoluteErrorPct: null,
+      probabilisticCalibrationScore: null,
+      selectedActualReturnPct: null,
+      selectedRangeCaptured: null,
+    }
+  }
+
+  let directionCorrectCount = 0
+  let interval1SigmaHits = 0
+  let interval2SigmaHits = 0
+  let absErrorPctSum = 0
+  let pitSum = 0
+  let pitSqSum = 0
+
+  for (const row of available) {
+    const actualClose = row.actualClose
+    const absError = Math.abs(actualClose - row.predictedClose)
+    const sigmaSafe = Math.max(row.uncertainty, 1e-6)
+    const zScore = Math.log(actualClose / row.predictedClose) / sigmaSafe
+    const pit = gaussianPit(zScore)
+
+    directionCorrectCount += Math.sign(row.expectedReturnPct) === Math.sign(row.actualReturnPct ?? 0) ? 1 : 0
+    interval1SigmaHits += actualClose >= row.lowerClose && actualClose <= row.upperClose ? 1 : 0
+    interval2SigmaHits += actualClose >= row.predictedClose * Math.exp(-2 * sigmaSafe) && actualClose <= row.predictedClose * Math.exp(2 * sigmaSafe) ? 1 : 0
+    absErrorPctSum += actualClose === 0 ? 0 : absError / actualClose
+    pitSum += pit
+    pitSqSum += pit * pit
+  }
+
+  const sampleCount = available.length
+  const directionalAccuracy = directionCorrectCount / sampleCount
+  const interval1SigmaCoverage = interval1SigmaHits / sampleCount
+  const interval2SigmaCoverage = interval2SigmaHits / sampleCount
+  const pitMean = pitSum / sampleCount
+  const pitVariance = (pitSqSum / sampleCount) - (pitMean * pitMean)
+  const selectedRow = available.find((row) => row.horizon === selectedHorizon) ?? null
+
+  return {
+    sampleCount,
+    directionalAccuracy,
+    interval1SigmaCoverage,
+    interval2SigmaCoverage,
+    meanAbsoluteErrorPct: absErrorPctSum / sampleCount,
+    probabilisticCalibrationScore: probabilisticCalibrationScore({
+      interval1SigmaCoverage,
+      interval2SigmaCoverage,
+      pitMean,
+      pitVariance,
+    }),
+    selectedActualReturnPct: selectedRow?.actualReturnPct ?? null,
+    selectedRangeCaptured:
+      selectedRow !== null
+        ? selectedRow.actualClose >= selectedRow.lowerClose && selectedRow.actualClose <= selectedRow.upperClose
+        : null,
+  }
+}
+
+function averageFinite(rows, key) {
+  if (!Array.isArray(rows)) {
+    return null
+  }
+  const values = rows
+    .map((row) => resolveFiniteNumber(row?.[key]))
+    .filter((value) => value !== null)
+  if (values.length === 0) {
+    return null
+  }
+  return values.reduce((sum, value) => sum + value, 0) / values.length
+}
+
+function gaussianPit(zScore) {
+  const value = 0.5 * (1 + erf(zScore / Math.sqrt(2)))
+  return clamp(value, 1e-6, 1 - 1e-6)
+}
+
+function probabilisticCalibrationScore({
+  interval1SigmaCoverage,
+  interval2SigmaCoverage,
+  pitMean,
+  pitVariance,
+}) {
+  const coverage1Target = 0.6826894921370859
+  const coverage2Target = 0.9544997361036416
+  const uniformPitVariance = 1 / 12
+  const coverage1Score = clamp(1 - (Math.abs(interval1SigmaCoverage - coverage1Target) / 0.35), 0, 1)
+  const coverage2Score = clamp(1 - (Math.abs(interval2SigmaCoverage - coverage2Target) / 0.35), 0, 1)
+  const pitMeanScore = clamp(1 - (Math.abs(pitMean - 0.5) / 0.5), 0, 1)
+  const pitVarianceScore = clamp(1 - (Math.abs(pitVariance - uniformPitVariance) / uniformPitVariance), 0, 1)
+  return (
+    (0.35 * coverage1Score) +
+    (0.35 * coverage2Score) +
+    (0.15 * pitMeanScore) +
+    (0.15 * pitVarianceScore)
+  )
+}
+
+function buildRuntimePolicyPayload(config) {
+  return {
+    state_reset_mode: config.evaluation_state_reset_mode,
+    cost_multiplier: config.policy_cost_multiplier,
+    gamma_multiplier: config.policy_gamma_multiplier,
+    min_policy_sigma: config.min_policy_sigma,
+    q_max: config.q_max,
+    cvar_weight: config.cvar_weight,
+  }
+}
+
+function computeRuntimePolicyAlignmentScore({ selectedRow, appliedRuntimePolicy }) {
+  if (!selectedRow || !appliedRuntimePolicy) {
+    return 1
+  }
+
+  const stateResetScore = Number(selectedRow.state_reset_mode === appliedRuntimePolicy.state_reset_mode)
+  return clamp(
+    (0.15 * stateResetScore) +
+      (0.35 * ratioAlignmentScore(selectedRow.cost_multiplier, appliedRuntimePolicy.cost_multiplier, 12)) +
+      (0.15 * ratioAlignmentScore(selectedRow.gamma_multiplier, appliedRuntimePolicy.gamma_multiplier, 12)) +
+      (0.15 * ratioAlignmentScore(selectedRow.min_policy_sigma, appliedRuntimePolicy.min_policy_sigma, 8)) +
+      (0.10 * ratioAlignmentScore(selectedRow.q_max, appliedRuntimePolicy.q_max, 3)) +
+      (0.10 * ratioAlignmentScore(selectedRow.cvar_weight, appliedRuntimePolicy.cvar_weight, 16)),
+    0,
+    1,
+  )
+}
+
+function ratioAlignmentScore(selectedValue, appliedValue, maxRatio) {
+  const selectedNumeric = resolveFiniteNumber(selectedValue)
+  const appliedNumeric = resolveFiniteNumber(appliedValue)
+  if (
+    selectedNumeric === null ||
+    appliedNumeric === null ||
+    selectedNumeric <= 0 ||
+    appliedNumeric <= 0 ||
+    maxRatio <= 1
+  ) {
+    return 0
+  }
+  const logRatio = Math.abs(Math.log(selectedNumeric / appliedNumeric))
+  return clamp(1 - (logRatio / Math.log(maxRatio)), 0, 1)
+}
+
+function erf(value) {
+  const sign = value < 0 ? -1 : 1
+  const x = Math.abs(value)
+  const a1 = 0.254829592
+  const a2 = -0.284496736
+  const a3 = 1.421413741
+  const a4 = -1.453152027
+  const a5 = 1.061405429
+  const p = 0.3275911
+  const t = 1 / (1 + p * x)
+  const y = 1 - (((((a5 * t) + a4) * t + a3) * t + a2) * t + a1) * t * Math.exp(-x * x)
+  return sign * y
+}
+
+function clamp(value, min, max) {
+  return Math.min(max, Math.max(min, value))
 }
 
 function parseTimestamp(value) {

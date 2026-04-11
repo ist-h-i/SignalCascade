@@ -99,6 +99,7 @@ def build_current_alias_metadata(
         "selection_mode": selection_metadata["selection_mode"],
         "selection_rule": selection_metadata["selection_rule"],
         "selection_rule_version": selection_metadata["selection_rule_version"],
+        "selection_status": selection_metadata["selection_status"],
         "selection_timestamp_utc": selection_time,
         "selection_session_manifest_path": session_context.get("session_manifest_path"),
         "selection_leaderboard_path": session_context.get("leaderboard_path"),
@@ -201,6 +202,13 @@ def _resolve_production_selection_metadata(
         isinstance(manifest_selection, dict)
         and manifest_production_name == production_current.get("candidate")
     ):
+        selection_status = manifest_selection.get("selection_status")
+        if not isinstance(selection_status, str):
+            selection_status = _resolve_selection_status(
+                accepted_candidate=accepted_candidate,
+                production_candidate=production_current,
+                override_applied=override_applied,
+            )
         return {
             "selection_mode": manifest_selection.get(
                 "selection_mode",
@@ -214,6 +222,7 @@ def _resolve_production_selection_metadata(
                 "selection_rule_version",
                 _LEGACY_CURRENT_SELECTION_RULE_VERSION,
             ),
+            "selection_status": selection_status,
             "override_reason": manifest_selection.get("override_reason"),
             "override_priority_metrics": list(
                 manifest_selection.get("override_priority_metrics", [])
@@ -237,6 +246,11 @@ def _resolve_production_selection_metadata(
         "selection_mode": legacy_selection_mode,
         "selection_rule": _LEGACY_CURRENT_SELECTION_RULE,
         "selection_rule_version": _LEGACY_CURRENT_SELECTION_RULE_VERSION,
+        "selection_status": _resolve_selection_status(
+            accepted_candidate=accepted_candidate,
+            production_candidate=production_current,
+            override_applied=override_applied,
+        ),
         "override_reason": (
             "production current prioritizes execution risk budget over blocked-objective winner"
             if override_applied
@@ -369,6 +383,35 @@ def _build_decision_summary(
         "production current differs from the accepted candidate because execution risk budget "
         "took priority over blocked-objective rank."
     )
+
+
+def _resolve_selection_status(
+    accepted_candidate: Mapping[str, object] | None,
+    production_candidate: Mapping[str, object] | None,
+    override_applied: bool,
+) -> str:
+    accepted_candidate_name = (
+        str(accepted_candidate["candidate"])
+        if isinstance(accepted_candidate, Mapping)
+        and isinstance(accepted_candidate.get("candidate"), str)
+        else None
+    )
+    production_candidate_name = (
+        str(production_candidate["candidate"])
+        if isinstance(production_candidate, Mapping)
+        and isinstance(production_candidate.get("candidate"), str)
+        else None
+    )
+
+    if accepted_candidate_name is None and production_candidate_name is None:
+        return "no_candidate_passed_gate"
+    if accepted_candidate_name is not None and production_candidate_name is None:
+        return "quick_mode_non_promotable"
+    if accepted_candidate_name is not None and accepted_candidate_name == production_candidate_name:
+        return "accepted_and_production_same" if not override_applied else "accepted_and_production_same"
+    if accepted_candidate_name is None and production_candidate_name is not None:
+        return "accepted_and_production_diverged"
+    return "accepted_and_production_diverged"
 
 
 def _safe_delta(left: object, right: object) -> float | None:

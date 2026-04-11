@@ -35,7 +35,7 @@ from ..infrastructure.data.csv_source import CsvMarketDataSource
 from ..infrastructure.persistence import ensure_directory, load_json, save_json
 
 _RESERVED_ARTIFACT_DIRECTORIES = {"archive", "current", "live"}
-_DEFAULT_QUICK_MODE_CANDIDATE_LIMIT = 4
+_DEFAULT_QUICK_MODE_CANDIDATE_LIMIT = 8
 _FALLBACK_PARAMETERS = {
     "epochs": 12,
     "batch_size": 16,
@@ -55,21 +55,43 @@ _FALLBACK_PARAMETERS = {
 _OPTIMIZATION_GATE_RULES = (
     {"metric": "average_log_wealth", "operator": "minimum", "threshold": 0.0},
     {"metric": "realized_pnl_per_anchor", "operator": "minimum", "threshold": 0.0},
+    {
+        "metric": "blocked_objective_log_wealth_minus_lambda_cvar_mean",
+        "operator": "minimum",
+        "threshold": -0.0010,
+    },
     {"metric": "cvar_tail_loss", "operator": "maximum", "threshold": 0.08},
     {"metric": "max_drawdown", "operator": "maximum", "threshold": 0.15},
     {"metric": "directional_accuracy", "operator": "minimum", "threshold": 0.50},
+    {
+        "metric": "blocked_directional_accuracy_mean",
+        "operator": "minimum",
+        "threshold": 0.52,
+    },
+    {
+        "metric": "blocked_exact_smooth_position_mae_mean",
+        "operator": "maximum",
+        "threshold": 0.05,
+    },
+    {"metric": "sigma_calibration", "operator": "maximum", "threshold": 0.12},
+    {
+        "metric": "runtime_policy_alignment_score",
+        "operator": "minimum",
+        "threshold": 0.60,
+    },
     {"metric": "no_trade_band_hit_rate", "operator": "maximum", "threshold": 0.80},
 )
-_PRODUCTION_CURRENT_SELECTION_RULE = "optimization_gate_then_user_value_score"
+_PRODUCTION_CURRENT_SELECTION_RULE = "optimization_gate_then_deployment_score"
 _PRODUCTION_CURRENT_SELECTION_RULE_VERSION = 1
 _PRODUCTION_CURRENT_PRIORITY_METRICS = (
-    "blocked_directional_accuracy_mean",
-    "mu_calibration",
-    "blocked_exact_smooth_position_mae_mean",
-    "user_value_forecast_stability_score",
-    "sigma_calibration",
-    "max_drawdown",
-    "blocked_turnover_mean",
+    "deployment_score",
+    "deployment_economic_core_score",
+    "deployment_drawdown_score",
+    "deployment_cvar_tail_score",
+    "deployment_turnover_score",
+    "deployment_sigma_score",
+    "deployment_probabilistic_score",
+    "deployment_runtime_alignment_score",
     "blocked_objective_log_wealth_minus_lambda_cvar_mean",
 )
 
@@ -82,6 +104,7 @@ def tune_latest_dataset(
     lookback_days: int | None = None,
     candidate_limit: int | None = None,
     quick_mode: bool = False,
+    warm_start_from_current: bool = False,
 ) -> dict[str, object]:
     csv_path = csv_path.expanduser().resolve()
     artifact_root = artifact_root.expanduser().resolve()
@@ -134,6 +157,10 @@ def tune_latest_dataset(
         candidate_limit=candidate_limit,
         quick_mode=quick_mode,
     )
+    warm_start_checkpoint_path, warm_start_config = _resolve_current_warm_start_seed(
+        artifact_root,
+        warm_start_from_current=warm_start_from_current,
+    )
     session_id = datetime.now(timezone.utc).strftime("%Y%m%dT%H%M%SZ")
     session_dir = ensure_directory(archive_root / f"session_{session_id}")
     leaderboard: list[dict[str, object]] = []
@@ -142,7 +169,20 @@ def tune_latest_dataset(
         candidate_name = f"candidate_{index:02d}"
         candidate_dir = ensure_directory(session_dir / candidate_name)
         config = TrainingConfig(seed=seed, output_dir=str(candidate_dir), **static_overrides, **parameters)
-        model, summary = train_model(examples, config, candidate_dir)
+        candidate_warm_start_checkpoint_path = (
+            warm_start_checkpoint_path
+            if _supports_candidate_warm_start(
+                warm_start_config,
+                config,
+            )
+            else None
+        )
+        model, summary = train_model(
+            examples,
+            config,
+            candidate_dir,
+            warm_start_checkpoint_path=candidate_warm_start_checkpoint_path,
+        )
         prediction = predict_latest(
             model,
             examples,
@@ -185,8 +225,10 @@ def tune_latest_dataset(
         }
         result_row.update(_extract_forecast_profile_metrics(prediction))
         result_row.update(_extract_blocked_candidate_metrics(diagnostics_summary, config))
+        result_row.update(_extract_runtime_policy_alignment_metrics(diagnostics_summary, config))
         result_row.update(_evaluate_optimization_gate(result_row))
         result_row.update(_build_user_value_metrics(result_row))
+        result_row.update(_build_deployment_score_metrics(result_row))
         leaderboard.append(result_row)
 
     leaderboard.sort(
@@ -231,7 +273,22 @@ def tune_latest_dataset(
         (row for row in leaderboard if bool(row["optimization_gate_passed"])),
         None,
     )
-    production_result = _select_production_current_candidate(leaderboard)
+    production_result = None if quick_mode else _select_production_current_candidate(leaderboard)
+    production_current_selection = _build_production_current_selection_payload(
+        accepted_result=accepted_result,
+        production_result=production_result,
+        quick_mode=quick_mode,
+    )
+    selection_status = production_current_selection.get("selection_status")
+    if not isinstance(selection_status, str):
+        if accepted_result is None:
+            selection_status = "no_candidate_passed_gate"
+        elif production_result is None:
+            selection_status = "quick_mode_non_promotable" if quick_mode else "accepted_and_production_same"
+        elif production_result.get("candidate") == accepted_result.get("candidate"):
+            selection_status = "accepted_and_production_same"
+        else:
+            selection_status = "accepted_and_production_diverged"
     archived_current_dir = None
     archived_legacy_root_dirs: list[Path] = []
 
@@ -273,11 +330,9 @@ def tune_latest_dataset(
         "best_candidate": best_result,
         "accepted_candidate": accepted_result,
         "production_current_candidate": production_result,
-        "production_current_selection": _build_production_current_selection_payload(
-            accepted_result=accepted_result,
-            production_result=production_result,
-        ),
+        "production_current_selection": production_current_selection,
         "current_updated": production_result is not None,
+        "selection_status": selection_status,
         "interrupted_tuning": accepted_result is None,
         "optimization_gate": {
             "status": "passed" if accepted_result is not None else "failed",
@@ -601,6 +656,48 @@ def _coerce_parameter_payload(payload: dict[str, object]) -> dict[str, object]:
     }
 
 
+def _resolve_current_warm_start_seed(
+    artifact_root: Path,
+    *,
+    warm_start_from_current: bool,
+) -> tuple[Path | None, TrainingConfig | None]:
+    if not warm_start_from_current:
+        return None, None
+    checkpoint_path = artifact_root / "current" / "model.pt"
+    config_path = artifact_root / "current" / "config.json"
+    if not checkpoint_path.exists() or not config_path.exists():
+        return None, None
+    try:
+        return checkpoint_path, TrainingConfig.from_dict(load_json(config_path))
+    except (KeyError, TypeError, ValueError):
+        return None, None
+
+
+def _supports_candidate_warm_start(
+    source_config: TrainingConfig | None,
+    target_config: TrainingConfig,
+) -> bool:
+    if source_config is None:
+        return False
+    comparable_fields = (
+        "hidden_dim",
+        "state_dim",
+        "shape_classes",
+        "branch_dilations",
+        "tie_policy_to_forecast_head",
+        "disable_overlay_branch",
+        "horizons",
+        "feature_contract_version",
+        "timeframe_feature_names",
+        "state_feature_names",
+        "state_vector_component_names",
+    )
+    return all(
+        getattr(source_config, field_name) == getattr(target_config, field_name)
+        for field_name in comparable_fields
+    )
+
+
 def _extract_tunable_overrides(payload: dict[str, object]) -> dict[str, object]:
     tunable_keys = {
         "epochs",
@@ -798,6 +895,12 @@ def _extract_blocked_candidate_metrics(
         ("turnover_mean", "blocked_turnover_mean"),
         ("directional_accuracy_mean", "blocked_directional_accuracy_mean"),
         ("exact_smooth_position_mae_mean", "blocked_exact_smooth_position_mae_mean"),
+        ("interval_1sigma_coverage_mean", "blocked_interval_1sigma_coverage_mean"),
+        ("interval_2sigma_coverage_mean", "blocked_interval_2sigma_coverage_mean"),
+        (
+            "probabilistic_calibration_score_mean",
+            "blocked_probabilistic_calibration_score_mean",
+        ),
     ):
         value = _finite_float_or_none(mode_payload.get(source_key))
         if value is not None:
@@ -821,6 +924,40 @@ def _extract_blocked_candidate_metrics(
                 )
 
     return metrics
+
+
+def _extract_runtime_policy_alignment_metrics(
+    diagnostics_summary: dict[str, object],
+    config: TrainingConfig,
+) -> dict[str, object]:
+    policy_summary = diagnostics_summary.get("policy_calibration_summary")
+    if not isinstance(policy_summary, dict):
+        return {
+            "runtime_policy_alignment_score": 1.0,
+            "runtime_policy_selected_row_matches_applied": True,
+        }
+
+    selected_row = policy_summary.get("selected_row")
+    selected_row_payload = dict(selected_row) if isinstance(selected_row, dict) else {}
+    applied_runtime = policy_summary.get("applied_runtime_policy")
+    applied_runtime_payload = (
+        dict(applied_runtime) if isinstance(applied_runtime, dict) else _build_runtime_policy_payload(config)
+    )
+    selected_matches_runtime = bool(
+        selected_row_payload
+        and selected_row_payload.get("row_key") == applied_runtime_payload.get("row_key")
+    )
+    return {
+        "runtime_policy_alignment_score": (
+            1.0
+            if selected_matches_runtime
+            else _runtime_policy_alignment_score(
+                selected_row_payload,
+                applied_runtime_payload,
+            )
+        ),
+        "runtime_policy_selected_row_matches_applied": selected_matches_runtime,
+    }
 
 
 def _extract_forecast_profile_metrics(prediction) -> dict[str, object]:
@@ -904,6 +1041,68 @@ def _build_user_value_metrics(candidate: dict[str, object]) -> dict[str, object]
     }
 
 
+def _build_deployment_score_metrics(candidate: dict[str, object]) -> dict[str, object]:
+    economic_core_score = _wealth_like_score(
+        candidate.get("blocked_objective_log_wealth_minus_lambda_cvar_mean"),
+        candidate.get("average_log_wealth"),
+    )
+    drawdown_score = _inverse_linear_score(
+        candidate.get("max_drawdown"),
+        upper_bound=0.15,
+        default=0.5,
+    )
+    cvar_tail_score = _inverse_linear_score(
+        candidate.get("blocked_cvar_tail_loss_mean"),
+        upper_bound=0.10,
+        default=0.5,
+    )
+    turnover_score = _inverse_linear_score(
+        candidate.get("blocked_turnover_mean"),
+        upper_bound=2.0,
+        default=0.0,
+    )
+    sigma_score = _inverse_linear_score(
+        candidate.get("sigma_calibration"),
+        upper_bound=0.20,
+        default=0.5,
+    )
+    probabilistic_score = _clamp01(
+        _metric_with_fallback(
+            candidate,
+            primary_key="blocked_probabilistic_calibration_score_mean",
+            fallback_key="probabilistic_calibration_score",
+            default=0.5,
+        )
+    )
+    runtime_alignment_score = _clamp01(
+        _metric_with_fallback(
+            candidate,
+            primary_key="runtime_policy_alignment_score",
+            fallback_key="runtime_policy_alignment_score",
+            default=1.0,
+        )
+    )
+    deployment_score = (
+        (0.30 * economic_core_score)
+        + (0.22 * drawdown_score)
+        + (0.13 * cvar_tail_score)
+        + (0.12 * turnover_score)
+        + (0.10 * sigma_score)
+        + (0.08 * probabilistic_score)
+        + (0.05 * runtime_alignment_score)
+    )
+    return {
+        "deployment_economic_core_score": economic_core_score,
+        "deployment_drawdown_score": drawdown_score,
+        "deployment_cvar_tail_score": cvar_tail_score,
+        "deployment_turnover_score": turnover_score,
+        "deployment_sigma_score": sigma_score,
+        "deployment_probabilistic_score": probabilistic_score,
+        "deployment_runtime_alignment_score": runtime_alignment_score,
+        "deployment_score": deployment_score,
+    }
+
+
 def _build_chart_fidelity_score(candidate: dict[str, object]) -> float:
     directional_score = _clamp01(
         _metric_with_fallback(
@@ -928,10 +1127,19 @@ def _build_chart_fidelity_score(candidate: dict[str, object]) -> float:
         upper_bound=0.25,
         default=0.5,
     )
+    probabilistic_score = _clamp01(
+        _metric_with_fallback(
+            candidate,
+            primary_key="blocked_probabilistic_calibration_score_mean",
+            fallback_key="probabilistic_calibration_score",
+            default=0.5,
+        )
+    )
     return (
-        (0.50 * directional_score)
-        + (0.20 * mu_fit_score)
-        + (0.30 * position_consistency_score)
+        (0.45 * directional_score)
+        + (0.15 * mu_fit_score)
+        + (0.25 * position_consistency_score)
+        + (0.15 * probabilistic_score)
     )
 
 
@@ -974,29 +1182,24 @@ def _select_production_current_candidate(
         key=lambda row: (
             -_metric_with_fallback(
                 row,
-                primary_key="user_value_score",
-                fallback_key="project_value_score",
-                default=0.0,
-            ),
-            -_metric_with_fallback(
-                row,
-                primary_key="user_value_chart_fidelity_score",
-                fallback_key="project_value_score",
-                default=0.0,
-            ),
-            -_metric_with_fallback(
-                row,
-                primary_key="user_value_forecast_stability_score",
-                fallback_key="user_value_chart_fidelity_score",
+                primary_key="deployment_score",
+                fallback_key="user_value_score",
                 default=0.0,
             ),
             _ascending_metric(row, "blocked_exact_smooth_position_mae_mean"),
-            _ascending_metric(row, "sigma_calibration"),
-            _ascending_metric(row, "blocked_turnover_mean"),
+            _ascending_metric(row, "max_drawdown"),
             _descending_metric(
                 row,
                 "blocked_objective_log_wealth_minus_lambda_cvar_mean",
                 "average_log_wealth",
+            ),
+            _ascending_metric(row, "blocked_turnover_mean"),
+            _ascending_metric(row, "blocked_cvar_tail_loss_mean"),
+            -_metric_with_fallback(
+                row,
+                primary_key="deployment_economic_core_score",
+                fallback_key="user_value_economic_score",
+                default=0.0,
             ),
             str(row.get("candidate", "")),
         ),
@@ -1007,13 +1210,30 @@ def _build_production_current_selection_payload(
     *,
     accepted_result: dict[str, object] | None,
     production_result: dict[str, object] | None,
+    quick_mode: bool,
 ) -> dict[str, object]:
     if production_result is None:
+        if accepted_result is None:
+            return {
+                "selection_mode": "no_accepted_candidate",
+                "selection_rule": _PRODUCTION_CURRENT_SELECTION_RULE,
+                "selection_rule_version": _PRODUCTION_CURRENT_SELECTION_RULE_VERSION,
+                "selection_status": "no_candidate_passed_gate",
+                "decision_summary": (
+                    "production current was not updated because no candidate passed the "
+                    "optimization gate."
+                ),
+                "override_reason": None,
+                "override_priority_metrics": [],
+            }
         return {
-            "selection_mode": "no_accepted_candidate",
+            "selection_mode": "quick_mode_non_promotable",
             "selection_rule": _PRODUCTION_CURRENT_SELECTION_RULE,
             "selection_rule_version": _PRODUCTION_CURRENT_SELECTION_RULE_VERSION,
-            "decision_summary": "production current was not updated because no candidate passed the optimization gate.",
+            "selection_status": "quick_mode_non_promotable",
+            "decision_summary": (
+                "production current was not updated because this run was quick-mode exploration."
+            ),
             "override_reason": None,
             "override_priority_metrics": [],
         }
@@ -1022,24 +1242,26 @@ def _build_production_current_selection_payload(
             "selection_mode": "accepted_candidate",
             "selection_rule": _PRODUCTION_CURRENT_SELECTION_RULE,
             "selection_rule_version": _PRODUCTION_CURRENT_SELECTION_RULE_VERSION,
+            "selection_status": (
+                "accepted_and_production_same" if not quick_mode else "accepted_and_production_same"
+            ),
             "decision_summary": (
-                "production current matches the accepted candidate after user-value selection."
+                "production current matches the accepted candidate after deployment-score selection."
             ),
             "override_reason": None,
             "override_priority_metrics": [],
         }
     return {
-        "selection_mode": "auto_user_value_selection",
+        "selection_mode": "deployment_score_override",
         "selection_rule": _PRODUCTION_CURRENT_SELECTION_RULE,
         "selection_rule_version": _PRODUCTION_CURRENT_SELECTION_RULE_VERSION,
+        "selection_status": "accepted_and_production_diverged",
         "decision_summary": (
-            "production current differs from the accepted candidate because chart fidelity, "
-            "forecast stability, sigma-band reliability, and execution stability took priority "
-            "over blocked-objective rank."
+            "production current differs from the accepted candidate because deployment score took "
+            "priority over accepted rank."
         ),
         "override_reason": (
-            "production current prioritizes chart fidelity, forecast stability, sigma-band reliability, "
-            "and execution stability over blocked-objective winner"
+            "production current prioritizes deployment score over blocked-objective winner."
         ),
         "override_priority_metrics": list(_PRODUCTION_CURRENT_PRIORITY_METRICS),
     }
@@ -1159,6 +1381,101 @@ def _finite_float_or_none(value: object) -> float | None:
     return numeric_value
 
 
+def _build_runtime_policy_payload(config: TrainingConfig) -> dict[str, object]:
+    return {
+        "row_key": (
+            "state_reset_mode="
+            f"{config.evaluation_state_reset_mode}"
+            f"|cost_multiplier={float(config.policy_cost_multiplier):.12g}"
+            f"|gamma_multiplier={float(config.policy_gamma_multiplier):.12g}"
+            f"|min_policy_sigma={float(config.min_policy_sigma):.12g}"
+            f"|q_max={float(config.q_max):.12g}"
+            f"|cvar_weight={float(config.cvar_weight):.12g}"
+        ),
+        "state_reset_mode": config.evaluation_state_reset_mode,
+        "cost_multiplier": float(config.policy_cost_multiplier),
+        "gamma_multiplier": float(config.policy_gamma_multiplier),
+        "min_policy_sigma": float(config.min_policy_sigma),
+        "q_max": float(config.q_max),
+        "cvar_weight": float(config.cvar_weight),
+    }
+
+
+def _runtime_policy_alignment_score(
+    selected_row: dict[str, object],
+    applied_runtime_policy: dict[str, object],
+) -> float:
+    if not selected_row:
+        return 0.0
+    state_reset_score = float(
+        str(selected_row.get("state_reset_mode"))
+        == str(applied_runtime_policy.get("state_reset_mode"))
+    )
+    return _clamp01(
+        (0.15 * state_reset_score)
+        + (
+            0.35
+            * _ratio_alignment_score(
+                selected_row.get("cost_multiplier"),
+                applied_runtime_policy.get("cost_multiplier"),
+                max_ratio=12.0,
+            )
+        )
+        + (
+            0.15
+            * _ratio_alignment_score(
+                selected_row.get("gamma_multiplier"),
+                applied_runtime_policy.get("gamma_multiplier"),
+                max_ratio=12.0,
+            )
+        )
+        + (
+            0.15
+            * _ratio_alignment_score(
+                selected_row.get("min_policy_sigma"),
+                applied_runtime_policy.get("min_policy_sigma"),
+                max_ratio=8.0,
+            )
+        )
+        + (
+            0.10
+            * _ratio_alignment_score(
+                selected_row.get("q_max"),
+                applied_runtime_policy.get("q_max"),
+                max_ratio=3.0,
+            )
+        )
+        + (
+            0.10
+            * _ratio_alignment_score(
+                selected_row.get("cvar_weight"),
+                applied_runtime_policy.get("cvar_weight"),
+                max_ratio=16.0,
+            )
+        )
+    )
+
+
+def _ratio_alignment_score(
+    selected_value: object,
+    applied_value: object,
+    *,
+    max_ratio: float,
+) -> float:
+    selected_numeric = _finite_float_or_none(selected_value)
+    applied_numeric = _finite_float_or_none(applied_value)
+    if (
+        selected_numeric is None
+        or applied_numeric is None
+        or selected_numeric <= 0.0
+        or applied_numeric <= 0.0
+        or max_ratio <= 1.0
+    ):
+        return 0.0
+    log_ratio = abs(math.log(selected_numeric / applied_numeric))
+    return _clamp01(1.0 - (log_ratio / math.log(max_ratio)))
+
+
 def _metric_with_fallback(
     row: dict[str, object],
     *,
@@ -1235,8 +1552,7 @@ def _evaluate_optimization_gate(candidate: dict[str, object]) -> dict[str, objec
         metric = str(rule["metric"])
         operator = str(rule["operator"])
         threshold = float(rule["threshold"])
-        value = candidate.get(metric)
-        numeric_value = float(value) if value is not None else math.nan
+        numeric_value = _resolve_gate_metric_value(candidate, metric)
 
         if not math.isfinite(numeric_value):
             failed_rules.append(f"{metric}:missing")
@@ -1254,6 +1570,35 @@ def _evaluate_optimization_gate(candidate: dict[str, object]) -> dict[str, objec
         "optimization_gate_passed": passed,
         "optimization_gate_failed_rules": failed_rules,
     }
+
+
+def _resolve_gate_metric_value(candidate: dict[str, object], metric: str) -> float:
+    direct_value = _finite_float_or_none(candidate.get(metric))
+    if direct_value is not None:
+        return direct_value
+
+    if metric == "blocked_objective_log_wealth_minus_lambda_cvar_mean":
+        average_log_wealth = _finite_float_or_none(candidate.get("average_log_wealth"))
+        cvar_tail_loss = _finite_float_or_none(candidate.get("cvar_tail_loss"))
+        cvar_weight = _finite_float_or_none(candidate.get("cvar_weight"))
+        if (
+            average_log_wealth is not None
+            and cvar_tail_loss is not None
+            and cvar_weight is not None
+        ):
+            return average_log_wealth - (cvar_weight * cvar_tail_loss)
+    if metric == "blocked_directional_accuracy_mean":
+        fallback = _finite_float_or_none(candidate.get("directional_accuracy"))
+        if fallback is not None:
+            return fallback
+    if metric == "blocked_exact_smooth_position_mae_mean":
+        fallback = _finite_float_or_none(candidate.get("exact_smooth_position_mae"))
+        if fallback is not None:
+            return fallback
+        return 0.0
+    if metric == "runtime_policy_alignment_score":
+        return 1.0
+    return math.nan
 
 
 def _optimization_gate_thresholds_payload() -> dict[str, dict[str, float]]:

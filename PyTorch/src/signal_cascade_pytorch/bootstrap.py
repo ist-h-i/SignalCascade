@@ -317,11 +317,15 @@ def tune_latest_command(args) -> int:
         lookback_days=getattr(args, "csv_lookback_days", None),
         candidate_limit=getattr(args, "candidate_limit", None),
         quick_mode=bool(getattr(args, "quick_mode", False)),
+        warm_start_from_current=bool(getattr(args, "warm_start_from_current", False)),
     )
     best_candidate = manifest["best_candidate"]
     accepted_candidate = manifest.get("accepted_candidate")
     production_current_candidate = manifest.get("production_current_candidate")
     optimization_gate = manifest.get("optimization_gate", {})
+    current_updated = bool(
+        manifest.get("current_updated", isinstance(production_current_candidate, dict))
+    )
 
     print(f"current run dir: {manifest['current_dir']}")
     print(f"archive session dir: {manifest['archive_session_dir']}")
@@ -347,7 +351,9 @@ def tune_latest_command(args) -> int:
     print(f"accepted candidate: {accepted_candidate['candidate']}")
     if isinstance(production_current_candidate, dict):
         print(f"production current candidate: {production_current_candidate.get('candidate', '-')}")
-    print("current updated: True")
+    elif not current_updated:
+        print("production current candidate: none")
+    print(f"current updated: {current_updated}")
     return 0
 
 

@@ -17,7 +17,7 @@ from ..domain.entities import TrainingExample
 from ..domain.timeframes import MAIN_TIMEFRAMES, OVERLAY_TIMEFRAMES
 from ..infrastructure.ml.losses import cvar_tail_loss, total_loss
 from ..infrastructure.ml.model import SignalCascadeModel
-from ..infrastructure.persistence import save_checkpoint
+from ..infrastructure.persistence import load_checkpoint, save_checkpoint
 
 
 def examples_to_batch(
@@ -77,6 +77,8 @@ def train_model(
     examples: list[TrainingExample],
     config: TrainingConfig,
     output_dir: Path,
+    *,
+    warm_start_checkpoint_path: Path | None = None,
 ) -> tuple[SignalCascadeModel, dict[str, object]]:
     _set_seed(config.seed)
     train_examples, valid_examples = split_examples(examples, config)
@@ -88,6 +90,7 @@ def train_model(
         config=config,
         feature_dim=feature_dim,
         state_feature_dim=state_feature_dim,
+        warm_start_checkpoint_path=warm_start_checkpoint_path,
     )
     checkpoint_audit = fit_summary.get("checkpoint_audit") or _build_checkpoint_audit(
         fit_summary.get("history", []),
@@ -136,6 +139,7 @@ def train_model(
         "checkpoint_audit": checkpoint_audit,
         "history": fit_summary["history"],
         "validation_metrics": validation_metrics,
+        "warm_start": dict(fit_summary.get("warm_start") or {}),
     }
     return model, summary
 
@@ -187,12 +191,17 @@ def evaluate_model(
     turnover = 0.0
     equity = 0.0
     peak_equity = 0.0
+    interval_1sigma_hits = 0
+    interval_2sigma_hits = 0
     no_trade_hits = 0
     log_wealth_clamp_hits = 0
     exact_smooth_horizon_matches = 0
     exact_smooth_no_trade_matches = 0
     exact_smooth_position_abs_error = 0.0
     exact_smooth_utility_regret = 0.0
+    pit_values: list[float] = []
+    normalized_abs_errors: list[float] = []
+    gaussian_nll_values: list[float] = []
     state_reset_count = 0
     session_count = 0
     window_count = 0
@@ -255,6 +264,9 @@ def evaluate_model(
             realized_return = float(example.returns_target[selected_index])
             selected_forecast_mean = float(forecast_mean[selected_index].item())
             selected_forecast_sigma = float(forecast_sigma[selected_index].item())
+            sigma_safe = max(selected_forecast_sigma, 1e-6)
+            forecast_error = realized_return - selected_forecast_mean
+            z_score = forecast_error / sigma_safe
             trade_cost = float(selected_row["cost"]) * abs(float(decision["trade_delta"]))
             pnl = (float(decision["position"]) * realized_return) - trade_cost
             equity += pnl
@@ -266,6 +278,13 @@ def evaluate_model(
             drawdown_values.append(max_drawdown)
             mu_errors.append(abs(realized_return - selected_forecast_mean))
             sigma_errors.append(abs(abs(realized_return - selected_forecast_mean) - selected_forecast_sigma))
+            interval_1sigma_hits += int(abs(forecast_error) <= sigma_safe)
+            interval_2sigma_hits += int(abs(forecast_error) <= 2.0 * sigma_safe)
+            pit_values.append(_gaussian_pit(z_score))
+            normalized_abs_errors.append(abs(z_score))
+            gaussian_nll_values.append(
+                0.5 * math.log(2.0 * math.pi * (sigma_safe**2)) + (0.5 * (z_score**2))
+            )
             tradeability_gates.append(gate)
             shape_entropies.append(float(outputs["shape_entropy"][0].item()))
             policy_scores.append(float(decision["selected_policy_utility"]))
@@ -316,6 +335,20 @@ def evaluate_model(
     mu_calibration = sum(mu_errors) / max(total_samples, 1)
     sigma_calibration = sum(sigma_errors) / max(total_samples, 1)
     direction_accuracy = direction_correct / max(total_samples, 1)
+    interval_1sigma_coverage = interval_1sigma_hits / max(total_samples, 1)
+    interval_2sigma_coverage = interval_2sigma_hits / max(total_samples, 1)
+    pit_mean = sum(pit_values) / max(len(pit_values), 1)
+    pit_variance = (
+        sum((value - pit_mean) ** 2 for value in pit_values) / max(len(pit_values), 1)
+    )
+    normalized_abs_error = sum(normalized_abs_errors) / max(len(normalized_abs_errors), 1)
+    gaussian_nll = sum(gaussian_nll_values) / max(len(gaussian_nll_values), 1)
+    probabilistic_calibration_score = _probabilistic_calibration_score(
+        interval_1sigma_coverage=interval_1sigma_coverage,
+        interval_2sigma_coverage=interval_2sigma_coverage,
+        pit_mean=pit_mean,
+        pit_variance=pit_variance,
+    )
     cvar_tail = float(
         cvar_tail_loss(
             torch.tensor([-value for value in pnl_values], dtype=torch.float32),
@@ -364,6 +397,13 @@ def evaluate_model(
         "sigma_calibration": sigma_calibration,
         "sigma_t_calibration": sigma_calibration,
         "directional_accuracy": direction_accuracy,
+        "interval_1sigma_coverage": interval_1sigma_coverage,
+        "interval_2sigma_coverage": interval_2sigma_coverage,
+        "pit_mean": pit_mean,
+        "pit_variance": pit_variance,
+        "normalized_abs_error": normalized_abs_error,
+        "gaussian_nll": gaussian_nll,
+        "probabilistic_calibration_score": probabilistic_calibration_score,
         "exact_smooth_horizon_agreement": exact_smooth_horizon_matches / max(total_samples, 1),
         "exact_smooth_no_trade_agreement": exact_smooth_no_trade_matches / max(total_samples, 1),
         "exact_smooth_position_mae": exact_smooth_position_abs_error / max(total_samples, 1),
@@ -446,9 +486,24 @@ def _evaluate_blocked_epoch_metrics(
     ]
     cvar_values = [float(metrics["cvar_tail_loss"]) for metrics in fold_metrics]
     turnover_values = [float(metrics["turnover"]) for metrics in fold_metrics]
+    interval_1sigma_values = [
+        float(metrics["interval_1sigma_coverage"])
+        for metrics in fold_metrics
+        if "interval_1sigma_coverage" in metrics
+    ]
+    interval_2sigma_values = [
+        float(metrics["interval_2sigma_coverage"])
+        for metrics in fold_metrics
+        if "interval_2sigma_coverage" in metrics
+    ]
+    probabilistic_score_values = [
+        float(metrics["probabilistic_calibration_score"])
+        for metrics in fold_metrics
+        if "probabilistic_calibration_score" in metrics
+    ]
     blocked_average_log_wealth = sum(average_log_wealth_values) / len(average_log_wealth_values)
     blocked_cvar_tail_loss = sum(cvar_values) / len(cvar_values)
-    return {
+    blocked_metrics = {
         "validation_blocked_fold_count": float(len(folds)),
         "validation_blocked_average_log_wealth_mean": blocked_average_log_wealth,
         "validation_blocked_cvar_tail_loss_mean": blocked_cvar_tail_loss,
@@ -458,6 +513,19 @@ def _evaluate_blocked_epoch_metrics(
             - (float(config.cvar_weight) * blocked_cvar_tail_loss)
         ),
     }
+    if interval_1sigma_values:
+        blocked_metrics["validation_blocked_interval_1sigma_coverage_mean"] = (
+            sum(interval_1sigma_values) / len(interval_1sigma_values)
+        )
+    if interval_2sigma_values:
+        blocked_metrics["validation_blocked_interval_2sigma_coverage_mean"] = (
+            sum(interval_2sigma_values) / len(interval_2sigma_values)
+        )
+    if probabilistic_score_values:
+        blocked_metrics["validation_blocked_probabilistic_calibration_score_mean"] = (
+            sum(probabilistic_score_values) / len(probabilistic_score_values)
+        )
+    return blocked_metrics
 
 
 def _rolling_epoch_metric_mean(
@@ -518,6 +586,7 @@ def _fit_model(
     config: TrainingConfig,
     feature_dim: int,
     state_feature_dim: int,
+    warm_start_checkpoint_path: Path | None = None,
 ) -> tuple[SignalCascadeModel, dict[str, object]]:
     model = SignalCascadeModel(
         feature_dim=feature_dim,
@@ -530,6 +599,10 @@ def _fit_model(
         dropout=config.dropout,
         tie_policy_to_forecast_head=config.tie_policy_to_forecast_head,
         disable_overlay_branch=config.disable_overlay_branch,
+    )
+    warm_start = _try_restore_warm_start_checkpoint(
+        model,
+        warm_start_checkpoint_path=warm_start_checkpoint_path,
     )
     optimizer = torch.optim.AdamW(
         model.parameters(),
@@ -578,6 +651,18 @@ def _fit_model(
                 "validation_exact_cvar_tail_loss": exact_metrics["cvar_tail_loss"],
                 "validation_exact_sigma_calibration": exact_metrics["sigma_calibration"],
                 "validation_exact_position_mae": exact_metrics["exact_smooth_position_mae"],
+                "validation_exact_interval_1sigma_coverage": exact_metrics.get(
+                    "interval_1sigma_coverage",
+                    0.0,
+                ),
+                "validation_exact_interval_2sigma_coverage": exact_metrics.get(
+                    "interval_2sigma_coverage",
+                    0.0,
+                ),
+                "validation_exact_probabilistic_calibration_score": exact_metrics.get(
+                    "probabilistic_calibration_score",
+                    0.0,
+                ),
                 "validation_selection_score": exact_metrics["checkpoint_selection_score"],
                 **blocked_metrics,
             }
@@ -598,7 +683,36 @@ def _fit_model(
         "best_epoch": float(best_epoch),
         "checkpoint_audit": _build_checkpoint_audit(history, config),
         "history": history,
+        "warm_start": warm_start,
     }
+
+
+def _try_restore_warm_start_checkpoint(
+    model: SignalCascadeModel,
+    *,
+    warm_start_checkpoint_path: Path | None,
+) -> dict[str, object]:
+    if warm_start_checkpoint_path is None:
+        return {
+            "requested": False,
+            "applied": False,
+            "checkpoint_path": None,
+            "fallback_reason": None,
+        }
+    checkpoint_path = warm_start_checkpoint_path.expanduser().resolve()
+    payload = {
+        "requested": True,
+        "applied": False,
+        "checkpoint_path": str(checkpoint_path),
+        "fallback_reason": None,
+    }
+    try:
+        load_checkpoint(checkpoint_path, model)
+    except (FileNotFoundError, RuntimeError, KeyError, ValueError) as exc:
+        payload["fallback_reason"] = str(exc)
+        return payload
+    payload["applied"] = True
+    return payload
 
 
 def _build_checkpoint_audit(
@@ -959,6 +1073,39 @@ def _utility_score(
         + (0.25 * _clamp(direction_accuracy))
         + (0.20 * _clamp(1.0 - no_trade_rate))
         + (0.15 * _clamp(shape_gate_usage))
+    )
+
+
+def _gaussian_pit(z_score: float) -> float:
+    value = 0.5 * (1.0 + math.erf(float(z_score) / math.sqrt(2.0)))
+    return _clamp(value, lower=1e-6, upper=1.0 - 1e-6)
+
+
+def _probabilistic_calibration_score(
+    *,
+    interval_1sigma_coverage: float,
+    interval_2sigma_coverage: float,
+    pit_mean: float,
+    pit_variance: float,
+) -> float:
+    coverage_1sigma_target = 0.6826894921370859
+    coverage_2sigma_target = 0.9544997361036416
+    uniform_pit_variance = 1.0 / 12.0
+    coverage_1sigma_score = _clamp(
+        1.0 - (abs(interval_1sigma_coverage - coverage_1sigma_target) / 0.35)
+    )
+    coverage_2sigma_score = _clamp(
+        1.0 - (abs(interval_2sigma_coverage - coverage_2sigma_target) / 0.35)
+    )
+    pit_mean_score = _clamp(1.0 - (abs(pit_mean - 0.5) / 0.5))
+    pit_variance_score = _clamp(
+        1.0 - (abs(pit_variance - uniform_pit_variance) / uniform_pit_variance)
+    )
+    return (
+        (0.35 * coverage_1sigma_score)
+        + (0.35 * coverage_2sigma_score)
+        + (0.15 * pit_mean_score)
+        + (0.15 * pit_variance_score)
     )
 
 

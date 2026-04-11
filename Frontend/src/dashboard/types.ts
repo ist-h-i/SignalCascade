@@ -80,6 +80,72 @@ export type ValidationMetrics = {
   minPolicySigma: number | null
   turnover: number | null
   maxDrawdown: number | null
+  interval1SigmaCoverage: number | null
+  interval2SigmaCoverage: number | null
+  pitMean: number | null
+  pitVariance: number | null
+  normalizedAbsError: number | null
+  gaussianNll: number | null
+  probabilisticCalibrationScore: number | null
+}
+
+export type BlockedMetrics = {
+  stateResetMode: string | null
+  averageLogWealthMean: number | null
+  turnoverMean: number | null
+  directionalAccuracyMean: number | null
+  exactSmoothPositionMaeMean: number | null
+  cvarTailLossMean: number | null
+  objectiveLogWealthMinusLambdaCvarMean: number | null
+  interval1SigmaCoverageMean: number | null
+  interval2SigmaCoverageMean: number | null
+  probabilisticCalibrationScoreMean: number | null
+}
+
+export type LiveMetrics = {
+  sampleCount: number
+  directionalAccuracy: number | null
+  interval1SigmaCoverage: number | null
+  interval2SigmaCoverage: number | null
+  meanAbsoluteErrorPct: number | null
+  probabilisticCalibrationScore: number | null
+  selectedActualReturnPct: number | null
+  selectedRangeCaptured: boolean | null
+}
+
+export type StructureMetrics = {
+  selectedRowMatchesRuntime: boolean
+  runtimePolicyAlignmentScore: number
+  selectedRowRole: string | null
+  dominantShapeClass: string | null
+  dominantShapeClassShare: number | null
+  activeShapeCount: number
+  policyHorizonDistribution: Array<{
+    horizon: number
+    share: number
+  }>
+  dominantHorizon: number | null
+  dominantHorizonShare: number | null
+}
+
+export type HorizonDiagnosticRow = {
+  horizon: number
+  hours: number
+  sampleCount: number | null
+  policyHorizonShare: number | null
+  selectionRate: number | null
+  meanPolicyUtility: number | null
+  meanPosition: number | null
+  muCalibration: number | null
+  sigmaCalibration: number | null
+  directionalAccuracy: number | null
+  interval1SigmaCoverage: number | null
+  interval2SigmaCoverage: number | null
+  pitMean: number | null
+  pitVariance: number | null
+  normalizedAbsError: number | null
+  gaussianNll: number | null
+  probabilisticCalibrationScore: number | null
 }
 
 export type NarrativeSegment = {
@@ -130,6 +196,7 @@ export type DashboardData = {
   }
   governance?: {
     selectionMode?: string | null
+    selectionStatus?: string | null
     overrideReason?: string | null
     productionCurrentCandidate?: string | null
     acceptedCandidate?: string | null
@@ -191,6 +258,10 @@ export type DashboardData = {
   metrics: {
     history: MetricPoint[]
     validation: ValidationMetrics | null
+    blocked?: BlockedMetrics | null
+    live?: LiveMetrics | null
+    structure?: StructureMetrics | null
+    horizonDiagnostics?: HorizonDiagnosticRow[]
   }
   narrative: {
     title: string

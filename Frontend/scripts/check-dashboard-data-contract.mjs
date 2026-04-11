@@ -20,6 +20,18 @@ if (dashboardData.schemaVersion !== 6) {
   throw new Error(`dashboard-data schemaVersion must be 6, received ${dashboardData.schemaVersion ?? 'null'}`)
 }
 
+if (!dashboardData.metrics?.live || typeof dashboardData.metrics.live !== 'object') {
+  throw new Error('dashboard-data metrics.live must be present')
+}
+
+if (!dashboardData.metrics?.structure || typeof dashboardData.metrics.structure !== 'object') {
+  throw new Error('dashboard-data metrics.structure must be present')
+}
+
+if (!Array.isArray(dashboardData.metrics?.horizonDiagnostics) || dashboardData.metrics.horizonDiagnostics.length === 0) {
+  throw new Error('dashboard-data metrics.horizonDiagnostics must be a non-empty array')
+}
+
 const effectivePriceScale = toPositiveNumber(dashboardData.run?.effectivePriceScale)
 if (effectivePriceScale === null) {
   throw new Error('dashboard-data run.effectivePriceScale must be a positive number')
@@ -116,6 +128,15 @@ const expectedAcceptedCandidate = toNonEmptyString(sourceMeta.current_selection_
 if (expectedAcceptedCandidate !== null && dashboardData.governance?.acceptedCandidate !== expectedAcceptedCandidate) {
   throw new Error(
     `dashboard-data acceptedCandidate mismatch: dashboard=${dashboardData.governance?.acceptedCandidate ?? 'null'} current=${expectedAcceptedCandidate}`,
+  )
+}
+const expectedSelectionStatus = toNonEmptyString(sourceMeta.current_selection_governance?.selection_status)
+if (
+  expectedSelectionStatus !== null &&
+  dashboardData.governance?.selectionStatus !== expectedSelectionStatus
+) {
+  throw new Error(
+    `dashboard-data selectionStatus mismatch: dashboard=${dashboardData.governance?.selectionStatus ?? 'null'} current=${expectedSelectionStatus}`,
   )
 }
 

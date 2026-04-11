@@ -1,3 +1,4 @@
 output/
 workspace.pen
 /Frontend/.npm-cache
+/.playwright-cli

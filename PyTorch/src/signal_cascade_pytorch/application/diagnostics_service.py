@@ -5,6 +5,7 @@ from dataclasses import replace
 from datetime import datetime, timezone
 import hashlib
 import json
+import math
 from pathlib import Path
 from typing import Sequence
 
@@ -13,6 +14,9 @@ import torch
 from .config import TrainingConfig
 from .policy_service import apply_selection_policy, policy_utility, smooth_policy_distribution
 from .training_service import (
+    _gaussian_pit,
+    _probabilistic_calibration_score,
+    _sign_from_value,
     _should_reset_recurrent_context,
     evaluate_model,
     examples_to_batch,
@@ -108,6 +112,12 @@ def export_review_diagnostics(
         },
         "validation": diagnostics["summary"],
         "state_vector_summary": diagnostics.get("state_vector_summary", {}),
+        "shape_usage_summary": _build_shape_usage_summary(
+            diagnostics.get("state_vector_summary", {})
+        ),
+        "policy_horizon_summary": _build_policy_horizon_summary(
+            diagnostics.get("summary", {})
+        ),
         "stateful_evaluation": stateful_evaluation,
         "blocked_walk_forward_evaluation": blocked_walk_forward_evaluation,
         "policy_calibration_sweep": policy_calibration_sweep,
@@ -150,6 +160,14 @@ def build_validation_diagnostics(
             "utility_sum": 0.0,
             "position_sum": 0.0,
             "abs_error_sum": 0.0,
+            "sigma_error_sum": 0.0,
+            "direction_correct": 0,
+            "interval_1sigma_hits": 0,
+            "interval_2sigma_hits": 0,
+            "pit_sum": 0.0,
+            "pit_sq_sum": 0.0,
+            "gaussian_nll_sum": 0.0,
+            "normalized_abs_error_sum": 0.0,
         }
         for horizon in config.horizons
     }
@@ -247,11 +265,32 @@ def build_validation_diagnostics(
                 actual_return = float(example.returns_target[horizon_index])
                 forecast_mu = float(forecast_mean[horizon_index].item())
                 forecast_sigma_value = float(forecast_sigma[horizon_index].item())
+                sigma_safe = max(forecast_sigma_value, 1e-6)
+                forecast_error = actual_return - forecast_mu
+                z_score = forecast_error / sigma_safe
+                pit_value = _gaussian_pit(z_score)
+                inside_one_sigma = int(abs(forecast_error) <= sigma_safe)
+                inside_two_sigma = int(abs(forecast_error) <= 2.0 * sigma_safe)
                 horizon_stats[horizon_key]["count"] += 1
                 horizon_stats[horizon_key]["selected"] += int(int(row["horizon"]) == selected_horizon)
                 horizon_stats[horizon_key]["utility_sum"] += float(row["policy_utility"])
                 horizon_stats[horizon_key]["position_sum"] += float(row["position"])
-                horizon_stats[horizon_key]["abs_error_sum"] += abs(actual_return - forecast_mu)
+                horizon_stats[horizon_key]["abs_error_sum"] += abs(forecast_error)
+                horizon_stats[horizon_key]["sigma_error_sum"] += abs(
+                    abs(forecast_error) - forecast_sigma_value
+                )
+                horizon_stats[horizon_key]["direction_correct"] += int(
+                    _sign_from_value(forecast_mu) == _sign_from_value(actual_return)
+                )
+                horizon_stats[horizon_key]["interval_1sigma_hits"] += inside_one_sigma
+                horizon_stats[horizon_key]["interval_2sigma_hits"] += inside_two_sigma
+                horizon_stats[horizon_key]["pit_sum"] += pit_value
+                horizon_stats[horizon_key]["pit_sq_sum"] += pit_value * pit_value
+                horizon_stats[horizon_key]["gaussian_nll_sum"] += (
+                    0.5 * math.log(2.0 * math.pi * (sigma_safe**2))
+                    + (0.5 * (z_score**2))
+                )
+                horizon_stats[horizon_key]["normalized_abs_error_sum"] += abs(z_score)
                 validation_rows.append(
                     {
                         "sample_id": sample_id,
@@ -284,6 +323,12 @@ def build_validation_diagnostics(
                         "policy_horizon_selected": int(int(row["horizon"]) == selected_horizon),
                         "selected": int(int(row["horizon"]) == selected_horizon),
                         "no_trade_band": int(bool(row["no_trade_band"])),
+                        "abs_error": abs(forecast_error),
+                        "sigma_abs_error": abs(abs(forecast_error) - forecast_sigma_value),
+                        "normalized_abs_error": abs(z_score),
+                        "pit": pit_value,
+                        "inside_one_sigma": inside_one_sigma,
+                        "inside_two_sigma": inside_two_sigma,
                     }
                 )
 
@@ -324,6 +369,25 @@ def build_validation_diagnostics(
                     "selected_mu_t_tilde": float(selected_row["mu_t_tilde"]),
                     "selected_policy_utility": float(decision["selected_policy_utility"]),
                     "policy_score": float(decision["selected_policy_utility"]),
+                    "selected_abs_error": abs(realized_return - float(forecast_mean[selected_index].item())),
+                    "selected_sigma_abs_error": abs(
+                        abs(realized_return - float(forecast_mean[selected_index].item()))
+                        - float(forecast_sigma[selected_index].item())
+                    ),
+                    "selected_pit": _gaussian_pit(
+                        (
+                            realized_return - float(forecast_mean[selected_index].item())
+                        )
+                        / max(float(forecast_sigma[selected_index].item()), 1e-6)
+                    ),
+                    "selected_inside_one_sigma": int(
+                        abs(realized_return - float(forecast_mean[selected_index].item()))
+                        <= max(float(forecast_sigma[selected_index].item()), 1e-6)
+                    ),
+                    "selected_inside_two_sigma": int(
+                        abs(realized_return - float(forecast_mean[selected_index].item()))
+                        <= (2.0 * max(float(forecast_sigma[selected_index].item()), 1e-6))
+                    ),
                     "tradeability_gate": gate,
                     "shape_entropy": entropy,
                     "realized_return": realized_return,
@@ -335,18 +399,41 @@ def build_validation_diagnostics(
             previous_example = example
             sample_id += 1
 
-    horizon_diag = [
-        {
-            "horizon": int(horizon),
-            "sample_count": int(stats["count"]),
-            "policy_horizon_share": int(stats["selected"]) / max(int(stats["count"]), 1),
-            "selection_rate": int(stats["selected"]) / max(int(stats["count"]), 1),
-            "mean_policy_utility": float(stats["utility_sum"]) / max(int(stats["count"]), 1),
-            "mean_position": float(stats["position_sum"]) / max(int(stats["count"]), 1),
-            "mu_calibration": float(stats["abs_error_sum"]) / max(int(stats["count"]), 1),
-        }
-        for horizon, stats in sorted(horizon_stats.items(), key=lambda item: int(item[0]))
-    ]
+    horizon_diag = []
+    for horizon, stats in sorted(horizon_stats.items(), key=lambda item: int(item[0])):
+        sample_count = max(int(stats["count"]), 1)
+        pit_mean = float(stats["pit_sum"]) / sample_count
+        pit_variance = max(
+            (float(stats["pit_sq_sum"]) / sample_count) - (pit_mean**2),
+            0.0,
+        )
+        interval_1sigma_coverage = float(stats["interval_1sigma_hits"]) / sample_count
+        interval_2sigma_coverage = float(stats["interval_2sigma_hits"]) / sample_count
+        horizon_diag.append(
+            {
+                "horizon": int(horizon),
+                "sample_count": int(stats["count"]),
+                "policy_horizon_share": int(stats["selected"]) / sample_count,
+                "selection_rate": int(stats["selected"]) / sample_count,
+                "mean_policy_utility": float(stats["utility_sum"]) / sample_count,
+                "mean_position": float(stats["position_sum"]) / sample_count,
+                "mu_calibration": float(stats["abs_error_sum"]) / sample_count,
+                "sigma_calibration": float(stats["sigma_error_sum"]) / sample_count,
+                "directional_accuracy": float(stats["direction_correct"]) / sample_count,
+                "interval_1sigma_coverage": interval_1sigma_coverage,
+                "interval_2sigma_coverage": interval_2sigma_coverage,
+                "pit_mean": pit_mean,
+                "pit_variance": pit_variance,
+                "normalized_abs_error": float(stats["normalized_abs_error_sum"]) / sample_count,
+                "gaussian_nll": float(stats["gaussian_nll_sum"]) / sample_count,
+                "probabilistic_calibration_score": _probabilistic_calibration_score(
+                    interval_1sigma_coverage=interval_1sigma_coverage,
+                    interval_2sigma_coverage=interval_2sigma_coverage,
+                    pit_mean=pit_mean,
+                    pit_variance=pit_variance,
+                ),
+            }
+        )
     state_vector_summary = _build_state_vector_summary(
         sample_count=sample_id,
         state_component_dims=state_component_dims,
@@ -370,6 +457,58 @@ def build_validation_snapshots(
 ) -> list[dict[str, object]]:
     diagnostics = build_validation_diagnostics(model, validation_examples, config)
     return diagnostics["policy_summary"]
+
+
+def _build_shape_usage_summary(state_vector_summary: dict[str, object]) -> dict[str, object]:
+    top_class_share = state_vector_summary.get("shape_posterior_top_class_share")
+    resolved_top_class_share = (
+        dict(top_class_share) if isinstance(top_class_share, dict) else {}
+    )
+    if not resolved_top_class_share:
+        return {
+            "dominant_class": None,
+            "dominant_share": None,
+            "collapsed": None,
+        }
+    dominant_class, dominant_share = max(
+        resolved_top_class_share.items(),
+        key=lambda item: float(item[1]),
+    )
+    dominant_share_value = float(dominant_share)
+    return {
+        "dominant_class": str(dominant_class),
+        "dominant_share": dominant_share_value,
+        "collapsed": dominant_share_value >= 0.70,
+    }
+
+
+def _build_policy_horizon_summary(validation_summary: dict[str, object]) -> dict[str, object]:
+    distribution_payload = validation_summary.get("policy_horizon_distribution")
+    distribution = (
+        {
+            str(key): float(value)
+            for key, value in dict(distribution_payload).items()
+        }
+        if isinstance(distribution_payload, dict)
+        else {}
+    )
+    if not distribution:
+        return {
+            "dominant_horizon": None,
+            "dominant_share": None,
+            "collapsed": None,
+        }
+    dominant_horizon, dominant_share = max(
+        distribution.items(),
+        key=lambda item: float(item[1]),
+    )
+    dominant_share_value = float(dominant_share)
+    return {
+        "distribution": distribution,
+        "dominant_horizon": int(dominant_horizon),
+        "dominant_share": dominant_share_value,
+        "collapsed": dominant_share_value >= 0.75,
+    }
 
 
 def _build_blocked_walk_forward_evaluation(
@@ -408,12 +547,22 @@ def _build_blocked_walk_forward_evaluation(
                     "turnover": float(metrics["turnover"]),
                     "directional_accuracy": float(metrics["directional_accuracy"]),
                     "exact_smooth_position_mae": float(metrics["exact_smooth_position_mae"]),
+                    "interval_1sigma_coverage": float(metrics["interval_1sigma_coverage"]),
+                    "interval_2sigma_coverage": float(metrics["interval_2sigma_coverage"]),
+                    "probabilistic_calibration_score": float(
+                        metrics["probabilistic_calibration_score"]
+                    ),
                 }
             )
         wealth_values = [float(row["average_log_wealth"]) for row in fold_rows]
         turnover_values = [float(row["turnover"]) for row in fold_rows]
         direction_values = [float(row["directional_accuracy"]) for row in fold_rows]
         position_mae_values = [float(row["exact_smooth_position_mae"]) for row in fold_rows]
+        interval_1sigma_values = [float(row["interval_1sigma_coverage"]) for row in fold_rows]
+        interval_2sigma_values = [float(row["interval_2sigma_coverage"]) for row in fold_rows]
+        probabilistic_score_values = [
+            float(row["probabilistic_calibration_score"]) for row in fold_rows
+        ]
         mode_summary = {
             "fold_count": len(fold_rows),
             "average_log_wealth_mean": sum(wealth_values) / max(len(wealth_values), 1),
@@ -422,6 +571,12 @@ def _build_blocked_walk_forward_evaluation(
             "turnover_mean": sum(turnover_values) / max(len(turnover_values), 1),
             "directional_accuracy_mean": sum(direction_values) / max(len(direction_values), 1),
             "exact_smooth_position_mae_mean": sum(position_mae_values) / max(len(position_mae_values), 1),
+            "interval_1sigma_coverage_mean": sum(interval_1sigma_values)
+            / max(len(interval_1sigma_values), 1),
+            "interval_2sigma_coverage_mean": sum(interval_2sigma_values)
+            / max(len(interval_2sigma_values), 1),
+            "probabilistic_calibration_score_mean": sum(probabilistic_score_values)
+            / max(len(probabilistic_score_values), 1),
             "folds": fold_rows,
         }
         state_reset_modes[mode] = mode_summary
@@ -566,6 +721,15 @@ def _build_policy_calibration_sweep(
                                     "blocked_exact_smooth_position_mae_mean": float(
                                         blocked_metrics["exact_smooth_position_mae_mean"]
                                     ),
+                                    "blocked_interval_1sigma_coverage_mean": float(
+                                        blocked_metrics["interval_1sigma_coverage_mean"]
+                                    ),
+                                    "blocked_interval_2sigma_coverage_mean": float(
+                                        blocked_metrics["interval_2sigma_coverage_mean"]
+                                    ),
+                                    "blocked_probabilistic_calibration_score_mean": float(
+                                        blocked_metrics["probabilistic_calibration_score_mean"]
+                                    ),
                                     "blocked_objective_log_wealth_minus_lambda_cvar_mean": float(
                                         blocked_metrics[
                                             "objective_log_wealth_minus_lambda_cvar_mean"
@@ -626,6 +790,11 @@ def _evaluate_blocked_policy_sweep_row(
                 "turnover": float(metrics["turnover"]),
                 "directional_accuracy": float(metrics["directional_accuracy"]),
                 "exact_smooth_position_mae": float(metrics["exact_smooth_position_mae"]),
+                "interval_1sigma_coverage": float(metrics["interval_1sigma_coverage"]),
+                "interval_2sigma_coverage": float(metrics["interval_2sigma_coverage"]),
+                "probabilistic_calibration_score": float(
+                    metrics["probabilistic_calibration_score"]
+                ),
                 "objective_log_wealth_minus_lambda_cvar": objective_value,
             }
         )
@@ -640,6 +809,18 @@ def _evaluate_blocked_policy_sweep_row(
         "exact_smooth_position_mae_mean": _policy_sweep_fold_mean(
             fold_rows,
             "exact_smooth_position_mae",
+        ),
+        "interval_1sigma_coverage_mean": _policy_sweep_fold_mean(
+            fold_rows,
+            "interval_1sigma_coverage",
+        ),
+        "interval_2sigma_coverage_mean": _policy_sweep_fold_mean(
+            fold_rows,
+            "interval_2sigma_coverage",
+        ),
+        "probabilistic_calibration_score_mean": _policy_sweep_fold_mean(
+            fold_rows,
+            "probabilistic_calibration_score",
         ),
         "objective_log_wealth_minus_lambda_cvar_mean": _policy_sweep_fold_mean(
             fold_rows,

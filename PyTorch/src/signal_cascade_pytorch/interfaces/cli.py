@@ -216,6 +216,12 @@ def build_parser() -> argparse.ArgumentParser:
         default=False,
         help="Evaluate only the first few generated candidates to get a fast blocked-first smoke run.",
     )
+    tune_parser.add_argument(
+        "--warm-start-from-current",
+        action=argparse.BooleanOptionalAction,
+        default=False,
+        help="Warm-start compatible tune-latest candidates from artifacts/.../current/model.pt.",
+    )
     tune_parser.add_argument("--epochs", type=int, default=None)
     tune_parser.add_argument("--batch-size", type=int, default=None)
     tune_parser.add_argument("--learning-rate", type=float, default=None)

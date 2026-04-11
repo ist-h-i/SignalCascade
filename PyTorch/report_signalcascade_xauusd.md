@@ -1,23 +1,23 @@
 # SignalCascade Research Report
 
-- Generated (JST): `2026-04-07T17:49:26.728497+09:00`
+- Generated (JST): `2026-04-08T20:39:12.566188+09:00`
 - Policy mode: `shape_aware_profit_maximization`
 
 ## Artifact
 - kind: `training_run`
-- artifact id: `69a9472e7bd04425b770d9983912e657e05d205aab2cda6a0c1a4946f216e17d`
-- source kind / path: `csv` / `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/archive/session_20260407T041853Z/candidate_17/data_snapshot.csv`
+- artifact id: `5c1e54f6411a4241f015b0412023ff1fef98c39d5eed050d296dc834b2910375`
+- source kind / path: `csv` / `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/archive/session_20260408T075001Z/candidate_03/data_snapshot.csv`
 - config origin: `explicit_v2`
-- git head / dirty: `6183a6d4b44c9270756e1e501099cc1979a31ef7` / `True`
-- git tree sha: `af6591a7c9ba9ddecdbc8cfe3471cd8ceae962fa`
-- data snapshot sha256: `d50093565e1368c3`
+- git head / dirty: `7988dd86eab7e75c8c4a3266780843f7f3707cbf` / `True`
+- git tree sha: `b58fa64ee0bd77b74d903f602a020005ea9192a5`
+- data snapshot sha256: `83aec529c968886d`
 - sub-artifact lineage: `analysis.json:regenerated, config.json:generated, data_snapshot.csv:generated, forecast_summary.json:generated, horizon_diag.csv:generated, manifest.json:generated, metrics.json:generated, policy_summary.csv:generated, prediction.json:generated, research_report.md:regenerated, source.json:generated, validation_rows.csv:generated, validation_summary.json:generated`
 
 ## Dataset
-- sample_count: `184`
-- effective_sample_count / purged_samples: `154` / `30`
-- train / validation: `118` / `36`
-- source_rows_original / used: `2902` / `2902`
+- sample_count: `1392`
+- effective_sample_count / purged_samples: `1362` / `30`
+- train / validation: `1084` / `278`
+- source_rows_original / used: `11608` / `11608`
 
 ## Contract
 - current alias role: `production_current`
@@ -28,81 +28,81 @@
 - source-of-truth summary: `current/config.json, current/prediction.json, current/forecast_summary.json, current/source.json, current/research_report.md are authoritative. PyTorch/report_signalcascade_xauusd.md is a synchronized mirror of current/research_report.md.`
 
 ## Training
-- best_validation_loss: `-0.173533`
-- best_epoch: `1`
-- best_epoch_by_exact_log_wealth: `10`
-- best_epoch_by_exact_log_wealth_minus_lambda_cvar: `10`
-- best_epoch_by_blocked_objective_log_wealth_minus_lambda_cvar: `10`
-- selected_epoch_rank_by_exact_log_wealth / delta_to_best_exact_log_wealth: `2` / `0.003966`
-- selected_epoch_rank_by_exact_log_wealth_minus_lambda_cvar / delta_to_best_exact_log_wealth_minus_lambda_cvar: `2` / `0.002833`
-- selected_epoch_rank_by_blocked_objective_log_wealth_minus_lambda_cvar / delta_to_best_blocked_objective_log_wealth_minus_lambda_cvar: `2` / `0.003314`
+- best_validation_loss: `0.071385`
+- best_epoch: `6`
+- best_epoch_by_exact_log_wealth: `1`
+- best_epoch_by_exact_log_wealth_minus_lambda_cvar: `6`
+- best_epoch_by_blocked_objective_log_wealth_minus_lambda_cvar: `6`
+- selected_epoch_rank_by_exact_log_wealth / delta_to_best_exact_log_wealth: `3` / `0.000233`
+- selected_epoch_rank_by_exact_log_wealth_minus_lambda_cvar / delta_to_best_exact_log_wealth_minus_lambda_cvar: `1` / `0.000000`
+- selected_epoch_rank_by_blocked_objective_log_wealth_minus_lambda_cvar / delta_to_best_blocked_objective_log_wealth_minus_lambda_cvar: `1` / `0.000000`
 - epochs / warmup_epochs / oof_epochs: `14` / `2` / `3`
 - walk_forward_folds: `3`
 - shape_classes / state_dim: `6` / `24`
 
 ## Validation
-- average_log_wealth: `0.001921`
-- realized_pnl_per_anchor: `0.001929`
-- cvar_tail_loss: `0.005327`
-- max_drawdown: `0.017009`
-- no_trade_band_hit_rate: `0.361111`
-- exact_smooth_horizon_agreement / no_trade_agreement: `0.972222` / `1.000000`
-- exact_smooth_position_mae / utility_regret: `0.014458` / `0.000116`
-- shape_gate_usage: `0.503692`
-- expert_entropy: `0.894631`
-- shape_posterior_top_class_share: `{'1': 1.0}`
-- mu_calibration / sigma_calibration: `0.181520` / `0.134025`
+- average_log_wealth: `0.000010`
+- realized_pnl_per_anchor: `0.000010`
+- cvar_tail_loss: `0.001834`
+- max_drawdown: `0.019459`
+- no_trade_band_hit_rate: `0.071942`
+- exact_smooth_horizon_agreement / no_trade_agreement: `0.956835` / `1.000000`
+- exact_smooth_position_mae / utility_regret: `0.010895` / `0.000392`
+- shape_gate_usage: `0.493351`
+- expert_entropy: `0.147324`
+- shape_posterior_top_class_share: `{'1': 0.8525179856115108, '5': 0.1474820143884892}`
+- mu_calibration / sigma_calibration: `0.054697` / `0.076400`
 - log_wealth_clamp_hit_rate / state_reset_mode: `0.000000` / `carry_on`
-- project_value_score / utility_score: `0.606620` / `0.612404`
+- project_value_score / utility_score: `0.679322` / `0.593646`
 
 ## Evaluation
-- carry_on average_log_wealth: `0.001921`
-- reset_each_example average_log_wealth: `0.000172`
-- reset_each_session_or_window average_log_wealth: `0.000469`
+- carry_on average_log_wealth: `0.000010`
+- reset_each_example average_log_wealth: `-0.000285`
+- reset_each_session_or_window average_log_wealth: `-0.000149`
 - blocked_walk_forward_folds / best_state_reset_mode_by_mean_log_wealth: `3` / `carry_on`
-- blocked carry_on mean/min/max average_log_wealth: `0.001763` / `-0.000395` / `0.003277`
-- blocked reset_each_session_or_window mean average_log_wealth / turnover_mean: `0.000417` / `0.604192`
-- policy sweep rows / pareto_optimal: `120` / `36`
+- blocked carry_on mean/min/max average_log_wealth: `0.000008` / `-0.000106` / `0.000139`
+- blocked reset_each_session_or_window mean average_log_wealth / turnover_mean: `-0.000150` / `5.174468`
+- policy sweep rows / pareto_optimal: `120` / `60`
 - policy sweep selection basis / version: `pareto_rank_then_near_best_blocked_objective_mean_turnover_mean_blocked_objective_mean_average_log_wealth_mean_cvar_tail_loss_mean_row_key` / `4`
-- selected policy sweep: reset=`carry_on`, cost x`6.00`, gamma x`0.50`, min_sigma=`0.000100`, q_max=`0.5000`, cvar_weight=`0.2000`, blocked_objective_mean=`0.009719`
-- selected policy sweep blocked mean wealth / cvar / turnover: `0.010910` / `0.005953` / `0.595836`
-- applied runtime policy: reset=`carry_on`, cost x`6.0000`, gamma x`4.0000`, min_sigma=`0.000100`, q_max=`0.5000`, cvar_weight=`0.2000`
+- selected policy sweep: reset=`carry_on`, cost x`0.50`, gamma x`4.00`, min_sigma=`0.000100`, q_max=`0.7500`, cvar_weight=`0.2000`, blocked_objective_mean=`-0.000274`
+- selected policy sweep blocked mean wealth / cvar / turnover: `0.000062` / `0.001681` / `1.363700`
+- applied runtime policy: reset=`carry_on`, cost x`6.0000`, gamma x`4.0000`, min_sigma=`0.000100`, q_max=`0.7500`, cvar_weight=`0.2000`
 - selected_row_matches_applied_runtime: `False`
-- selected row key: `state_reset_mode=carry_on|cost_multiplier=6|gamma_multiplier=0.5|min_policy_sigma=0.0001|q_max=0.5|cvar_weight=0.2`
-- policy sweep rows sha256: `a7891187f4198b26`
+- selected row key: `state_reset_mode=carry_on|cost_multiplier=0.5|gamma_multiplier=4|min_policy_sigma=0.0001|q_max=0.75|cvar_weight=0.2`
+- policy sweep rows sha256: `8b3e4adf5536cf2e`
 
 ## Forecast
-- anchor_time_utc / jst: `2026-04-06T08:00:00+00:00` / `2026-04-06T17:00:00+09:00`
-- anchor_close_display / raw / price_scale: `4652.2580` / `4652.2580` / `1.0000`
-- policy_horizon / executed_horizon: `18` / `18`
-- previous_position / position / trade_delta: `-0.1292` / `-0.5000` / `-0.3708`
+- anchor_time_utc / jst: `2026-04-08T08:00:00+00:00` / `2026-04-08T17:00:00+09:00`
+- anchor_close_display / raw / price_scale: `4819.6950` / `4819.6950` / `1.0000`
+- policy_horizon / executed_horizon: `1` / `1`
+- previous_position / position / trade_delta: `-0.0453` / `-0.0982` / `-0.0529`
 - no_trade_band_hit: `False`
-- g_t / shape_entropy / selected_policy_utility: `0.5052` / `0.2702` / `0.0475`
-- display forecast label / policy driver label / head relationship: `display forecast` / `policy driver` / `tied_to_forecast_head`
+- g_t / shape_entropy / selected_policy_utility: `0.4923` / `0.0865` / `0.0248`
+- display forecast label / policy driver label / head relationship: `display forecast` / `policy driver` / `separate_policy_head`
 - overlay branch contract: `disabled_in_canonical_path`
-- h=1: mu_t=-0.1255, expected_return_pct=-0.1180, predicted_close_display=4103.3568, sigma_t=0.0950
-- h=2: mu_t=0.0141, expected_return_pct=0.0142, predicted_close_display=4718.1579, sigma_t=0.0932
-- h=3: mu_t=0.0862, expected_return_pct=0.0900, predicted_close_display=5071.1549, sigma_t=0.0799
-- h=6: mu_t=-0.0275, expected_return_pct=-0.0271, predicted_close_display=4526.2328, sigma_t=0.1166
-- h=12: mu_t=-0.0215, expected_return_pct=-0.0213, predicted_close_display=4553.2224, sigma_t=0.0771
-- h=18: mu_t=-0.2763, expected_return_pct=-0.2414, predicted_close_display=3529.1679, sigma_t=0.1052
-- h=30: mu_t=0.2175, expected_return_pct=0.2430, predicted_close_display=5782.5366, sigma_t=0.0927
+- h=1: mu_t=0.0285, expected_return_pct=0.0290, predicted_close_display=4959.2337, sigma_t=0.0269
+- h=2: mu_t=0.0081, expected_return_pct=0.0082, predicted_close_display=4859.1214, sigma_t=0.0247
+- h=3: mu_t=-0.0358, expected_return_pct=-0.0352, predicted_close_display=4650.0053, sigma_t=0.0282
+- h=6: mu_t=-0.0098, expected_return_pct=-0.0097, predicted_close_display=4772.7338, sigma_t=0.0546
+- h=12: mu_t=0.0583, expected_return_pct=0.0600, predicted_close_display=5108.7897, sigma_t=0.0310
+- h=18: mu_t=0.0779, expected_return_pct=0.0810, predicted_close_display=5210.2898, sigma_t=0.0374
+- h=30: mu_t=0.0988, expected_return_pct=0.1038, predicted_close_display=5320.0075, sigma_t=0.0186
 
 ## Governance
-- selection mode / rule / version: `auto_user_value_selection` / `optimization_gate_then_user_value_score` / `1`
-- decision summary: `production current differs from the accepted candidate because chart fidelity, sigma-band reliability, and execution stability took priority over blocked-objective rank.`
-- best / accepted / production current: `candidate_05` / `candidate_05` / `candidate_17`
-- production current user_value_score / chart_fidelity / sigma_band / execution_stability: `0.670851` / `0.698648` / `0.329876` / `0.883697`
-- accepted snapshot user_value_score / chart_fidelity / sigma_band / execution_stability: `0.559322` / `0.574995` / `0.864140` / `0.353427`
-- production current blocked objective / blocked turnover / max_drawdown / exact_smooth_position_mae / trade_delta / policy_horizon: `0.001245` / `0.241325` / `0.017009` / `0.014458` / `-0.370761` / `18`
-- accepted snapshot blocked objective / blocked turnover / max_drawdown / exact_smooth_position_mae / trade_delta / policy_horizon: `0.007317` / `1.458962` / `0.088695` / `0.161667` / `0.207183` / `2`
-- production minus accepted delta (avg_log_wealth / blocked_objective / blocked_turnover / max_drawdown / exact_smooth_position_mae / trade_delta / policy_horizon): `-0.005602` / `-0.006072` / `-1.217636` / `-0.071686` / `-0.147208` / `-0.577944` / `16.000000`
-- override priority metrics: `['blocked_directional_accuracy_mean', 'mu_calibration', 'blocked_exact_smooth_position_mae_mean', 'sigma_calibration', 'max_drawdown', 'blocked_turnover_mean', 'blocked_objective_log_wealth_minus_lambda_cvar_mean']`
+- selection mode / rule / version: `accepted_candidate` / `optimization_gate_then_deployment_score` / `1`
+- decision summary: `production current matches the accepted candidate after deployment-score selection.`
+- best / accepted / production current: `candidate_03` / `candidate_03` / `candidate_03`
+- production current user_value_score / chart_fidelity / sigma_band / execution_stability: `0.579331` / `0.699333` / `0.618001` / `0.692342`
+- accepted snapshot user_value_score / chart_fidelity / sigma_band / execution_stability: `0.579331` / `0.699333` / `0.618001` / `0.692342`
+- production current blocked objective / blocked turnover / max_drawdown / exact_smooth_position_mae / trade_delta / policy_horizon: `-0.000337` / `1.149111` / `0.019459` / `0.010895` / `-0.052850` / `1`
+- accepted snapshot blocked objective / blocked turnover / max_drawdown / exact_smooth_position_mae / trade_delta / policy_horizon: `-0.000337` / `1.149111` / `0.019459` / `0.010895` / `-0.052850` / `1`
+- production minus accepted delta (avg_log_wealth / blocked_objective / blocked_turnover / max_drawdown / exact_smooth_position_mae / trade_delta / policy_horizon): `0.000000` / `0.000000` / `0.000000` / `0.000000` / `0.000000` / `0.000000` / `0.000000`
+- override priority metrics: `[]`
 
 ## Claim Hardening
 - supported claims: `['continuous posterior weighting is present in the current artifact', 'head coupling can move policy_horizon without restoring shape routing']`
 - unsupported claims: `['shape-aware routing', 'regime-aware routing']`
-- dominant shape class / share: `1` / `1.000000`
+- dominant shape class / share: `1` / `0.852518`
 - restore-claim evidence gate: `blocked folds must show materially lower shape top-class concentration and a paired variant must improve frontier metrics through richer shape usage`
 
 ## Assessment
