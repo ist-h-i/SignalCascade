@@ -1,642 +1,623 @@
-# SignalCascade Review Handoff
+# SignalCascade 外部研究機関レビュー依頼書
 
-最終更新: 2026-04-07 22:30:08 JST
+数値スナップショット基準:
 
-このファイルは、外部 reviewer / director に現状を短時間で伝えるための self-contained なプロンプトです。
-生成元: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/reviewer_submission.md`
+- `current` artifact: 2026-04-13 08:18:41 JST
+- dashboard publish: 2026-04-13 08:18:54 JST
+- Git HEAD: `54f67c0e943202c7f0bb7207864ca27b99b8af14`
+- Working tree: `dirty`
 
----
+この文書は、外部 reviewer がこの 1 ファイルだけで判断できるように作った self-contained handoff です。会話履歴やリポジトリの live 状態を前提にしません。第 5 節にパスとコマンドを載せますが、それらは provenance 用であり、この文書だけでレビュー可能な粒度まで必要情報を展開しています。
 
 ## 1. あなたへの依頼
 
-あなたは `GPT-5.4 Pro` です。
-`SignalCascade` の現状実装と観測結果を踏まえて、次に進むための判断材料を提供してください。
-回答の最後に、ゴール到達までの残ステップと現在地を簡潔に示してください。
+あなたは、時系列予測、forecast evaluation、Quant ML、walk-forward validation、checkpoint selection、artifact governance に強い外部研究 reviewer です。以下を判断してください。
 
-重視してほしい点:
-- finance
-- programming
-- math
+1. 2026-04-13 JST 時点の `current` artifact / dashboard は、model judgment を再開してよい段階に達しているか。
+2. まだ blocker があるなら、その主因は何か。特に次を順位付けしてください。
+   - `selection_diagnostics` と `runtime_current` の semantic 混在
+   - `objective / checkpoint selection / candidate ranking` の不整合
+   - `data / split / walk-forward variance`
+   - `model architecture limitation`
+   - その他
+3. `history summary` と `blocked walk-forward` を同じ表に置いた現状 evidence は、`all-horizon rank` 悪化と stability 劣化の共起を支持しているか。それとも別の failure mode が混在しているか。
+4. 現在の `validation metrics` は future multi-horizon forecast quality の proxy と言ってよいか。`Yes / No / Partially` のいずれかで明示してください。
+5. 次に 1 タスクだけ選ぶなら何か。
+6. cheap で information gain が高い実験を最大 3 件まで挙げてください。
+
+回答では、必ず `Confirmed facts` と `Inferences` を分けてください。最後に、短い `ゴールまでのステップと現在地` を付けてください。
 
 ## 2. ゴール
 
-- 現在の不明点とボトルネックを明文化する
-- 外部 reviewer に判断してほしい論点を絞り込む
-- 次の実装・検証・実験につながる提案を得る
+このレビューで達成したいゴールは 3 つです。
 
-## 3. この差分でレビューしてもらいたい内容
+1. 現在の主 blocker が、artifact / semantic separation なのか、objective / evaluation alignment なのか、variance なのかを切り分ける。
+2. `all-horizon` 側の ranking disagreement が、stability 悪化と同じ問題なのか、別問題なのかを判断する。
+3. 開発側が次に 1 つだけ実装・検証すべきタスクを確定する。
 
-### 3.1 優先レビュー対象（この3点）
+## 3. 現状の重要観測
 
-1) 採択ロジック（`PyTorch/src/signal_cascade_pytorch/application/tuning_service.py`、`PyTorch/src/signal_cascade_pytorch/application/config.py`、`PyTorch/src/signal_cascade_pytorch/bootstrap.py`）  
-   - `optimization_gate` の閾値と `accepted_candidate`/`production_current` 更新条件の妥当性を判断してください。
-2) 予測・policy 指標（`PyTorch/src/signal_cascade_pytorch/application/inference_service.py`、`PyTorch/src/signal_cascade_pytorch/application/policy_service.py`、`PyTorch/src/signal_cascade_pytorch/application/training_service.py`）  
-   - `predicted_closes` / `expected_return_pct` の変換、`project_value_score` と `user_value_score` の重み配分の妥当性を判断してください。
-3) 360日拡張後の再学習公開フロー（`Frontend/scripts/sync-signal-cascade-data.mjs`、`Frontend/scripts/check-dashboard-data-contract.mjs`、`Frontend/scripts/dashboard-publish-regression.test.mjs`、`Frontend/src/dashboard/DashboardPage.tsx`）  
-   - `runQuality` / `stale` / `artifact mismatch` の運用判定が現行運用で再現可能か判断してください。
+### 3.1 現在地の要約
 
-### Review marker hits
+前回の external review では、主な論点は次の順でした。
 
-- `docs/implementation-tasks/archive/review/reviewer_submission_forecast_accuracy.md:38` - `rg -n "TODO|FIXME|QUESTION|TBD|UNSURE" PyTorch Frontend` は、実コード / 実 artifact 側では open decision marker をほぼ持たない。hit は handoff 文面が中心
-- `docs/implementation-tasks/archive/review/reviewer_submission.md:68` - `rg -n "TODO|FIXME|QUESTION|TBD|UNSURE" PyTorch Frontend` は、この handoff 自身以外の実コード / 実 artifact 側 hit なし
-- `PyTorch/reviewer_submission.md:64` - 未解決マーカー検索 (`rg -n "TODO|FIXME|QUESTION|TBD|UNSURE" PyTorch Frontend docs`) の hit は archive handoff 文書だけで、実コード・current artifact 側では open...
-- `PyTorch/reviewer_submission.md:206` ### `rg -n "TODO|FIXME|QUESTION|TBD|UNSURE" PyTorch Frontend docs`
-- `PyTorch/reviewer_submission.md:209` /Users/inouehiroshi/Documents/GitHub/SignalCascade/docs/implementation-tasks/archive/review/reviewer_submission_forecast_accuracy.md:38:-...
-- `PyTorch/reviewer_submission.md:210` /Users/inouehiroshi/Documents/GitHub/SignalCascade/docs/implementation-tasks/archive/review/reviewer_submission.md:68:- `rg -n "TODO|FIXM...
+1. `objective / checkpoint selection / candidate ranking` の不整合
+2. `artifact promotion / predict / runtime policy` の不整合
+3. `data / split / walk-forward variance`
+4. `model architecture limitation`
 
-### Diagnostics / report / artifact 候補
+その後、開発側は structural remediation と semantic lane separation を進めました。2026-04-13 JST 時点の判断材料として重要なのは次です。
 
-- `PyTorch/artifacts/research_shrink_smoke/validation_summary.json`
-- `PyTorch/artifacts/research_shrink_smoke_diag_actionable_edge/validation_summary.json`
-- `PyTorch/artifacts/research_shrink_smoke_diag_actionable_edge_head/validation_summary.json`
-- `PyTorch/artifacts/research_shrink_smoke_diag_correctness_probability/validation_summary.json`
-- `PyTorch/artifacts/research_shrink_smoke_diag_correctness_probability_head/validation_summary.json`
-- `PyTorch/artifacts/research_shrink_smoke_diag_edge_correctness_product_head/validation_summary.json`
-- `PyTorch/artifacts/research_shrink_smoke_diag_selector_probability/validation_summary.json`
-- `PyTorch/artifacts/research_shrink_smoke_diag_selector_probability_head/validation_summary.json`
-- `PyTorch/artifacts/gold_xauusd_m30/current/validation_summary.json`
-- `PyTorch/artifacts/gold_xauusd_m30/archive/manual_current_before_checkpoint_audit_20260407T103412+0900/validation_summary.json`
-- `PyTorch/artifacts/gold_xauusd_m30/archive/manual_current_before_notrade_focus_20260407T102046+0900/validation_summary.json`
-- `PyTorch/artifacts/gold_xauusd_m30/archive/manual_current_before_qmax075_20260407T094905+0900/validation_summary.json`
+- structural lineage はかなり回復しています。`current/source.json`、`manifest.json`、`analysis.json`、top-level report mirror、dashboard provenance の `artifact_id` / `generated_at` は整合しており、dashboard contract も通っています。
+- semantic lane separation も前進しています。dashboard `run.costMultiplier` は `0.5` の runtime lane を、dashboard `metrics.validation.costMultiplier` は `6.0` の selection lane を表示します。
+- ただし、研究上の主論点は消えていません。最新 accepted / production candidate `candidate_03` は current ranking では 1 位ですが、`all-horizon` ranking では 12 位です。
+- history summary でも、accepted candidate の `current` top-match rate は `1.0` なのに、`all-horizon` top-match rate は `0.25` です。
+- 一方で、`all-horizon rank` の悪化が常に blocked stability 悪化と一緒に起きているわけではありません。少なくとも 2026-04-08 session では、`all-horizon rank = 12` にもかかわらず blocked turnover / blocked MAE / max drawdown は破綻的ではありません。
+- 逆に 2026-04-07 04:58 UTC session では、production override が `all-horizon rank = 19` の candidate を採用しており、ここでは stability / execution を優先して `all-horizon` を犠牲にしているように見えます。
 
-## 5. レビューしてほしい論点
+開発側の暫定認識は「step 1 の structural consistency はかなり完了し、いまの主論点は objective / evaluation alignment と variance である可能性が高い」です。ただし、この認識が妥当かを external reviewer に判定してほしいです。
 
-### A. 不明点とブロッカー
+### 3.2 Confirmed facts
 
-1) 手元にコード上の open 決定マーカーはほぼない。`PyTorch` と `Frontend` で `TODO|FIXME|QUESTION|TBD|UNSURE` を再走査した際のヒットは主に handoff 文書側のみで、実装自体に保留が残っている形跡は見えにくい。
-2) そのため、現実的なブロッカーは「仕様上の合意不足（採択条件と UI 運用整合）」であり、未実装ではなく意思決定設計です。
-3) ここが明示できない限り、`accepted_candidate` と `production_current` の不一致（現在は `accepted:candidate_05 / production:candidate_17`）は、再現可能な運用判断の観点で再発リスクが残る。
-4) `session_20260407T111619Z` で `candidate_01` が `max_drawdown` でしか落ちない状態なのに `current_updated` が `false` のままであることが、実運用上の blocker になっている（現状継続の根拠不足）。
+#### A. structural lineage と contract
 
-ブロッキング判定のための具体質問:
-- `optimization_gate` の閾値を固定するか、リスク重視モードに対して閾値と user-value の階層を分離すべきか。
-- `accepted_candidate` の更新条件（`optimization_gate_passed` の有無、`current_updated` を false のまま維持する場合のガード）を `dashboard` 側が想定しているか。
-- 再学習の `candidate_limit` が 2 のままの短絡実行は、`current_updated=false` を長期化する設計リスクかどうか。`quick_mode` 実験が採択不能を見落とす可能性をどう避けるか。
+- workspace: `/Users/inouehiroshi/Documents/GitHub/SignalCascade`
+- current artifact path: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/current`
+- dashboard path: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend/public/dashboard-data.json`
+- current artifact `artifact_id`: `246338cc6042945c5ec5c54bf58edb2005b6efce9147bd9ac630287f8b8f2c66`
+- `current/source.json.generated_at_utc`: `2026-04-12T23:18:41.316351+00:00`
+- `dashboard-data.json.generatedAt`: `2026-04-12T23:18:54.787Z`
+- dashboard provenance `artifactId`: `246338cc6042945c5ec5c54bf58edb2005b6efce9147bd9ac630287f8b8f2c66`
+- dashboard provenance `manifestGeneratedAt`: `2026-04-12T23:18:41.316351+00:00`
+- dashboard provenance `diagnosticsGeneratedAt`: `2026-04-12T23:18:41.316351+00:00`
+- dashboard provenance `forecastGeneratedAt`: `2026-04-12T23:18:41.306113+00:00`
+- dashboard provenance `predictionAnchorTime`: `2026-04-08T16:00:00+00:00`
+- dashboard contract command `npm run check:data:contract` は `dashboard-data contract OK`
 
-### B. ボトルネック / failure mode 候補
+`current/source.json` の `current_alias_contract` は次を明示しています。
 
-1) 主要 failure mode は `PyTorch/src/signal_cascade_pytorch/application/inference_service.py` の数値変換層で、`current_close` と `forecast_mu` を通じた再現可能性が崩れた場合、短時間観測では「予測値だけが 20-30% 以上ズレる」シグナルが出る。
+- authoritative runtime config は `current/config.json`
+- diagnostic recommendation pointer は `validation_summary.json.policy_calibration_summary.selected_row`
+- `selected_row` は runtime config そのものではなく diagnostic recommendation
 
-具体確認観点:
-- `PREDICTION_SCHEMA_VERSION` / `FORECAST_SCHEMA_VERSION` が同一実行履歴で混在していないか（`serialize` と `load` 経路の前後差分）。
-- `expected_return_pct = exp(mu)-1` を前提にした時、`predicted_closes` の逆変換 (`exp`) を二重適用しないこと。過去 1 行目〜3行目のデータ点で比較差分を確認。
-- `median_*` 系の正規化 (`current_close / price_scale`) が `dashboard` 表示値と `prediction.current_close_display` と整合しているか。
+つまり、少なくとも contract 文言レベルでは「runtime truth」と「diagnostic recommendation」を分ける方向に進んでいます。
 
-### C. 設計で不安な点
+#### B. runtime lane と selection lane
 
-1) `Frontend/scripts/check-dashboard-data-contract.mjs` は `manifestGeneratedAt` と `artifactId` の同一一致を必須化している。`latest` と `current` が同居する過渡期に、更新順序が逆転すると false negative になる可能性がある。`run.sampleCount` と `effectiveSampleCount` の整合判定も同時に監査するべき。
-2) `PyTorch/src/signal_cascade_pytorch/application/config.py` での既定値（`checkpoint_selection_metric`, `policy_sweep_defaults`, `tie_policy_to_forecast_head`, `disable_overlay_branch`）は、4xデータ化後も初期値依存で最適化されてしまうリスクがある。`gold_xauusd_m30/current` の選抜実績と照合して、どこまで最適値として固定化するべきかを明示する必要がある。
-3) `PyTorch/src/signal_cascade_pytorch/application/policy_service.py` の policy パスは `max_drawdown` を直接抑制しにくく、`cvar` や `turnover` で間接制御される構造。`policy_cost_multiplier`, `policy_gamma_multiplier`, `q_max`, `min_policy_sigma` の同時変更が実務上のリスク許容度を十分に表現しているか再確認が必要。
-4) `PyTorch/src/signal_cascade_pytorch/bootstrap.py` と `PyTorch/src/signal_cascade_pytorch/interfaces/cli.py` の CLI 互換性設計は、廃止予定オプションを warning で無視する方式。自動実行パイプラインでの誤設定が静かに温存される可能性があるため、`deprecated flags` の排除可否と CI 失敗化のレベルを明確化すべき。
-5) テスト層（`PyTorch/tests/test_artifact_schema.py`, `PyTorch/tests/test_policy_sweep.py`, `PyTorch/tests/test_policy_training.py`）は挙動を広く守る一方、`max_drawdown` 閾値変更時の仕様テストが薄い。今回のボトルネックは値そのものより “失敗時のフォールバック挙動” なので、`candidate_limit` 拡張前提の回帰テストを追加しないと再発しやすい。
+現在の semantic lane は次のように分離されています。
 
-### D. 数式 / 閾値 / 指標レビュー候補
+| 項目 | 値 | 役割 |
+| --- | --- | --- |
+| `validation_summary.json.runtime_current.operating_point.cost_multiplier` | `0.5` | authoritative runtime lane |
+| `validation_summary.json.policy_calibration_summary.selected_row.cost_multiplier` | `0.5` | diagnostic recommendation row |
+| `validation_summary.json.policy_calibration_summary.applied_runtime_policy.cost_multiplier` | `0.5` | applied runtime policy |
+| `validation_summary.json.policy_calibration_summary.selected_row_matches_applied_runtime` | `true` | selected row と runtime は一致 |
+| `validation_summary.json.selection_diagnostics.validation.cost_multiplier` | `6.0` | selection / validation lane |
+| `metrics.json.validation_metrics.cost_multiplier` | `6.0` | selection / validation lane |
+| dashboard `run.costMultiplier` | `0.5` | runtime lane |
+| dashboard `metrics.validation.costMultiplier` | `6.0` | selection / validation lane |
 
-#### 1) `Frontend/scripts/sync-signal-cascade-data.mjs`
-- 前処理定数: `defaultLookbackDays = 360`。`SIGNAL_CASCADE_LOOKBACK_DAYS` が設定されていれば `resolveLookbackDays()` で上書き。
-- 署名一致検証:
-  - `numbersMatch(left,right)` は `abs(left-right) <= 1e-9`。
-- 同一ラン生成時の必須整合チェック:
-  - `prediction.current_close_display == source.meta.current_close`。
-  - ダッシュボードの `diagnosticsGeneratedAt` と現行 `validation_summary.generated_at_utc` が一致。
-  - `effective_price_scale` と `price_scale` が現行値と一致。
-- 予測更新フロー（ライブ）:
-  - `spawnSync` で `python ... cli.py tune-latest --artifact-root ... --csv ... --csv-lookback-days <days>` を実行。
-  - `--csv-lookback-days` には `configuredLookbackDays`（初期 360）を渡す。
-- データ品質ガード:
-  - `normalizeDukascopyCsv` で `rows.length < 512` は例外。
-- 時間差・鮮度フラグ:
-  - `artifactLagHours = (maxTs-minTs)`（h）、`forecastAgeHours` / `diagnosticsAgeHours` / `predictionLagHours` はダッシュボード生成時点との差分（絶対値）h。
-  - `deriveRunQuality`:
-    - `interrupted_tuning` なら `degraded`
-    - `artifactLagHours >= 24 or predictionLagHours >= 48` なら `stale`
-    - それ以外 `fresh`
+この点は重要です。dashboard が runtime lane を誤読していた状態ではなくなりました。現状は、runtime lane と selection lane が同居しており、それぞれ別の役割を持つように修正されています。
 
-#### 2) `PyTorch/src/signal_cascade_pytorch/application/tuning_service.py`
-- `CONFIG`: `CHECKPOINT_SELECTION_METRICS = ('hybrid_exact','exact_log_wealth','exact_log_wealth_minus_lambda_cvar','validation_total')`。
-- 最適化ゲート（最終採択前の必須条件）は以下すべて `optimization_gate_then_user_value_score` 系で再評価。
-  - `average_log_wealth >= 0.0`
-  - `realized_pnl_per_anchor >= 0.0`
-  - `cvar_tail_loss <= 0.08`
-  - `max_drawdown <= 0.15`
-  - `directional_accuracy >= 0.50`
-  - `no_trade_band_hit_rate <= 0.80`
-  - 失敗時 `optimization_gate_status=failed`。
-- 候補生成と離散化:
-  - 基本候補をベースに `epochs/learning_rate` を2〜4倍変化、`hidden_dim` ±16、`batch_size` 2倍/半分、`dropout` ±0.05＋`weight_decay` 変更、`evaluation_state_reset_mode` 切替、`policy_cost_multiplier`±2倍、`policy_gamma_multiplier`±2倍、`q_max ±0.25`、`cvar_weight ×0.5/×2`、`min_policy_sigma ×0.5/×2`。
-  - 追加候補 `_FALLBACK_PARAMETERS` を含め、重複を除去。
-  - 量子化後キー域: `batch_size∈{8,16,32,64}`、`hidden_dim∈[32,96]を16刻み`、`min_policy_sigma∈{5e-5,1e-4,2e-4,4e-4}`、`policy_multiplier∈{0.5,1,2,4,6}`、`q_max∈{0.5,0.75,1.0,1.25,1.5}`、`cvar_weight∈{0.05,0.1,0.2,0.4,0.8}`。
-- クイックモード: `quick_mode=True` だと `candidate_limit` は既定 `min(len(candidate),4)`。
-  - 優先順位: `tie_policy_to_forecast_head`/`disable_overlay_branch` の順（(T,F)->(F,T)->(T,T)）で重複除去。
-- 選定:
-  - `leaderboard` はゲート通過フラグを最優先し、その後
-    1. `-blocked_objective_log_wealth_minus_lambda_cvar_mean`（fallback `project_value_score`）
-    2. `-blocked_average_log_wealth_mean`（fallback `average_log_wealth`）
-    3. `+blocked_turnover_mean`
-    4. `-project_value_score`
-    5. `-average_log_wealth`
-    6. `-realized_pnl_per_anchor`
-    7. `+cvar_tail_loss` `+max_drawdown` 等
+ただし、もう 1 つの事実もあります。
 
-#### 3) `PyTorch/src/signal_cascade_pytorch/application/training_service.py`
-- 1 サンプルの評価式:
-  - `pnl = position * realized_return - trade_cost`
-  - `trade_cost = selected_row.cost * abs(trade_delta)`
-  - `equity += pnl`、`max_drawdown = peak_equity - equity`。
-  - `log_wealth = log1p(clamp(pnl,-0.95,inf))`。
-  - `cvar_tail = cvar_tail_loss(-pnl_tensor, alpha=config.cvar_alpha)`。
-- 主要集計:
-  - `average_log_wealth`, `realized_pnl_per_anchor`, `no_trade_rate`, `mu_calibration`, `sigma_calibration`, `direction_accuracy` などを全サンプル平均。
-- スコア:
-  - `project_value_score = 0.28*wealth_score + 0.20*cvar_score + 0.18*drawdown_score + 0.14*calibration_score + 0.10*activity_score + 0.10*gate_score`
-    - `wealth_score = clamp(0.5 + 10*avg_log_wealth)`
-    - `cvar_score = clamp(1 - 8*cvar_tail)`
-    - `drawdown_score = clamp(1 - 8*max_drawdown)`
-    - `calibration_score = clamp(1 - 12*mu_calibration)`
-    - `activity_score = clamp(1 - no_trade_rate)`
-    - `gate_score = clamp(shape_gate_usage)`
-  - `utility_score = 0.40*wealth_score + 0.25*direction_accuracy + 0.20*(1-no_trade_rate) + 0.15*shape_gate_usage`
-- チェックポイント選択:
-  - `config.checkpoint_selection_metric == exact_log_wealth` → `-avg_log_wealth`
-  - `... == exact_log_wealth_minus_lambda_cvar` → `-(avg_log_wealth - cvar_weight*cvar)`
-  - `validation_total` → `forecast_mae`
-  - それ以外: `-avg_log_wealth + forecast_w*forecast_mae + calib_w*0.5*(forecast_sigma) + posgap_w*exact_smooth_position_mae`
-- `split_examples`:
-  - `train_end = sample_count - desired_validation - purge`
-  - `desired_validation = max(1, int(n*(1-train_ratio)))`、`purge = min(purge_examples, n - desired_validation -1)`。
+- `archive/session_20260408T075001Z/manifest.json` の accepted / production candidate `candidate_03` は `policy_cost_multiplier = 6.0`
+- 一方、current runtime operating point は `cost_multiplier = 0.5`
 
-#### 4) `PyTorch/src/signal_cascade_pytorch/application/policy_service.py`
-- パス項:
-  - `sigma_sq = sigma^2` を `min_policy_sigma^2` で下限。
-  - `g_t = tradeability_gate`
-  - `mu_t_tilde = g_t * mean`
-  - `scaled_costs = costs * policy_cost_multiplier`
-  - `effective_gamma = risk_aversion_gamma * policy_gamma_multiplier`
-  - `margin = mu_t_tilde - effective_gamma * sigma_sq * previous_position`
-- Exact policy（horizon別）:
-  - `abs(margin) <= cost` → no-trade (`position = previous_position`)
-  - `margin > 0` → `(mu_t_tilde - cost)/(gamma*sigma_sq)`
-  - `margin < 0` → `(mu_t_tilde + cost)/(gamma*sigma_sq)`
-  - `position = clip(position, -q_max, q_max)`。
-- utility:
-  - `U = gated_mean*position - 0.5*gamma*sigma_sq*position^2 - cost*abs(position-previous_position)`。
-- Smooth policy:
-  - `smooth_excess = softplus(|margin|-scaled_cost, beta)/beta`
-  - `direction = tanh(margin / policy_abs_epsilon)`
-  - `delta_pos = direction * smooth_excess / (gamma*sigma_sq)`
-  - `raw_position = previous_position + delta_pos`
-  - `horizon_positions = q_max * tanh(raw_position / q_max)`
-  - `turnover = sqrt((q_i-q_prev)^2 + eps)`
-  - 軟選択 `softmax(utilities*policy_smoothing_beta)`。
+つまり、`accepted_candidate` の archived validation lane と、live runtime lane は完全同一ではありません。これは dashboard 誤表示の問題ではなく、post-selection calibration をどう解釈するかという研究上の意味論の問題です。
 
-#### 5) `PyTorch/src/signal_cascade_pytorch/application/inference_service.py`
-- Schema: `PREDICTION_SCHEMA_VERSION = 7`, `FORECAST_SCHEMA_VERSION = 7`。
-- 予測値変換:
-  - `predicted_closes[h] = current_close * exp(forecast_mu[h])`
-- `serialize/predict` で `median_predicted_*` 系を `current_close / price_scale` 換算して保持。
-- レポート出力は `display forecast` と `policy driver` を明示して分離。
-- 期待値は log-return なので、`expected_return_pct = exp(mu_t)-1`。
+#### C. dataset と current validation snapshot
 
-#### 6) `PyTorch/src/signal_cascade_pytorch/application/diagnostics_service.py`
-- `DIAGNOSTICS_SCHEMA_VERSION = 10`、`POLICY_SELECTION_RULE_VERSION = 4`、`POLICY_SELECTION_OBJECTIVE_FLOOR_RATIO = 0.7`。
-- blocked walk-forward:
-  - 連続 fold 分割して、各 `evaluation_state_reset_mode` で平均 `average_log_wealth`/`cvar`/`turnover` などを計算。
-  - `best_state_reset_mode_by_mean_log_wealth` を最大平均 log-wealth で決定。
-- policy sweep:
-  - 軸は `cost_multipliers / gamma_multipliers / min_policy_sigma / q_max / cvar_weight / state_reset_mode`。
-  - 各組み合わせで `evaluate_model` と blocked 指標を再計算し `objective_log_wealth_minus_lambda_cvar = avg_log_wealth - cvar_weight*cvar_tail_loss`。
-  - Pareto 判定は
-    - wealth が上か同等、turnover が下か同等、cvarが下か同等
-    - 少なくとも1指標が strictly better
-  - non-Pareto を除外後、候補を `objective >= best_objective*0.7`（`best_objective<=0` の場合はそのまま）でフィルタし、
-    `turnover` 小さい順→`objective`高い順→`avg_log_wealth`高い順→`cvar`低い順。
+最新 current artifact の dataset / training / validation snapshot は次です。
 
-#### 7) `PyTorch/src/signal_cascade_pytorch/application/artifact_provenance.py`
-- `ARTIFACT_SOURCE_SCHEMA_VERSION = 2`。
-- `build_artifact_source_payload` が付与する主キー:
-  - `artifact_id`（source payload を固定キー順 JSON 文字列化して SHA-256）
-  - `artifact_schema_version`,`artifact_dir`,`generated_at_utc`,`state_reset_boundary_spec_version`
-  - 可能時 `data_snapshot_sha256`,`config_sha256`,`config_origin`
-  - git: `head/commit_sha/git_tree_sha`,`git_dirty`,`dirty_patch_sha256`
-- `artifact_id` seed field（固定順 JSON）:
-  - `artifact_kind`, `generated_at_utc`, `data_snapshot_sha256`, `config_sha256`, `parent_artifact_id`, `source_kind`, `source_path`, `price_scale`。
+| 項目 | 値 |
+| --- | --- |
+| `sample_count` | `1394` |
+| `effective_sample_count` | `1364` |
+| `train_samples` | `1086` |
+| `validation_samples` | `278` |
+| `purged_samples` | `30` |
+| `source_rows_original` | `11620` |
+| `source_rows_used` | `11620` |
+| `best_validation_loss` | `0.07138540796774755` |
+| `best_epoch` | `6` |
+| `best_epoch_by_exact_log_wealth` | `1` |
+| `best_epoch_by_exact_log_wealth_minus_lambda_cvar` | `6` |
+| `best_epoch_by_blocked_objective_log_wealth_minus_lambda_cvar` | `6` |
+| checkpoint `selection_metric` | `exact_log_wealth_minus_lambda_cvar` |
+| checkpoint `selected_epoch_rank_by_exact_log_wealth` | `3` |
+| checkpoint `delta_to_best_exact_log_wealth` | `0.0002330950982166235` |
 
-#### 8) `PyTorch/src/signal_cascade_pytorch/application/config.py`
-- `CONFIG_SCHEMA_VERSION = 7`。
-- `TrainingConfig` の主要既定値:
-  - `tie_policy_to_forecast_head=False`, `disable_overlay_branch=False`
-  - `cvar_weight=0.20`, `cvar_alpha=0.10`, `risk_aversion_gamma=3.0`
-  - `policy_cost_multiplier=1.0`, `policy_gamma_multiplier=1.0`, `q_max=1.0`, `min_policy_sigma=1e-4`
-  - `checkpoint_selection_metric='exact_log_wealth_minus_lambda_cvar'`
-  - policy sweep defaults: cost `(0.5,1,2,4)`, gamma `(0.5,1,2)`, min_sigma `(5e-5,1e-4,2e-4)`, q_max `(1.0,)`, cvar `(0.2,)`
-  - checkpoint重み: `checkpoint_selection_forecast_weight=1.0`, `...calibration_weight=0.5`, `...position_gap_weight=0.25`。
-  - `CHECKPOINT_SELECTION_METRICS = ('hybrid_exact','exact_log_wealth','exact_log_wealth_minus_lambda_cvar','validation_total')`。
+validation metrics:
 
-#### 9) `PyTorch/src/signal_cascade_pytorch/application/report_service.py`
-- `METRICS_SCHEMA_VERSION = 4`, `ANALYSIS_SCHEMA_VERSION = 10`。
-- `_resolve_checkpoint_audit` は以下を再計算可能な形でレポートへ持ち込み:
-  - selection metric でソートした選択epoch、`exact_log_wealth` 及び `exact_log_wealth - lambda*cvar` の最大 epoch、各種 rank と `delta_to_best`。
-  - ランクは `validation_selection_score` と `epoch` の昇順、`validation_exact_log_wealth` の降順で定義。
-- `required` ファイル差し戻し: `validation_summary.json`, `policy_summary.csv`, `horizon_diag.csv` がないと `load_required_diagnostics_summary` が失敗。
-- リポートの数式値は、validation 指標、policy sweep 選定結果、checkpoint audit、期待リターン `exp(mu)-1` を集約。
+| metric | value |
+| --- | --- |
+| `average_log_wealth` | `0.000009859592128159684` |
+| `realized_pnl_per_anchor` | `0.00001048864025035419` |
+| `cvar_tail_loss` | `0.0018339508678764105` |
+| `turnover` | `3.2506622293699365` |
+| `max_drawdown` | `0.01945894954516857` |
+| `directional_accuracy` | `0.5359712230215827` |
+| `mu_calibration` | `0.05469737889884449` |
+| `sigma_calibration` | `0.07639970218959329` |
+| `utility_score` | `0.593646427127219` |
+| `project_value_score` | `0.6793216717779011` |
 
-#### 10) `PyTorch/src/signal_cascade_pytorch/bootstrap.py`
-- トレーニング/予測/診断で `limit_base_bars_to_lookback_days(..., lookback_days)` を適用（CSV時）。
-- `tune-latest` 時に `csv_lookback_days` を受け取り、`tune_latest_dataset` へ渡す。
-- `_apply_selected_policy_calibration_payload` は既存 `validation_summary.policy_calibration_summary.selected_row` を読み取り以下を上書き:
-  - `evaluation_state_reset_mode`, `min_policy_sigma`, `policy_cost_multiplier`, `policy_gamma_multiplier`, `q_max`, `cvar_weight`。
-- `predict`/`diagnostic` でも同様に `lookback_days` を source payload に反映。
-- `train_command` の最終出力に best/selection指標を出す（`best_validation_loss`, `average_log_wealth`, `cvar_tail_loss`, `policy_horizon`）。
+補足:
 
-#### 11) `PyTorch/src/signal_cascade_pytorch/domain/entities.py`
-- `TrainingExample.state_features` の長さは `STATE_FEATURE_NAMES`（regime 5 + 5 volatility 系）固定。
-- `state_features` 冒頭が `regime_features` と完全一致。
-- `trend_strength == regime_features[4] == state_features[4]`。
-- `realized_volatility == state_features[5]`。
-- 不整合時は `__post_init__` で `ValueError`。
+- `analysis.dataset.sample_count = 1394`
+- `validation_summary.runtime_current.dataset.sample_count = 1392`
 
-#### 12) `PyTorch/report_signalcascade_xauusd.md`
-- 実運用の「監査入口」として、`PyTorch/artifacts/gold_xauusd_m30/current` を mirror 出力する実体。
-- Contract は `current alias` が `mirror_of_current_research_report`。
-- ここは数式定義より、直近 artifact の実測値確認先として使う（`artifact id`, `best_epoch`, `selection mode`, `best/accepted/production current`, 各種 validation 指標の実測値が逐次格納）。
+この mismatch はまだ残っています。構造面がかなり整った一方で、contract が完全に単一化されたとは言い切れません。
 
-### E. 検証・テスト・診断の不足候補
+#### D. blocked walk-forward（最新 current artifact）
 
-1) `PyTorch/artifacts/research_shrink_smoke/validation_summary.json`
-   - 目的: quick_mode・非 quick_mode での `optimization_gate.status` と `passed_candidate_count` の差を確認し、`candidate_limit=2` の再現性を証明。
-   - 必須チェック: `optimization_gate_failed_rules`, `current_updated`, `accepted_candidate`, `production_current_candidate`。
-2) `PyTorch/artifacts/research_shrink_smoke_diag_actionable_edge/validation_summary.json`
-   - 目的: `policy_sweep` での Pareto フィルタと `POLICY_SELECTION_OBJECTIVE_FLOOR_RATIO=0.7` がリスク指標に過敏か鈍感かを確認。
-   - 必須チェック: `policy_cost_multiplier` / `policy_gamma_multiplier` / `q_max` を変更した時の `max_drawdown` 感度。
-3) `PyTorch/artifacts/research_shrink_smoke_diag_actionable_edge_head/validation_summary.json`
-   - 目的: `tie_policy_to_forecast_head=True` と `False` の差分を再現し、`candidate_03/04` 付近の極端値挙動の再発有無を追跡。
-   - 必須チェック: `max_drawdown`, `blocked_turnover_mean`, `no_trade_band_hit_rate`。
-4) `PyTorch/artifacts/research_shrink_smoke_diag_correctness_probability/validation_summary.json`
-   - 目的: `cvar_weight` 強化時に `project_value_score` と `user_value_score` の乖離を把握し、スコア設計の安定性を検証。
-   - 必須チェック: `cvar_tail_loss`, `max_drawdown`, `user_value_score`。
-5) `PyTorch/artifacts/research_shrink_smoke_diag_correctness_probability_head/validation_summary.json`
-   - 目的: `forecast_head` 固定時のリスクリワード分解を点検し、`forecast_stability` と `expected_return` の関係を定量化。
-   - 必須チェック: `forecast_sigma`, `expected_return_pct`, `directional_accuracy`。
-6) `PyTorch/artifacts/research_shrink_smoke_diag_edge_correctness_product_head/validation_summary.json`
-   - 目的: 相関の強い feature のエッジケースで `selection_mode` がどれだけ安定しているか評価。
-   - 必須チェック: `optimization_gate_passed`, `user_value_economic_score`, `blocked_objective_log_wealth_minus_lambda_cvar_mean`。
-7) `PyTorch/artifacts/research_shrink_smoke_diag_selector_probability/validation_summary.json`
-   - 目的: `state_reset_mode` 切替の有効性を確認し、`best_state_reset_mode_by_mean_log_wealth` が `candidate` 全体で一致するかを検証。
-   - 必須チェック: `evaluation_state_reset_mode` ごとの `average_log_wealth` / `cvar_tail_loss` / `max_drawdown`。
-8) `PyTorch/artifacts/research_shrink_smoke_diag_selector_probability_head/validation_summary.json`
-   - 目的: head 指定時の selection 収束性を確認。`quick_mode` で `candidate_limit` 拡大した場合の階層順位を比較。
-   - 必須チェック: `leaderboard` 上位順（`optimization_gate_passed` → `user_value_score`）と `production_current_candidate`。
-9) `PyTorch/artifacts/gold_xauusd_m30/current/validation_summary.json`
-   - 目的: 現行運用の真の SoT。`accepted_candidate` と `production_current` の差分が `delta_production_minus_accepted` で許容されているかを監査。
-   - 必須チェック: `selection_rule`, `override_reason`, `run.sampleCount` 系。
-10) `PyTorch/artifacts/gold_xauusd_m30/archive/manual_current_before_checkpoint_audit_20260407T103412+0900/validation_summary.json`
-    - 目的: checkpoint-audit 手順時の運用整合性を比較し、`checkpoint_audit` のみで改善するか、候補選択自体を触るべきかを分離判断。
-    - 必須チェック: `checkpoint_selection_metric`, `best_checkpoint`, `delta_to_best`。
-11) `PyTorch/artifacts/gold_xauusd_m30/archive/manual_current_before_notrade_focus_20260407T102046+0900/validation_summary.json`
-    - 目的: `no_trade_rate` 重視の実験比較。実働率低下が `max_drawdown` 抑制に対してどれだけ効くかを定量化。
-    - 必須チェック: `no_trade_band_hit_rate`, `no_trade_rate`, `average_log_wealth`。
-12) `PyTorch/artifacts/gold_xauusd_m30/archive/manual_current_before_qmax075_20260407T094905+0900/validation_summary.json`
-    - 目的: `q_max` 下方制約の有無で `max_drawdown` と `trade_delta` がどう収束するかを見る。
-    - 必須チェック: `q_max`, `blocked_turnover_mean`, `max_drawdown`, `trade_delta`。
+`blocked_walk_forward_evaluation` の主要値は次です。
 
-## 6. 参照ファイル / アーティファクト
+| state_reset_mode | average_log_wealth_mean | turnover_mean | directional_accuracy_mean | exact_smooth_position_mae_mean |
+| --- | --- | --- | --- | --- |
+| `carry_on` | `0.000007943755435908524` | `1.149111051561954` | `0.5358812529219261` | `0.011591466342301243` |
+| `reset_each_session_or_window` | `-0.00015049554150420717` | `5.1744675653153145` | `0.5468676951846657` | `0.052278375931428755` |
+| `reset_each_example` | `-0.0002844693788457254` | `8.740124548387044` | `0.5540751129811438` | `0.08806577714517834` |
 
-最優先で読む順に用途を固定します。外部 reviewer は追加検索なしで以下だけで意思決定できる想定です。
+Confirmed facts:
 
-1. `PyTorch/artifacts/gold_xauusd_m30/current/validation_summary.json`  
-   現行の `selection_mode` と `override_reason` を読む最上位監査対象。UI が参照している `production_current` / `accepted_candidate` のズレを確認。
-2. `PyTorch/artifacts/gold_xauusd_m30/archive/session_20260407T111619Z/manifest.json`  
-   4倍拡張（360日）後の再実行の失敗時挙動（`optimization_gate.status`, `passed_candidate_count`, `current_updated`）を検証。
-3. `PyTorch/artifacts/gold_xauusd_m30/archive/session_20260407T111619Z/leaderboard.json`  
-   `candidate_01`〜`candidate_02` の比較。`max_drawdown` 落ちで採択不能になった理由を数式で再現。
-4. `Frontend/scripts/sync-signal-cascade-data.mjs`  
-   再学習起動 (`--csv-lookback-days` 360) と契約検証（`lookback`、`manifestGeneratedAt`、`diagnosticsGeneratedAt`）を確認。
-5. `Frontend/scripts/check-dashboard-data-contract.mjs`  
-   同一 artifact 検証と stale 判定の厳密条件を確認。`dashboard-data` と API 履歴ズレの再現条件を追えるようにする。
-6. `Frontend/scripts/dashboard-publish-regression.test.mjs`  
-   360日再取得から公開までの回帰点検。`download retry`、`runQuality`、`sampleCount` 更新が失敗時にどこで落ちるかを評価。
-7. `Frontend/src/dashboard/DashboardPage.tsx` と `Frontend/src/dashboard/dashboard.css`  
-   UI 表示上の `productionCurrentCandidate` と `acceptedCandidate` が同一の監査根拠で読まれているかを確認。
-8. `Frontend/public/dashboard-data.json`  
-   現行表示状態の正本。`run.sampleCount=184` / `effectiveSampleCount=154` の stale 判定が 360日再実行結果と齟齬がないか検証。
-9. `Frontend/scripts/sync-signal-cascade-data.mjs` / `Frontend/scripts/check-dashboard-data-contract.mjs` のテスト依存ログ  
-   フロー全体が自動化されているか（取得→同期→契約チェック→保存）を追跡し、UI 未反映の再現手順を確定。
-10. `PyTorch/src/signal_cascade_pytorch/application/tuning_service.py`  
-   `optimization_gate` / `leaderboard` / `user_value` の最終判断ロジック本体。今回の提案検証が失敗する/通る根拠の中心。
+- best state reset mode by mean log wealth は `carry_on`
+- latest accepted / production candidate `candidate_03` の blocked metrics は `carry_on` の集計に一致
+- stability 指標だけを見ると `carry_on` が最も良い
 
-## 7. 期待する出力形式
+#### E. current policy calibration row と current accepted candidate
 
-1. 結論
-2. 根拠付きの主要 findings
-3. 優先度付きの変更提案
-4. 検証または実験計画
-5. 追加で見るべき指標やファイル
-6. 最後に `ゴールまでのステップと現在地`
+現在の runtime row と accepted candidate の比較です。
 
-- `ゴールまでのステップと現在地` は 3-6 ステップ以内で簡潔に書く
-- `現在地` は `step N/M` か同等の表現で示す
-- `次の一手` を 1-2 個だけ添える
+| 項目 | current runtime / selected row | accepted candidate `candidate_03` |
+| --- | --- | --- |
+| `cost_multiplier` | `0.5` | `6.0` |
+| `gamma_multiplier` | `4.0` | `4.0` |
+| `q_max` | `0.75` | `0.75` |
+| `blocked_objective_log_wealth_minus_lambda_cvar_mean` | `-0.0002738745891528441` | `-0.00033674398364080517` |
+| `blocked_turnover_mean` | `1.363700414008238` | `1.149111051561954` |
+| `blocked_exact_smooth_position_mae_mean` | `0.013786676977842235` | `0.011591466342301243` |
+| `blocked_average_log_wealth_mean` | `0.00006238665968407059` | `0.000007943755435908524` |
 
-## 8. 制約
+Confirmed facts:
 
-- 一般論ではなく、このファイルに記載した evidence を起点に判断する
-- 確認済みの事実と仮説を分けて書く
-- 可能なら cheap で information gain が高い順に提案する
-- Codex がそのまま実装や追加検証に移れる粒度で提案する
-- 回答の最後で、ゴール到達までの残ステップと現在地を必ず明示する
+- runtime row (`0.5`) は blocked objective / blocked average_log_wealth では accepted candidate (`6.0`) より良い
+- しかし blocked turnover と blocked MAE は accepted candidate (`6.0`) の方が良い
+- つまり post-selection calibration は「objective 改善」と「stability 悪化」のトレードオフに見える
 
-## 9. Codex 追記メモ
+#### F. current session (`20260408T075001Z`) の ranking disagreement
 
-- ここから下は Codex が repo 固有の観測、メトリクス、意思決定依頼に置き換える
-- 汎用文のまま残さず、外部 reviewer が迷わない状態まで具体化する
+current selection session の candidate ranking diagnostics は次です。
 
-## 10. 4倍拡張後の次アクション計画（データを閉じる）
+| 項目 | 値 |
+| --- | --- |
+| `candidate_count` | `22` |
+| `current_top_candidate` | `candidate_03` |
+| `selected_horizon_top_candidate` | `candidate_01` |
+| `all_horizon_top_candidate` | `candidate_05` |
+| `selected_horizon_vs_current_spearman_rank_correlation` | `0.5471485036702428` |
+| `all_horizon_vs_current_spearman_rank_correlation` | `-0.050254093732354566` |
+| `selected_horizon_vs_all_horizon_spearman_rank_correlation` | `0.47261434217955955` |
+| `selected_horizon_top_k_overlap_with_current_count` | `2 / 3` |
+| `all_horizon_top_k_overlap_with_current_count` | `0 / 3` |
+| `accepted_candidate_current_rank` | `1` |
+| `accepted_candidate_selected_horizon_rank` | `2` |
+| `accepted_candidate_all_horizon_rank` | `12` |
+| `production_current_current_rank` | `1` |
+| `production_current_selected_horizon_rank` | `2` |
+| `production_current_all_horizon_rank` | `12` |
 
-### 直近事実（2026-04-07）
+Confirmed facts:
 
-- 360日拡張は反映済み。`Frontend/scripts/sync-signal-cascade-data.mjs` は `--csv-lookback-days 360` を既定化済み。
-- `PyTorch/artifacts/gold_xauusd_m30/archive/session_20260407T111619Z/manifest.json` の再実行:
-  - `lookback_days`: `360`
-  - `sample_count`: `1387`
-  - `source_rows_used`: `11568`
-  - `candidate_limit`: `2`, `quick_mode`: `true`
-  - `optimization_gate.status`: `failed`
-  - `optimization_gate.passed_candidate_count`: `0`
-  - `current_updated`: `false`
-- 主要候補（同 session）:
-  - `candidate_01`: `average_log_wealth=0.000050`, `directional_accuracy=0.5090`, `max_drawdown=0.2153`, `cvar_tail_loss=0.01345`, `optimization_gate_failed_rules=["max_drawdown>0.150000"]`
-  - `candidate_02`: `average_log_wealth=-0.002786`, `directional_accuracy=0.5018`, `max_drawdown=2.9477`
-- 画面側の現行反映は未更新。`Frontend/public/dashboard-data.json` は `run.sampleCount=184`, `run.effectiveSampleCount=154` のまま、`governance.productionCurrentCandidate="candidate_17"`, `governance.acceptedCandidate="candidate_05"` を維持。
+- current ranking と `all-horizon` ranking はほぼ無相関 (`rho ≈ -0.05`)
+- accepted / production current `candidate_03` は `all-horizon` では 12 位
+- top-3 overlap も current vs `all-horizon` で `0`
 
-### 目標
+#### G. session history summary（archive 13 session）
 
-1. 4倍データの恩恵を活かしつつ、`max_drawdown<=0.15` を満たす選抜候補を得る
-2. `accepted_candidate`（採択）と `production current`（表示）を同一基準で再整合
-3. 外挿リスクが小さい形で `forecast` の暴れを抑制した後、UIへ反映
+`current/analysis.json.selection_history_summary` の aggregate 値は次です。
 
-### 実行順（短期）
+| 項目 | 値 |
+| --- | --- |
+| `session_count` | `13` |
+| `accepted_candidate_count` | `12` |
+| `production_current_candidate_count` | `2` |
+| `accepted_vs_production_divergence_count` | `1` |
+| `accepted_current_top_match_ratio` | `1.0` |
+| `accepted_selected_horizon_top_match_ratio` | `0.375` |
+| `accepted_all_horizon_top_match_ratio` | `0.25` |
+| `accepted_candidate_current_rank_median` | `1.0` |
+| `accepted_candidate_selected_horizon_rank_median` | `2.0` |
+| `accepted_candidate_all_horizon_rank_median` | `2.5` |
+| `production_current_top_match_ratio` | `0.5` |
+| `production_selected_horizon_top_match_ratio` | `0.0` |
+| `production_all_horizon_top_match_ratio` | `0.0` |
+| `production_current_current_rank_median` | `1.5` |
+| `production_current_selected_horizon_rank_median` | `5.5` |
+| `production_current_all_horizon_rank_median` | `15.5` |
 
-1. `PyTorch/src/signal_cascade_pytorch/application/tuning_service.py` の候補選抜に、`max_drawdown` を user-value と統合スコアへ加点/減点（ゲート待ちではなく主要スコア化）する。
-2. 同一 `lookback 360` 下で、`q_max`, `policy_cost_multiplier`, `policy_gamma_multiplier`, `min_policy_sigma` を 3〜5点ずつに絞って `candidate_limit` 拡張（2→8 など）し、`quick_mode` と通常比較。
-3. `PyTorch/src/signal_cascade_pytorch/application/config.py` / `cli.py` に `risk budget`（`max_drawdown` 優先度）を明示化。overlay off は現時点の証拠では改善に寄与せず（極端値や calibration崩れ）を避け、`overlay on` のデフォルトを維持。
-4. 上記結果で `manifest.optimization_gate` と `current/source` が更新される場合のみ、`Frontend/public/dashboard-data.json` を更新配信。
+Confirmed facts:
 
-### 判定が難しいポイント（外部 reviewer に閉じて依頼）
+- accepted candidate は current ranking では常に 1 位
+- accepted candidate は `all-horizon` では top 一致が 25% に落ちる
+- production current は、観測できる 2 session では `all-horizon` で一度も 1 位になっていない
 
-- `candidate_01` は収益系指標が合格域寄りでも `max_drawdown` が超過している。**どこまでを `blocked` 判定、どこを `user_value` の中核に残すか**。
-- `candidate_02` の `directional_accuracy` は合格線を満たしつつ `max_drawdown` が巨大。**短期改善を追うより、指標設計を再配置すべきか**。
-- dashboard は過去 artifact (`accepted_candidate: candidate_05`, `production: candidate_17`) を参照し続けており、360日再実行結果が未反映。**現実運用上の SoT をどこに固定するか**。
-- `overlay off` 実験では `candidate_03`/`candidate_04` で極端値・calibration悪化が報告されており、`tie/overlay_policy` の切り替え基準を統一する必要がある。
+#### H. `all-horizon rank` と blocked metrics を並べた session 表
 
-### ゴールまでのステップと現在地（要約）
+下表は、archive session ごとに accepted / production candidate の rank と blocked metrics を並べたものです。`FULL` は `selected-horizon` / `all-horizon` rank を backfill できた session、`PARTIAL` は古い artifact で raw diagnostics が不足し full backfill できない session です。
 
-- 現在地: `step 1/4`（データ増設は完了、選抜の再設計が未着手）
-- 次の一手: `tuning_service` の risk-aware user-value スコア改修 → `quick` で 8候補比較 → `manifest.current_updated` が true なら dashboard refresh
+```text
+FULL
+| session_id | selection_mode | accepted_candidate | production_current_candidate | acc_cur | acc_sel | acc_all | acc_obj | acc_turn | acc_dir | acc_mae | acc_mdd | prod_cur | prod_sel | prod_all | prod_turn | prod_mae | rho_sel_cur | rho_all_cur |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 20260406T053046Z | - | candidate_03 | - | 1 | 1 | 2 | - | - | - | - | 0.1468 | - | - | - | - | - | -0.1167 | 0.7667 |
+| 20260406T064716Z | - | candidate_06 | - | 1 | 2 | 7 | - | - | - | - | 0.0461 | - | - | - | - | - | 0.1500 | 0.2667 |
+| 20260406T073432Z | - | candidate_06 | - | 1 | 5 | 2 | - | - | - | - | 0.0359 | - | - | - | - | - | 0.4833 | -0.0667 |
+| 20260406T130645Z | - | candidate_01 | - | 1 | 5 | 1 | - | - | - | - | 0.0359 | - | - | - | - | - | 0.2333 | 0.6000 |
+| 20260407T034224Z | - | candidate_03 | - | 1 | 1 | 4 | 0.0037 | 0.9598 | 0.5833 | 0.1960 | 0.1159 | - | - | - | - | - | 1.0000 | -0.8000 |
+| 20260407T040723Z | - | candidate_04 | - | 1 | 4 | 3 | 0.0009 | 0.2098 | 0.7778 | 0.0172 | 0.0142 | - | - | - | - | - | -0.4000 | -0.4000 |
+| 20260407T041853Z | auto_user_value_selection | candidate_05 | candidate_17 | 1 | 1 | 1 | 0.0073 | 1.4590 | 0.7222 | 0.1957 | 0.0887 | 2 | 9 | 19 | 0.2413 | 0.0188 | 0.0152 | -0.2648 |
+| 20260408T075001Z | accepted_candidate | candidate_03 | candidate_03 | 1 | 2 | 12 | -0.0003 | 1.1491 | 0.5359 | 0.0116 | 0.0195 | 1 | 2 | 12 | 1.1491 | 0.0116 | 0.5471 | -0.0503 |
 
-## 11. GPT-5.4 PRO レビュー依頼プロンプト（finance / programming / math）
-
-以下を、下記の証拠を前提に、次の出力形式で返してください（要約文字数は 1500 字以内を推奨）。
-
-### あなたへの依頼
-
-- 目的: `SignalCascade` を「4倍データ化（360日）後」に再運用可能な選抜ロジックへ戻すため、採択条件・数式・実装順を最終決定したい。
-- 対象:
-  - `lookback` 拡張後の再学習選抜
-  - `accepted` と `production current` の整合
-  - `forecast` 偏差抑制の数式設計
-
-### 現時点の確定データ
-
-- 参照先: `PyTorch/artifacts/gold_xauusd_m30/archive/session_20260407T111619Z/manifest.json`
-
-```json
-{
-  "session_id": "20260407T111619Z",
-  "lookback_days": 360,
-  "quick_mode": true,
-  "candidate_limit": 2,
-  "source_rows_used": 11568,
-  "sample_count": 1387,
-  "generated_candidate_count": 22,
-  "evaluated_candidate_count": 2,
-  "optimization_gate": {
-    "status": "failed",
-    "passed_candidate_count": 0,
-    "failed_candidate_count": 2,
-    "thresholds": {
-      "average_log_wealth": {"minimum": 0.0},
-      "realized_pnl_per_anchor": {"minimum": 0.0},
-      "cvar_tail_loss": {"maximum": 0.08},
-      "max_drawdown": {"maximum": 0.15},
-      "directional_accuracy": {"minimum": 0.5},
-      "no_trade_band_hit_rate": {"maximum": 0.8}
-    }
-  },
-  "current_updated": false,
-  "production_current_candidate": null,
-  "accepted_candidate": null
-}
+PARTIAL
+- 20260405T203248Z: accepted=candidate_02, prod=-, acc_cur=1, acc_all=-, max_drawdown=0.0806
+- 20260406T012659Z: accepted=candidate_01, prod=-, acc_cur=1, acc_all=-, max_drawdown=0.0663
+- 20260406T035431Z: accepted=candidate_02, prod=-, acc_cur=1, acc_all=-, max_drawdown=0.0416
+- 20260406T041657Z: accepted=candidate_01, prod=-, acc_cur=1, acc_all=-, max_drawdown=0.0416
+- 20260407T111619Z: accepted=-, prod=-, acc_cur=-, acc_all=-, max_drawdown=-
 ```
 
-- 参照先: `.../archive/session_20260407T111619Z/leaderboard.json`
+Confirmed facts from this table:
 
-```json
-{
-  "candidate": "candidate_01",
-  "project_value_score": 0.5689966209539452,
-  "average_log_wealth": 0.00005003631007994594,
-  "directional_accuracy": 0.5090252707581228,
-  "max_drawdown": 0.21529955756395358,
-  "cvar_tail_loss": 0.013448311015963554,
-  "no_trade_band_hit_rate": 0.0,
-  "policy_horizon": 2,
-  "tie_policy_to_forecast_head": false,
-  "disable_overlay_branch": false,
-  "optimization_gate_status": "failed",
-  "optimization_gate_failed_rules": ["max_drawdown>0.150000"],
-  "user_value_score": 0.40527051625580496,
-  "user_value_chart_fidelity_score": 0.5943790780401461,
-  "user_value_sigma_band_score": 0.9363354527577521,
-  "user_value_execution_stability_score": 0.0,
-  "user_value_economic_score": 0.47788289454927,
-  "user_value_forecast_stability_score": 0.20237795196544225
-}
+- `20260407T041853Z` は明確な divergence session
+  - accepted `candidate_05` は `acc_all_rank = 1`
+  - production `candidate_17` は `prod_all_rank = 19`
+  - ただし production `candidate_17` は `blocked_turnover = 0.2413`、`blocked_exact_smooth_position_mae = 0.0188` と、accepted `candidate_05` (`1.4590`, `0.1957`) より stability / execution 面で大幅に良い
+- `20260408T075001Z` は別タイプの session
+  - accepted / production `candidate_03` は `acc_all_rank = prod_all_rank = 12`
+  - しかし blocked metrics は `turnover = 1.1491`、`blocked_exact_smooth_position_mae = 0.0116`、`max_drawdown = 0.0195`
+  - `all-horizon rank` は悪いが、stability 指標は catastrophic ではない
+
+#### I. 検証とテスト
+
+2026-04-13 JST に実行した主要コマンドと結果は次です。
+
+```bash
+PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m unittest \
+  PyTorch.tests.test_policy_training.PolicyAndTrainingTests.test_tune_latest_dataset_updates_current_with_deployment_score_override \
+  PyTorch.tests.test_artifact_schema.ArtifactSchemaTests.test_generate_research_report_backfills_forecast_quality_ranking_diagnostics_from_leaderboard \
+  PyTorch.tests.test_artifact_schema.ArtifactSchemaTests.test_predict_cli_refreshes_current_artifact_contract_outputs \
+  PyTorch.tests.test_artifact_schema.ArtifactSchemaTests.test_build_current_alias_metadata_backfills_forecast_quality_from_candidate_diagnostics
 ```
 
-```json
-{
-  "candidate": "candidate_02",
-  "average_log_wealth": -0.0027861036821830885,
-  "directional_accuracy": 0.5018050541516246,
-  "max_drawdown": 2.9476748471115446,
-  "cvar_tail_loss": 0.06960450857877731,
-  "no_trade_band_hit_rate": 0.010830324909747292,
-  "policy_horizon": 30,
-  "tie_policy_to_forecast_head": true,
-  "disable_overlay_branch": false,
-  "optimization_gate_status": "failed",
-  "optimization_gate_failed_rules": [
-    "average_log_wealth<0.000000",
-    "realized_pnl_per_anchor<0.000000",
-    "max_drawdown>0.150000"
-  ],
-  "user_value_score": 0.27477202038610304
-}
+結果:
+
+- `Ran 4 tests in 0.390s`
+- `OK`
+
+artifact refresh:
+
+```bash
+PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m signal_cascade_pytorch.interfaces.cli predict \
+  --output-dir PyTorch/artifacts/gold_xauusd_m30/current \
+  --csv PyTorch/artifacts/gold_xauusd_m30/live/xauusd_m30_latest.csv
 ```
 
-- 参照先: `PyTorch/artifacts/gold_xauusd_m30/archive/session_20260407T111619Z/candidate_01/source.json`
+最新 predict 出力:
 
-```json
-{
-  "lookback_days": 360,
-  "artifact_kind": "training_run",
-  "data_snapshot_row_count": 11568,
-  "data_snapshot_start_timestamp": "2025-04-13T22:00:00+00:00",
-  "data_snapshot_end_timestamp": "2026-04-07T09:30:00+00:00",
-  "artifact_dir": "/Users/.../archive/session_20260407T111619Z/candidate_01",
-  "generated_at_utc": "2026-04-07T11:46:44.191079+00:00"
-}
+- `policy horizon: 1`
+- `executed horizon: 1`
+- `position: -0.0997`
+- `trade delta: -0.0585`
+- `g_t: 0.4923`
+- `selected policy utility: 0.027053`
+- `no-trade-band hit: False`
+
+dashboard publish / contract:
+
+```bash
+SIGNAL_CASCADE_DISABLE_TRAINING=1 SIGNAL_CASCADE_DISABLE_LIVE_SYNC=1 node ./scripts/sync-signal-cascade-data.mjs
+npm run check:data:contract
 ```
 
-- `Frontend/scripts/sync-signal-cascade-data.mjs` の再学習起動引数
+結果:
 
-```javascript
-const defaultLookbackDays = 360
-const configuredLookbackDays = resolveLookbackDays()
-...
-"tune-latest",
-"--artifact-root",
-artifactRoot,
-"--csv",
-csvPath,
-"--csv-lookback-days",
-String(configuredLookbackDays),
+- `Wrote Frontend/public/dashboard-data.json`
+- `dashboard-data contract OK`
+
+#### J. touched code に open marker はほぼない
+
+`rg -n "TODO|FIXME|QUESTION|TBD|UNSURE" PyTorch/src/signal_cascade_pytorch PyTorch/tests Frontend/scripts`
+
+この検索では、今回の touched runtime code / test code に open decision marker は見当たりませんでした。未解決論点は inline TODO ではなく、artifact semantics と evaluation interpretation の側にあります。
+
+### 3.3 Inferences / working hypotheses
+
+以下は confirmed fact ではなく、開発側の作業仮説です。これが妥当かどうかを external reviewer に判定してほしいです。
+
+1. structural consistency はかなり回復しており、前回 blocker の中心だった「dashboard が runtime lane を誤表示している」という問題は主因ではなくなった可能性が高い。
+2. いまの主論点は「semantic lane separation が未完了」というより、「runtime lane と selection lane をどう研究解釈すべきか」、および「objective / checkpoint selection / candidate ranking の alignment が崩れているか」に移っている可能性が高い。
+3. `all-horizon rank` の悪化は、単純な stability deterioration と 1 対 1 では対応していない。
+   - `20260407T041853Z` は stability 優先 override の事例に見える
+   - `20260408T075001Z` は stability が比較的まともでも `all-horizon rank = 12` まで落ちる事例に見える
+   - つまり少なくとも 2 種類の failure mode が混在している可能性がある
+4. 最新 session では `current_top_candidate = candidate_03`、`all_horizon_top_candidate = candidate_05`、`all_vs_current_spearman ≈ -0.05` なので、current selection contract は `all-horizon` quality をほぼ反映していない可能性がある。
+5. ただし、archive 13 session のうち early session の一部は `selected-horizon` / `all-horizon` rank を full backfill できておらず、history summary 全体の解釈には coverage limitation がある。
+
+## 4. レビューしてほしい論点
+
+### 論点 1. いまの primary blocker は何か
+
+候補を順位付けし、各項目に confidence を付けてください。
+
+- `selection_diagnostics` と `runtime_current` の semantic 混在
+- `objective / checkpoint selection / candidate ranking` の不整合
+- `data / split / walk-forward variance`
+- `model architecture limitation`
+- `artifact consistency` の未完了
+- その他
+
+特に知りたいのは、前回 review で優先度が高かった artifact consistency 問題が、今回の evidence ではどこまで下がったかです。
+
+### 論点 2. semantic separation は十分に実装されたか
+
+Confirmed facts:
+
+- dashboard `run.costMultiplier = 0.5`
+- dashboard `metrics.validation.costMultiplier = 6.0`
+- `runtime_current.operating_point.cost_multiplier = 0.5`
+- `policy_calibration_summary.selected_row.cost_multiplier = 0.5`
+- `selected_row_matches_applied_runtime = true`
+- archived accepted candidate config は `policy_cost_multiplier = 6.0`
+
+ここから次のどれと読むべきかを判断してください。
+
+1. semantic separation は実装として十分で、次の主論点は研究契約に移った
+2. runtime lane と accepted candidate archive lane の乖離がなお blocker
+3. まだ別の semantic 混在が残っている
+
+### 論点 3. `all-horizon rank` 悪化と stability 劣化の共起は本当にあるか
+
+上の session table を見て、次を判断してください。
+
+1. `all-horizon rank` 悪化は blocked stability 悪化と同じ現象か
+2. それとも `20260407T041853Z` のような deployment override と、`20260408T075001Z` のような objective / evaluation mismatch は別現象か
+3. 開発側が次に組むべき表や実験は、どの列を足せば最も識別力が高いか
+
+特に、下の 2 session を比較対象として重視してください。
+
+- `20260407T041853Z`
+  - accepted `candidate_05`: `acc_all_rank = 1`, `blocked_turnover = 1.4590`, `blocked_exact_smooth_position_mae = 0.1957`, `max_drawdown = 0.0887`
+  - production `candidate_17`: `prod_all_rank = 19`, `blocked_turnover = 0.2413`, `blocked_exact_smooth_position_mae = 0.0188`, `max_drawdown = 0.0170`
+- `20260408T075001Z`
+  - accepted / production `candidate_03`: `acc_all_rank = 12`
+  - ただし `blocked_turnover = 1.1491`, `blocked_exact_smooth_position_mae = 0.0116`, `max_drawdown = 0.0195`
+
+### 論点 4. `validation metrics` は future multi-horizon quality の proxy か
+
+開発側は現時点で `No` 寄りです。その根拠は次です。
+
+- current selection session で `accepted_candidate_all_horizon_rank = 12`
+- history summary で `accepted_all_horizon_top_match_ratio = 0.25`
+- current validation metrics 自体は catastrophic ではない
+- checkpoint selection metric は `exact_log_wealth_minus_lambda_cvar`
+- selected epoch は `6`、best epoch by exact_log_wealth は `1`
+
+この材料から、`validation metrics` を future multi-horizon forecast quality の proxy と見なしてよいかを判定してください。
+
+### 論点 5. cheap experiment を 3 件以内で選んでほしい
+
+開発側が候補として考えているのは次です。順位付けと、各実験の expected information gain を示してください。
+
+1. `accepted_candidate` と `production_current` について、`all-horizon rank`, `blocked objective`, `blocked turnover`, `blocked exact_smooth_position_mae`, `max_drawdown`, `deployment_score`, `user_value_score` を session 横断で一枚の scorecard に固定し、divergence pattern を cluster 化する
+2. 最新 session `20260408T075001Z` を `cost_multiplier = 0.5` と `6.0` の両 operating point で同一 candidate に対して再評価し、ranking / blocked metrics / displayed forecast の差を比較する
+3. walk-forward fold 数か validation span を増やして、`all-horizon rank` と `blocked objective rank` の安定性を再評価する
+4. architecture ablation
+
+開発側の暫定順位は `1 > 2 > 3 > 4` です。これが妥当か見てください。
+
+## 5. 参照ファイル / アーティファクト
+
+この節は provenance 用です。レビューのために開く必要はありませんが、必要なら audit trail として使ってください。
+
+- repo root: `/Users/inouehiroshi/Documents/GitHub/SignalCascade`
+- current artifact directory: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/current`
+- current `analysis.json`: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/current/analysis.json`
+- current `validation_summary.json`: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/current/validation_summary.json`
+- current `metrics.json`: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/current/metrics.json`
+- current `source.json`: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/current/source.json`
+- top-level report mirror: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/report_signalcascade_xauusd.md`
+- dashboard payload: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend/public/dashboard-data.json`
+- latest accepted session manifest: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/archive/session_20260408T075001Z/manifest.json`
+- latest accepted session leaderboard: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/archive/session_20260408T075001Z/leaderboard.json`
+- key divergence session manifest: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/archive/session_20260407T041853Z/manifest.json`
+- key divergence session leaderboard: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/artifacts/gold_xauusd_m30/archive/session_20260407T041853Z/leaderboard.json`
+- runtime refresh implementation: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/bootstrap.py`
+- diagnostics lane implementation: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/diagnostics_service.py`
+- current alias / governance snapshot: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/current_alias.py`
+- ranking diagnostics implementation: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/selection_rank_diagnostics.py`
+- tuning / session manifest writer: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/tuning_service.py`
+- report builder: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/src/signal_cascade_pytorch/application/report_service.py`
+- dashboard publish: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend/scripts/sync-signal-cascade-data.mjs`
+- dashboard contract: `/Users/inouehiroshi/Documents/GitHub/SignalCascade/Frontend/scripts/check-dashboard-data-contract.mjs`
+- relevant tests:
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/tests/test_artifact_schema.py`
+  - `/Users/inouehiroshi/Documents/GitHub/SignalCascade/PyTorch/tests/test_policy_training.py`
+
+## 6. 期待する出力形式
+
+以下の順序で回答してください。
+
+1. `結論`
+   - 3 行以内で、いま model judgment を再開してよいか、主 blocker は何か、次の 1 タスクは何かを明示してください。
+2. `Confirmed facts`
+   - この文書にある evidence だけに基づく事実を列挙してください。
+3. `Inferences`
+   - 事実から導いた仮説・解釈を列挙してください。
+4. `failure cause の順位付け`
+   - 候補を優先度順に並べ、各項目に confidence を付けてください。
+5. `cheap experiment`
+   - 最大 3 件。期待できる information gain と、その実験で何が falsify / confirm されるかを書いてください。
+6. `validation metrics は future multi-horizon quality の proxy か`
+   - `Yes / No / Partially` のいずれかを明示し、理由を書いてください。
+7. `ゴールまでのステップと現在地`
+   - 3〜6 ステップ以内
+   - 現在地を `step N/M` などで明示
+   - immediate next action を 1 つに絞る
+
+## 7. 制約
+
+- この文書だけでレビューしてください。Section 5 のパス参照は audit trail 用であり、開くことを前提にしません。
+- 一般論ではなく、この文書にある数値・表・コマンド・artifact snapshot を起点に判断してください。
+- 事実と仮説を必ず分けてください。
+- 不足 evidence があるなら、「何が不足しているためどこまでしか言えないか」を明示してください。
+- cheap experiment は、開発側がそのまま着手できる粒度まで具体化してください。
+- 日付は絶対日付で書いてください。
+
+## 付録 A. semantic lane separation の実装要点
+
+runtime lane と selection lane は現在、少なくとも payload 上は別物として持っています。実装の骨子は次です。
+
+`bootstrap.py`
+
+```py
+forecast_quality_scorecards = _build_forecast_quality_scorecards(...)
+refreshed_summary["forecast_quality_scorecards"] = forecast_quality_scorecards
+refreshed_summary["selection_diagnostics"] = _build_selection_diagnostics_payload(...)
+refreshed_summary["runtime_current"] = _build_runtime_current_payload(...)
 ```
 
-- `PyTorch/src/signal_cascade_pytorch/application/tuning_service.py` の選抜核（要点）
+`report_service.py`
 
-```python
-_OPTIMIZATION_GATE_RULES = (
-    {"metric": "average_log_wealth", "operator": "minimum", "threshold": 0.0},
-    {"metric": "realized_pnl_per_anchor", "operator": "minimum", "threshold": 0.0},
-    {"metric": "cvar_tail_loss", "operator": "maximum", "threshold": 0.08},
-    {"metric": "max_drawdown", "operator": "maximum", "threshold": 0.15},
-    {"metric": "directional_accuracy", "operator": "minimum", "threshold": 0.50},
-    {"metric": "no_trade_band_hit_rate", "operator": "maximum", "threshold": 0.80},
+```py
+forecast_quality_ranking_diagnostics = _load_forecast_quality_ranking_diagnostics(
+    current_selection_governance
 )
-
-def _build_user_value_metrics(candidate):
-    chart_fidelity_score = _build_chart_fidelity_score(candidate)
-    sigma_band_score = _inverse_linear_score(candidate.get('sigma_calibration'), upper_bound=0.20, default=0.5)
-    execution_stability_score = _build_execution_stability_score(candidate)
-    economic_score = _wealth_like_score(
-        candidate.get('blocked_objective_log_wealth_minus_lambda_cvar_mean'),
-        candidate.get('average_log_wealth')
-    )
-    forecast_stability_score = _build_forecast_stability_score(candidate)
-    base_user_value_score = (
-        0.55 * chart_fidelity_score +
-        0.10 * sigma_band_score +
-        0.20 * execution_stability_score +
-        0.15 * economic_score
-    )
-    user_value_score = 0.70 * base_user_value_score + 0.30 * forecast_stability_score
-
-def _build_execution_stability_score(candidate):
-    drawdown_score = _inverse_linear_score(candidate.get('max_drawdown'), upper_bound=0.15, default=0.0)
-    turnover_score = _inverse_linear_score(candidate.get('blocked_turnover_mean'), upper_bound=2.0, default=0.0)
-    return 0.60 * drawdown_score + 0.40 * turnover_score
-
-def _select_production_current_candidate(leaderboard):
-    passed_rows = [row for row in leaderboard if bool(row.get('optimization_gate_passed'))]
-    return min(
-      passed_rows,
-      key=lambda row: (
-        -_metric_with_fallback(
-          row,
-          primary_key="user_value_score",
-          fallback_key="project_value_score",
-          default=0.0,
-        ),
-        -_metric_with_fallback(
-          row,
-          primary_key="user_value_chart_fidelity_score",
-          fallback_key="project_value_score",
-          default=0.0,
-        ),
-        -_metric_with_fallback(
-          row,
-          primary_key="user_value_forecast_stability_score",
-          fallback_key="user_value_chart_fidelity_score",
-          default=0.0,
-        ),
-        _ascending_metric(row, "blocked_exact_smooth_position_mae_mean"),
-        _ascending_metric(row, "sigma_calibration"),
-        _ascending_metric(row, "blocked_turnover_mean"),
-        _descending_metric(
-          row,
-          "blocked_objective_log_wealth_minus_lambda_cvar_mean",
-          "average_log_wealth",
-        ),
-        str(row.get("candidate", "")),
-      ),
-    )
+selection_history_summary = build_selection_history_summary(
+    _resolve_archive_root(output_dir, current_selection_governance)
+)
 ```
 
-- `PyTorch/artifacts/gold_xauusd_m30/current/source.json` の accepted と production current の直近整合値
+`selection_rank_diagnostics.py`
+
+```py
+resolved_diagnostics = build_forecast_quality_ranking_diagnostics(
+    backfill_forecast_quality_metrics_from_session(
+        leaderboard_rows,
+        leaderboard_path.parent,
+    ),
+    accepted_candidate=accepted_candidate,
+    production_current_candidate=production_current_candidate,
+)
+```
+
+Confirmed facts:
+
+- 旧 session manifest に `forecast_quality_ranking_diagnostics` が無い場合でも、report は `leaderboard.json` と candidate diagnostics から backfill している
+- したがって、history summary は retrospective reconstruction を含む
+
+## 付録 B. current runtime / selection payload の exact values
 
 ```json
 {
-  "current_selection_governance": {
-    "selection_mode": "auto_user_value_selection",
-    "selection_rule": "optimization_gate_then_user_value_score",
-    "accepted_candidate": { "candidate": "candidate_05" },
-    "production_current": { "candidate": "candidate_17" },
-    "override_applied": true,
-    "override_reason": "production current prioritizes chart fidelity, sigma-band reliability, and execution stability over blocked-objective winner",
-    "decision_summary": "production current differs from the accepted candidate because chart fidelity, sigma-band reliability, and execution stability took priority over blocked-objective rank.",
-    "paired_frontier": {
-      "delta_production_minus_accepted": {
-        "user_value_score": 0.11152906561806619,
-        "average_log_wealth": -0.00560152233659186,
-        "blocked_objective_log_wealth_minus_lambda_cvar_mean": -0.006071749320060633,
-        "max_drawdown": -0.07168563052007085,
-        "blocked_turnover_mean": -1.2176364214344293,
-        "trade_delta": -0.5779438111643571
-      }
-    }
-  }
+  "artifact_id": "246338cc6042945c5ec5c54bf58edb2005b6efce9147bd9ac630287f8b8f2c66",
+  "source_generated_at_utc": "2026-04-12T23:18:41.316351+00:00",
+  "dashboard_generated_at": "2026-04-12T23:18:54.787Z",
+  "selected_row_key": "state_reset_mode=carry_on|cost_multiplier=0.5|gamma_multiplier=4|min_policy_sigma=0.0001|q_max=0.75|cvar_weight=0.2",
+  "selected_row_matches_applied_runtime": true,
+  "runtime_current_cost_multiplier": 0.5,
+  "selection_validation_cost_multiplier": 6.0,
+  "dashboard_run_costMultiplier": 0.5,
+  "dashboard_validation_costMultiplier": 6,
+  "dashboard_artifact_lag_hours": 103.32
 }
 ```
 
-- `Frontend/public/dashboard-data.json` の現行公開値（未反映警告: stale）
+## 付録 C. current latest candidate `candidate_03` の exact snapshot
+
+latest accepted / production current `candidate_03` の主要値:
 
 ```json
 {
-  "governance": {
-    "selectionMode": "auto_user_value_selection",
-    "productionCurrentCandidate": "candidate_17",
-    "acceptedCandidate": "candidate_05"
-  },
-  "run": {
-    "sampleCount": 184,
-    "effectiveSampleCount": 154,
-    "trainSamples": 118,
-    "validationSamples": 36,
-    "runQuality": "stale",
-    "modelDirectory": "PyTorch/artifacts/gold_xauusd_m30/current"
-  }
+  "candidate": "candidate_03",
+  "policy_cost_multiplier": 6.0,
+  "policy_gamma_multiplier": 4.0,
+  "q_max": 0.75,
+  "average_log_wealth": 0.000009859592128159684,
+  "blocked_objective_log_wealth_minus_lambda_cvar_mean": -0.00033674398364080517,
+  "blocked_turnover_mean": 1.149111051561954,
+  "blocked_directional_accuracy_mean": 0.5358812529219261,
+  "blocked_exact_smooth_position_mae_mean": 0.011591466342301243,
+  "max_drawdown": 0.01945894954516857,
+  "selected_horizon_forecast_quality_score": 0.6215998094867489,
+  "all_horizon_forecast_quality_score": 0.4260937384640033,
+  "accepted_candidate_current_rank": 1,
+  "accepted_candidate_selected_horizon_rank": 2,
+  "accepted_candidate_all_horizon_rank": 12
 }
 ```
 
-### 判断したい論点（優先順）
+## 付録 D. 検証コマンド
 
-1. **金融側**: `max_drawdown<=0.15` 失敗が主要ボトルネックとみなされるのは妥当か。収益/方向精度とのトレードオフでどの閾値を採用すべきか。
-2. **数学側**: `user_value_score` に実際のリスクをどう入れるべきか。候補スコアへ `max_drawdown` を一次項として入れるのか、`forecast_return_pct_jump` を加えるのか。
-3. **実装側**: `accepted_candidate` と `production current` の選抜ルールを、どのようなガード付き階層（must pass gate / tie-break）で固定するのが再現性が高いか。
+```bash
+PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m unittest \
+  PyTorch.tests.test_policy_training.PolicyAndTrainingTests.test_tune_latest_dataset_updates_current_with_deployment_score_override \
+  PyTorch.tests.test_artifact_schema.ArtifactSchemaTests.test_generate_research_report_backfills_forecast_quality_ranking_diagnostics_from_leaderboard \
+  PyTorch.tests.test_artifact_schema.ArtifactSchemaTests.test_predict_cli_refreshes_current_artifact_contract_outputs \
+  PyTorch.tests.test_artifact_schema.ArtifactSchemaTests.test_build_current_alias_metadata_backfills_forecast_quality_from_candidate_diagnostics
 
-### 出力で必須
+PYTHONPATH=PyTorch/src PyTorch/.venv/bin/python -m signal_cascade_pytorch.interfaces.cli predict \
+  --output-dir PyTorch/artifacts/gold_xauusd_m30/current \
+  --csv PyTorch/artifacts/gold_xauusd_m30/live/xauusd_m30_latest.csv
 
-1. まず結論を 3 点以内（採用順）で提示
-2. 次に「短期A/Bテスト3件」「再現性確認指標3件」を提示
-3. 最後に `ゴールまでの残ステップ` を `step N/M` 形式で 4 行以内で示す
+SIGNAL_CASCADE_DISABLE_TRAINING=1 SIGNAL_CASCADE_DISABLE_LIVE_SYNC=1 \
+  node ./scripts/sync-signal-cascade-data.mjs
+
+npm run check:data:contract
+```
+
+結果要約:
+
+- unit test 4 件 `OK`
+- `predict` refresh 成功
+- dashboard publish 成功
+- dashboard contract `OK`
+
+## 付録 E. reviewer に特に見てほしい 2 つの対比
+
+### 1. stability tradeoff 型の divergence
+
+`20260407T041853Z`
+
+- accepted `candidate_05`
+  - `acc_all_rank = 1`
+  - `blocked_objective = 0.0073`
+  - `blocked_turnover = 1.4590`
+  - `blocked_exact_smooth_position_mae = 0.1957`
+  - `max_drawdown = 0.0887`
+- production `candidate_17`
+  - `prod_all_rank = 19`
+  - `blocked_objective = 0.0012`
+  - `blocked_turnover = 0.2413`
+  - `blocked_exact_smooth_position_mae = 0.0188`
+  - `max_drawdown = 0.0170`
+
+この session は「all-horizon quality を捨てて execution stability を取る」型に見えます。
+
+### 2. latest session の objective / evaluation mismatch らしさ
+
+`20260408T075001Z`
+
+- accepted / production current `candidate_03`
+  - `current rank = 1`
+  - `selected-horizon rank = 2`
+  - `all-horizon rank = 12`
+  - `blocked_objective = -0.0003367`
+  - `blocked_turnover = 1.1491`
+  - `blocked_exact_smooth_position_mae = 0.0116`
+  - `max_drawdown = 0.0195`
+
+この session は「stability は崩れていないのに all-horizon rank が悪い」型に見えます。
+
+これが stability の問題ではなく objective / evaluation alignment の問題かどうかを判定してください。

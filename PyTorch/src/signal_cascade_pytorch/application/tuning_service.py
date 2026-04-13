@@ -30,6 +30,7 @@ from .report_service import (
     generate_research_report,
     load_required_diagnostics_summary,
 )
+from .selection_rank_diagnostics import build_forecast_quality_ranking_diagnostics
 from .training_service import train_model
 from ..infrastructure.data.csv_source import CsvMarketDataSource
 from ..infrastructure.persistence import ensure_directory, load_json, save_json
@@ -226,6 +227,7 @@ def tune_latest_dataset(
         result_row.update(_extract_forecast_profile_metrics(prediction))
         result_row.update(_extract_blocked_candidate_metrics(diagnostics_summary, config))
         result_row.update(_extract_runtime_policy_alignment_metrics(diagnostics_summary, config))
+        result_row.update(_extract_forecast_quality_score_metrics(diagnostics_summary))
         result_row.update(_evaluate_optimization_gate(result_row))
         result_row.update(_build_user_value_metrics(result_row))
         result_row.update(_build_deployment_score_metrics(result_row))
@@ -257,6 +259,21 @@ def tune_latest_dataset(
             float(row["best_validation_loss"]),
         )
     )
+    best_result = leaderboard[0]
+    accepted_result = next(
+        (row for row in leaderboard if bool(row["optimization_gate_passed"])),
+        None,
+    )
+    production_result = None if quick_mode else _select_production_current_candidate(leaderboard)
+    forecast_quality_ranking_diagnostics = build_forecast_quality_ranking_diagnostics(
+        leaderboard,
+        accepted_candidate=(
+            str(accepted_result["candidate"]) if accepted_result is not None else None
+        ),
+        production_current_candidate=(
+            str(production_result["candidate"]) if production_result is not None else None
+        ),
+    )
     save_json(
         session_dir / "leaderboard.json",
         {
@@ -265,15 +282,9 @@ def tune_latest_dataset(
             "evaluated_candidate_count": len(evaluated_candidate_parameters),
             "candidate_limit": resolved_candidate_limit,
             "quick_mode": bool(quick_mode),
+            "forecast_quality_ranking_diagnostics": forecast_quality_ranking_diagnostics,
         },
     )
-
-    best_result = leaderboard[0]
-    accepted_result = next(
-        (row for row in leaderboard if bool(row["optimization_gate_passed"])),
-        None,
-    )
-    production_result = None if quick_mode else _select_production_current_candidate(leaderboard)
     production_current_selection = _build_production_current_selection_payload(
         accepted_result=accepted_result,
         production_result=production_result,
@@ -331,6 +342,7 @@ def tune_latest_dataset(
         "accepted_candidate": accepted_result,
         "production_current_candidate": production_result,
         "production_current_selection": production_current_selection,
+        "forecast_quality_ranking_diagnostics": forecast_quality_ranking_diagnostics,
         "current_updated": production_result is not None,
         "selection_status": selection_status,
         "interrupted_tuning": accepted_result is None,
@@ -1007,6 +1019,47 @@ def _extract_forecast_profile_metrics(prediction) -> dict[str, object]:
         "forecast_return_pct_abs_max": max_abs_return,
         "forecast_return_pct_jump_max": jump_max,
         "forecast_long_horizon_return_pct_abs_max": long_horizon_abs_max,
+    }
+
+
+def _extract_forecast_quality_score_metrics(
+    diagnostics_summary: dict[str, object],
+) -> dict[str, object]:
+    scorecards_payload = diagnostics_summary.get("forecast_quality_scorecards")
+    scorecards = dict(scorecards_payload) if isinstance(scorecards_payload, dict) else {}
+    selected_payload = scorecards.get("selected_horizon")
+    selected = dict(selected_payload) if isinstance(selected_payload, dict) else {}
+    all_payload = scorecards.get("all_horizon")
+    all_horizon = dict(all_payload) if isinstance(all_payload, dict) else {}
+
+    selected_quality_score = _finite_float_or_none(selected.get("quality_score"))
+    all_quality_score = _finite_float_or_none(all_horizon.get("quality_score"))
+    score_gap = _finite_float_or_none(scorecards.get("quality_score_gap_all_minus_selected"))
+    if score_gap is None and selected_quality_score is not None and all_quality_score is not None:
+        score_gap = all_quality_score - selected_quality_score
+
+    return {
+        "selected_horizon_forecast_quality_score": selected_quality_score,
+        "selected_horizon_forecast_directional_accuracy": _finite_float_or_none(
+            selected.get("directional_accuracy")
+        ),
+        "selected_horizon_forecast_probabilistic_calibration_score": _finite_float_or_none(
+            selected.get("probabilistic_calibration_score")
+        ),
+        "selected_horizon_forecast_mu_calibration": _finite_float_or_none(
+            selected.get("mu_calibration")
+        ),
+        "all_horizon_forecast_quality_score": all_quality_score,
+        "all_horizon_forecast_directional_accuracy": _finite_float_or_none(
+            all_horizon.get("directional_accuracy")
+        ),
+        "all_horizon_forecast_probabilistic_calibration_score": _finite_float_or_none(
+            all_horizon.get("probabilistic_calibration_score")
+        ),
+        "all_horizon_forecast_mu_calibration": _finite_float_or_none(
+            all_horizon.get("mu_calibration")
+        ),
+        "forecast_quality_score_gap_all_minus_selected": score_gap,
     }
 
 

@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import csv
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -15,7 +16,13 @@ from .application.artifact_provenance import (
 from .application.artifact_manifest import build_artifact_entrypoints, build_artifact_manifest
 from .application.config import TrainingConfig
 from .application.current_alias import build_current_alias_metadata
-from .application.diagnostics_service import export_review_diagnostics
+from .application.diagnostics_service import (
+    _build_applied_runtime_policy,
+    _build_forecast_quality_scorecards,
+    _build_runtime_current_payload,
+    _build_selection_diagnostics_payload,
+    export_review_diagnostics,
+)
 from .application.dataset_service import (
     build_latest_inference_example,
     build_latest_inference_example_from_bars,
@@ -38,7 +45,7 @@ from .application.report_service import (
     generate_research_report,
     load_required_diagnostics_summary,
 )
-from .application.training_service import _build_checkpoint_audit, train_model
+from .application.training_service import _build_checkpoint_audit, split_examples, train_model
 from .application.tuning_service import tune_latest_dataset
 from .application.tuning_service import _extend_current_sub_artifacts
 from .infrastructure.data.csv_source import CsvMarketDataSource
@@ -185,7 +192,9 @@ def predict_command(args) -> int:
 
     if source_payload["kind"] == "csv":
         base_bars = source.load_bars()
+        source_rows_original = len(base_bars)
         base_bars = limit_base_bars_to_lookback_days(base_bars, source_payload.get("lookback_days"))
+        source_rows_used = len(base_bars)
         examples = build_training_examples_from_bars(base_bars, config, price_scale=price_scale)
         latest_inference_example = (
             build_latest_inference_example_from_bars(
@@ -197,6 +206,9 @@ def predict_command(args) -> int:
             else None
         )
     else:
+        source_rows_original = None
+        source_rows_used = None
+        base_bars = None
         examples = build_training_examples(source, config, price_scale=price_scale)
         latest_inference_example = build_latest_inference_example(
             source,
@@ -213,10 +225,17 @@ def predict_command(args) -> int:
         previous_position=float(getattr(args, "previous_position", 0.0) or 0.0),
         latest_example=latest_inference_example,
     )
-    save_json(output_dir / "config.json", config.to_dict())
-    save_json(output_dir / "prediction.json", serialize_prediction_result(prediction))
-    _save_forecast_summary(output_dir, prediction, config)
-    _merge_artifact_price_scale_metadata(output_dir, source_payload)
+    _refresh_prediction_artifact(
+        output_dir=output_dir,
+        model=model,
+        examples=examples,
+        config=config,
+        prediction=prediction,
+        source_payload=source_payload,
+        source_rows_original=source_rows_original,
+        source_rows_used=source_rows_used,
+        base_bars=base_bars,
+    )
 
     print(f"policy horizon: {prediction.policy_horizon}")
     print(f"executed horizon: {prediction.executed_horizon}")
@@ -549,6 +568,34 @@ def _save_forecast_summary(output_dir: Path, prediction, config: TrainingConfig)
     )
 
 
+def _prediction_refresh_sub_artifacts(
+    output_dir: Path,
+    source_payload: dict[str, object],
+    *,
+    diagnostics_refreshed: bool,
+    report_generated: bool,
+) -> dict[str, str]:
+    entries = {
+        "config.json": "regenerated",
+        "forecast_summary.json": "regenerated",
+        "manifest.json": "generated",
+        "metrics.json": "regenerated",
+        "prediction.json": "regenerated",
+        "source.json": "regenerated",
+    }
+    if diagnostics_refreshed:
+        entries["validation_summary.json"] = "regenerated"
+        for name in ("horizon_diag.csv", "policy_summary.csv", "validation_rows.csv"):
+            if (output_dir / name).exists():
+                entries[name] = "copied"
+    if report_generated:
+        entries["analysis.json"] = "regenerated"
+        entries["research_report.md"] = "regenerated"
+    if source_payload["kind"] == "csv":
+        entries["data_snapshot.csv"] = "generated"
+    return entries
+
+
 def _training_sub_artifacts(source_payload: dict[str, object]) -> dict[str, str]:
     entries = {
         "analysis.json": "regenerated",
@@ -665,6 +712,287 @@ def _materialize_replay_artifact(
         )
 
 
+def _refresh_prediction_artifact(
+    *,
+    output_dir: Path,
+    model: SignalCascadeModel,
+    examples,
+    config: TrainingConfig,
+    prediction,
+    source_payload: dict[str, object],
+    source_rows_original: int | None,
+    source_rows_used: int | None,
+    base_bars,
+) -> None:
+    output_dir = output_dir.expanduser().resolve()
+    artifact_source_payload = materialize_artifact_source(
+        source_payload,
+        output_dir,
+        base_bars=base_bars if source_payload["kind"] == "csv" else None,
+    )
+    metrics_payload = _load_optional_json_dict(output_dir / "metrics.json")
+    checkpoint_audit = _resolve_checkpoint_audit_summary(metrics_payload, config)
+
+    save_json(output_dir / "config.json", config.to_dict())
+    save_json(output_dir / "prediction.json", serialize_prediction_result(prediction))
+    _save_forecast_summary(output_dir, prediction, config)
+
+    validation_summary = _refresh_existing_prediction_diagnostics(
+        output_dir=output_dir,
+        config=config,
+        source_payload=artifact_source_payload,
+        source_rows_original=source_rows_original,
+        source_rows_used=source_rows_used,
+        base_bars=base_bars,
+    )
+    generated_at_utc = (
+        str(validation_summary["generated_at_utc"])
+        if isinstance(validation_summary, dict) and validation_summary.get("generated_at_utc")
+        else datetime.now(timezone.utc).isoformat()
+    )
+
+    train_examples, validation_examples = split_examples(examples, config)
+    purged_samples = max(len(examples) - len(train_examples) - len(validation_examples), 0)
+    refreshed_metrics = dict(metrics_payload)
+    refreshed_metrics["schema_version"] = METRICS_SCHEMA_VERSION
+    refreshed_metrics["source"] = artifact_source_payload
+    refreshed_metrics["checkpoint_audit"] = checkpoint_audit
+    if isinstance(validation_summary, dict) and isinstance(validation_summary.get("validation"), dict):
+        refreshed_metrics["validation_metrics"] = dict(validation_summary["validation"])
+    refreshed_metrics["sample_count"] = len(examples)
+    refreshed_metrics["effective_sample_count"] = len(train_examples) + len(validation_examples)
+    refreshed_metrics["train_samples"] = len(train_examples)
+    refreshed_metrics["validation_samples"] = len(validation_examples)
+    refreshed_metrics["purged_samples"] = purged_samples
+    if source_rows_original is not None and source_rows_used is not None:
+        refreshed_metrics["source_rows_original"] = source_rows_original
+        refreshed_metrics["source_rows_used"] = source_rows_used
+    save_json(output_dir / "metrics.json", refreshed_metrics)
+
+    source_payload_with_metadata = _load_optional_json_dict(output_dir / "source.json")
+    source_payload_with_metadata.update(artifact_source_payload)
+    _refresh_current_alias_metadata_if_present(output_dir, source_payload_with_metadata)
+    resolved_artifact_kind = str(source_payload_with_metadata.get("artifact_kind") or "training_run")
+    parent_artifact_dir = _resolve_parent_artifact_dir(source_payload_with_metadata)
+    sub_artifacts = build_subartifact_lineage(
+        _prediction_refresh_sub_artifacts(
+            output_dir,
+            artifact_source_payload,
+            diagnostics_refreshed=isinstance(validation_summary, dict),
+            report_generated=_can_generate_prediction_report(output_dir),
+        )
+    )
+    refreshed_source_payload = build_artifact_source_payload(
+        source_payload_with_metadata,
+        output_dir,
+        artifact_kind=resolved_artifact_kind,
+        parent_artifact_dir=parent_artifact_dir,
+        generated_at_utc=generated_at_utc,
+        sub_artifacts=sub_artifacts,
+    )
+    save_json(output_dir / "source.json", refreshed_source_payload)
+    _write_artifact_manifest(output_dir)
+    if _can_generate_prediction_report(output_dir):
+        generate_research_report(
+            output_dir,
+            report_path=_resolve_top_level_report_path(output_dir, refreshed_source_payload),
+        )
+    save_json(
+        output_dir / "source.json",
+        build_artifact_source_payload(
+            source_payload_with_metadata,
+            output_dir,
+            artifact_kind=resolved_artifact_kind,
+            parent_artifact_dir=parent_artifact_dir,
+            generated_at_utc=generated_at_utc,
+            sub_artifacts=sub_artifacts,
+        ),
+    )
+    _write_artifact_manifest(output_dir)
+
+
+def _refresh_current_alias_metadata_if_present(
+    output_dir: Path,
+    source_payload_with_metadata: dict[str, object],
+) -> None:
+    current_alias_contract = source_payload_with_metadata.get("current_alias_contract")
+    if not isinstance(current_alias_contract, dict):
+        return
+    governance = source_payload_with_metadata.get("current_selection_governance")
+    if not isinstance(governance, dict):
+        return
+    production_current = governance.get("production_current")
+    if not isinstance(production_current, dict):
+        return
+    source_artifact_dir = production_current.get("artifact_dir")
+    if not isinstance(source_artifact_dir, str) or not source_artifact_dir.strip():
+        return
+    resolved_source_dir = Path(source_artifact_dir).expanduser().resolve()
+    if not resolved_source_dir.exists() or not resolved_source_dir.is_dir():
+        return
+    selection_timestamp_utc = (
+        str(governance.get("selection_timestamp_utc"))
+        if governance.get("selection_timestamp_utc") is not None
+        else None
+    )
+    try:
+        source_payload_with_metadata.update(
+            build_current_alias_metadata(
+                output_dir.parent,
+                resolved_source_dir,
+                selection_timestamp_utc=selection_timestamp_utc,
+            )
+        )
+    except (FileNotFoundError, ValueError):
+        return
+
+
+def _refresh_existing_prediction_diagnostics(
+    *,
+    output_dir: Path,
+    config: TrainingConfig,
+    source_payload: dict[str, object],
+    source_rows_original: int | None,
+    source_rows_used: int | None,
+    base_bars,
+) -> dict[str, object] | None:
+    if not _can_generate_prediction_report(output_dir):
+        return None
+    summary = _load_optional_json_dict(output_dir / "validation_summary.json")
+    if not summary:
+        return None
+
+    refreshed_summary = dict(summary)
+    refreshed_summary["generated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    refreshed_summary["primary_state_reset_mode"] = str(config.evaluation_state_reset_mode)
+    generated_at_utc = str(refreshed_summary["generated_at_utc"])
+
+    stateful_evaluation = refreshed_summary.get("stateful_evaluation")
+    if isinstance(stateful_evaluation, dict):
+        mode_summary = stateful_evaluation.get(config.evaluation_state_reset_mode)
+        if isinstance(mode_summary, dict):
+            refreshed_summary["validation"] = dict(mode_summary)
+
+    dataset_payload = (
+        dict(refreshed_summary["dataset"])
+        if isinstance(refreshed_summary.get("dataset"), dict)
+        else {}
+    )
+    dataset_payload["source"] = source_payload
+    dataset_payload["source_rows_original"] = source_rows_original
+    dataset_payload["source_rows_used"] = source_rows_used
+    dataset_payload["base_bar_count"] = None if base_bars is None else len(base_bars)
+    refreshed_summary["dataset"] = dataset_payload
+    validation_rows = _load_optional_csv_rows(output_dir / "validation_rows.csv")
+
+    policy_calibration_summary = refreshed_summary.get("policy_calibration_summary")
+    if isinstance(policy_calibration_summary, dict):
+        refreshed_policy_summary = dict(policy_calibration_summary)
+        applied_runtime_policy = _build_applied_runtime_policy(config)
+        selected_row = refreshed_policy_summary.get("selected_row")
+        selected_row_key = (
+            str(selected_row.get("row_key"))
+            if isinstance(selected_row, dict) and selected_row.get("row_key") is not None
+            else None
+        )
+        refreshed_policy_summary["applied_runtime_policy"] = applied_runtime_policy
+        refreshed_policy_summary["applied_runtime_row_key"] = applied_runtime_policy["row_key"]
+        refreshed_policy_summary["applied_runtime_policy_role"] = "authoritative_runtime_config"
+        refreshed_policy_summary["selected_row_matches_applied_runtime"] = (
+            False if selected_row_key is None else selected_row_key == applied_runtime_policy["row_key"]
+        )
+        refreshed_summary["policy_calibration_summary"] = refreshed_policy_summary
+
+    forecast_quality_scorecards = _build_forecast_quality_scorecards(
+        validation=(
+            dict(refreshed_summary["validation"])
+            if isinstance(refreshed_summary.get("validation"), dict)
+            else {}
+        ),
+        validation_rows=validation_rows,
+        validation_sample_count=(
+            int(dataset_payload["validation_sample_count"])
+            if dataset_payload.get("validation_sample_count") is not None
+            else None
+        ),
+    )
+    refreshed_summary["forecast_quality_scorecards"] = forecast_quality_scorecards
+
+    refreshed_summary["selection_diagnostics"] = _build_selection_diagnostics_payload(
+        generated_at_utc=generated_at_utc,
+        checkpoint_audit=(
+            dict(refreshed_summary["checkpoint_audit"])
+            if isinstance(refreshed_summary.get("checkpoint_audit"), dict)
+            else {}
+        ),
+        dataset=dataset_payload,
+        validation=(
+            dict(refreshed_summary["validation"])
+            if isinstance(refreshed_summary.get("validation"), dict)
+            else {}
+        ),
+        state_vector_summary=(
+            dict(refreshed_summary["state_vector_summary"])
+            if isinstance(refreshed_summary.get("state_vector_summary"), dict)
+            else {}
+        ),
+        shape_usage_summary=(
+            dict(refreshed_summary["shape_usage_summary"])
+            if isinstance(refreshed_summary.get("shape_usage_summary"), dict)
+            else {}
+        ),
+        policy_horizon_summary=(
+            dict(refreshed_summary["policy_horizon_summary"])
+            if isinstance(refreshed_summary.get("policy_horizon_summary"), dict)
+            else {}
+        ),
+        stateful_evaluation=(
+            dict(refreshed_summary["stateful_evaluation"])
+            if isinstance(refreshed_summary.get("stateful_evaluation"), dict)
+            else {}
+        ),
+        blocked_walk_forward_evaluation=(
+            dict(refreshed_summary["blocked_walk_forward_evaluation"])
+            if isinstance(refreshed_summary.get("blocked_walk_forward_evaluation"), dict)
+            else {}
+        ),
+        policy_calibration_summary=(
+            dict(refreshed_summary["policy_calibration_summary"])
+            if isinstance(refreshed_summary.get("policy_calibration_summary"), dict)
+            else {}
+        ),
+        forecast_quality_scorecards=forecast_quality_scorecards,
+    )
+    refreshed_summary["runtime_current"] = _build_runtime_current_payload(
+        generated_at_utc=generated_at_utc,
+        config=config,
+        dataset=dataset_payload,
+        policy_calibration_summary=(
+            dict(refreshed_summary["policy_calibration_summary"])
+            if isinstance(refreshed_summary.get("policy_calibration_summary"), dict)
+            else {}
+        ),
+    )
+
+    save_json(output_dir / "validation_summary.json", refreshed_summary)
+    return refreshed_summary
+
+
+def _load_optional_csv_rows(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return [dict(row) for row in csv.DictReader(handle)]
+
+
+def _can_generate_prediction_report(output_dir: Path) -> bool:
+    try:
+        load_required_diagnostics_summary(output_dir)
+    except (FileNotFoundError, ValueError):
+        return False
+    return True
+
+
 def _resolve_diagnostics_output_dir(
     artifact_dir: Path,
     diagnostics_output_dir: str | None,
@@ -761,25 +1089,30 @@ def _promote_training_run_to_current(
 
 
 def _write_current_artifact_manifest(current_dir: Path) -> None:
-    source_payload = load_json(current_dir / "source.json")
+    _write_artifact_manifest(current_dir)
+
+
+def _write_artifact_manifest(artifact_dir: Path) -> None:
+    artifact_dir = artifact_dir.expanduser().resolve()
+    source_payload = load_json(artifact_dir / "source.json")
     if not isinstance(source_payload, dict):
-        raise FileNotFoundError(f"current artifact is missing source.json: {current_dir / 'source.json'}")
+        raise FileNotFoundError(f"artifact is missing source.json: {artifact_dir / 'source.json'}")
     generated_at_utc = source_payload.get("generated_at_utc")
     if not isinstance(generated_at_utc, str) or not generated_at_utc.strip():
-        diagnostics_summary = load_required_diagnostics_summary(current_dir)
+        diagnostics_summary = load_required_diagnostics_summary(artifact_dir)
         generated_at_utc = str(diagnostics_summary["generated_at_utc"])
     artifact_id = source_payload.get("artifact_id")
     if not isinstance(artifact_id, str) or not artifact_id.strip():
-        raise ValueError(f"current artifact is missing source artifact_id: {current_dir / 'source.json'}")
+        raise ValueError(f"artifact is missing source artifact_id: {artifact_dir / 'source.json'}")
     artifact_kind = source_payload.get("artifact_kind")
     if not isinstance(artifact_kind, str) or not artifact_kind.strip():
-        raise ValueError(f"current artifact is missing source artifact_kind: {current_dir / 'source.json'}")
+        raise ValueError(f"artifact is missing source artifact_kind: {artifact_dir / 'source.json'}")
     parent_artifact_id = source_payload.get("parent_artifact_id")
     resolved_parent_artifact_id = (
         str(parent_artifact_id) if parent_artifact_id is not None else None
     )
     save_json(
-        current_dir / "manifest.json",
+        artifact_dir / "manifest.json",
         build_artifact_manifest(
             artifact_kind=artifact_kind,
             artifact_id=artifact_id,
@@ -788,10 +1121,40 @@ def _write_current_artifact_manifest(current_dir: Path) -> None:
             source_payload=source_payload,
             entrypoints=build_artifact_entrypoints(
                 source_payload,
-                include_model=(current_dir / "model.pt").exists(),
+                include_model=(artifact_dir / "model.pt").exists(),
             ),
         ),
     )
+
+
+def _load_optional_json_dict(path: Path) -> dict[str, object]:
+    if not path.exists():
+        return {}
+    payload = load_json(path)
+    return dict(payload) if isinstance(payload, dict) else {}
+
+
+def _resolve_parent_artifact_dir(source_payload: dict[str, object]) -> Path | None:
+    parent_artifact_dir = source_payload.get("parent_artifact_dir")
+    if not isinstance(parent_artifact_dir, str) or not parent_artifact_dir.strip():
+        return None
+    return Path(parent_artifact_dir).expanduser().resolve()
+
+
+def _resolve_top_level_report_path(
+    artifact_dir: Path,
+    source_payload: dict[str, object],
+) -> Path | None:
+    if artifact_dir.name == "current":
+        return artifact_dir.parent.parent.parent / "report_signalcascade_xauusd.md"
+    current_alias_contract = source_payload.get("current_alias_contract")
+    if isinstance(current_alias_contract, dict):
+        authoritative_paths = current_alias_contract.get("authoritative_paths")
+        if isinstance(authoritative_paths, dict):
+            top_level_report = authoritative_paths.get("top_level_report")
+            if isinstance(top_level_report, str) and top_level_report.strip():
+                return Path(top_level_report).expanduser().resolve()
+    return None
 
 
 _build_artifact_entrypoints = build_artifact_entrypoints

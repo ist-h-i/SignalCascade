@@ -1,9 +1,11 @@
 from __future__ import annotations
 
+import csv
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Mapping
 
+from .diagnostics_service import _build_forecast_quality_scorecards
 from ..infrastructure.persistence import load_json
 
 _LEGACY_CURRENT_SELECTION_RULE = "optimization_gate_then_blocked_objective"
@@ -277,6 +279,20 @@ def _build_candidate_snapshot(
     )
     validation = diagnostics.get("validation")
     validation_metrics = validation if isinstance(validation, dict) else {}
+    forecast_quality_scorecards = _resolve_forecast_quality_scorecards(
+        artifact_dir,
+        diagnostics if isinstance(diagnostics, dict) else {},
+    )
+    selected_horizon_scorecard = (
+        dict(forecast_quality_scorecards.get("selected_horizon"))
+        if isinstance(forecast_quality_scorecards.get("selected_horizon"), dict)
+        else {}
+    )
+    all_horizon_scorecard = (
+        dict(forecast_quality_scorecards.get("all_horizon"))
+        if isinstance(forecast_quality_scorecards.get("all_horizon"), dict)
+        else {}
+    )
     row = dict(leaderboard_row or {})
     candidate_name = (
         artifact_dir.name
@@ -317,6 +333,24 @@ def _build_candidate_snapshot(
         "user_value_execution_stability_score": row.get(
             "user_value_execution_stability_score"
         ),
+        "selected_horizon_forecast_quality_score": row.get(
+            "selected_horizon_forecast_quality_score"
+        )
+        if row.get("selected_horizon_forecast_quality_score") is not None
+        else selected_horizon_scorecard.get("quality_score"),
+        "all_horizon_forecast_quality_score": row.get(
+            "all_horizon_forecast_quality_score"
+        )
+        if row.get("all_horizon_forecast_quality_score") is not None
+        else all_horizon_scorecard.get("quality_score"),
+        "forecast_quality_score_gap_all_minus_selected": row.get(
+            "forecast_quality_score_gap_all_minus_selected"
+        )
+        if row.get("forecast_quality_score_gap_all_minus_selected") is not None
+        else _safe_delta(
+            all_horizon_scorecard.get("quality_score"),
+            selected_horizon_scorecard.get("quality_score"),
+        ),
         "max_drawdown": validation_metrics.get("max_drawdown"),
         "turnover": validation_metrics.get("turnover"),
         "directional_accuracy": validation_metrics.get("directional_accuracy"),
@@ -324,6 +358,38 @@ def _build_candidate_snapshot(
         "no_trade_band_hit_rate": validation_metrics.get("no_trade_band_hit_rate"),
         "optimization_gate_passed": row.get("optimization_gate_passed"),
     }
+
+
+def _resolve_forecast_quality_scorecards(
+    artifact_dir: Path,
+    diagnostics: Mapping[str, object],
+) -> dict[str, object]:
+    existing_scorecards = diagnostics.get("forecast_quality_scorecards")
+    if isinstance(existing_scorecards, dict):
+        return dict(existing_scorecards)
+
+    dataset = diagnostics.get("dataset")
+    dataset_payload = dict(dataset) if isinstance(dataset, dict) else {}
+    validation = diagnostics.get("validation")
+    validation_payload = dict(validation) if isinstance(validation, dict) else {}
+    validation_rows = _load_validation_rows(artifact_dir / "validation_rows.csv")
+    validation_sample_count = dataset_payload.get("validation_sample_count")
+    return _build_forecast_quality_scorecards(
+        validation=validation_payload,
+        validation_rows=validation_rows,
+        validation_sample_count=(
+            int(validation_sample_count)
+            if validation_sample_count is not None
+            else None
+        ),
+    )
+
+
+def _load_validation_rows(path: Path) -> list[dict[str, object]]:
+    if not path.exists():
+        return []
+    with path.open("r", encoding="utf-8", newline="") as handle:
+        return [dict(row) for row in csv.DictReader(handle)]
 
 
 def _build_paired_frontier(
@@ -341,6 +407,9 @@ def _build_paired_frontier(
         "max_drawdown",
         "directional_accuracy",
         "exact_smooth_position_mae",
+        "selected_horizon_forecast_quality_score",
+        "all_horizon_forecast_quality_score",
+        "forecast_quality_score_gap_all_minus_selected",
         "trade_delta",
         "policy_horizon",
     )
@@ -360,6 +429,9 @@ def _build_paired_frontier(
             "mu_calibration",
             "sigma_calibration",
             "blocked_exact_smooth_position_mae_mean",
+            "selected_horizon_forecast_quality_score",
+            "all_horizon_forecast_quality_score",
+            "forecast_quality_score_gap_all_minus_selected",
             "max_drawdown",
             "blocked_turnover_mean",
         ],

@@ -12,12 +12,14 @@ from signal_cascade_pytorch.application.artifact_provenance import (
     build_subartifact_lineage,
     materialize_artifact_source,
 )
+from signal_cascade_pytorch.application.current_alias import build_current_alias_metadata
 from signal_cascade_pytorch.application.tuning_service import tune_latest_dataset
 from signal_cascade_pytorch.bootstrap import (
     _build_artifact_entrypoints,
     _build_artifact_manifest,
     _promote_training_run_to_current,
     _resolve_diagnostics_output_dir,
+    _resolve_top_level_report_path,
 )
 from signal_cascade_pytorch.application.config import TrainingConfig
 from signal_cascade_pytorch.application.dataset_service import (
@@ -520,6 +522,135 @@ class ArtifactSchemaTests(unittest.TestCase):
             source_source = json.loads((source_dir / "source.json").read_text(encoding="utf-8"))
             self.assertEqual(source_source["artifact_id"], "artifact-123")
 
+    def test_build_current_alias_metadata_backfills_forecast_quality_from_candidate_diagnostics(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir)
+            (artifact_root / "current").mkdir(parents=True, exist_ok=True)
+            session_dir = artifact_root / "archive" / "session_20260408T075001Z"
+            candidate_dir = session_dir / "candidate_03"
+            candidate_dir.mkdir(parents=True, exist_ok=True)
+
+            (candidate_dir / "source.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_kind": "training_run",
+                        "artifact_id": "artifact-123",
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (candidate_dir / "prediction.json").write_text(
+                json.dumps(
+                    {
+                        "policy_horizon": 1,
+                        "trade_delta": -0.05,
+                        "g_t": 0.49,
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (candidate_dir / "validation_summary.json").write_text(
+                json.dumps(
+                    {
+                        "validation": {
+                            "average_log_wealth": 0.001,
+                            "project_value_score": 0.62,
+                            "utility_score": 0.55,
+                            "mu_calibration": 0.04,
+                            "sigma_calibration": 0.06,
+                            "directional_accuracy": 0.61,
+                            "max_drawdown": 0.08,
+                            "turnover": 1.2,
+                            "exact_smooth_position_mae": 0.03,
+                            "no_trade_band_hit_rate": 0.07,
+                        },
+                        "dataset": {
+                            "validation_sample_count": 1,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (candidate_dir / "validation_rows.csv").write_text(
+                "\n".join(
+                    (
+                        "timestamp,mu_t,sigma_t,y_raw,pit,normalized_abs_error,policy_horizon_selected,selected",
+                        "2026-04-08T00:00:00+00:00,0.01,0.02,0.015,0.52,0.4,1,1",
+                    )
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            (session_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "best_candidate": {"candidate": "candidate_03"},
+                        "accepted_candidate": {"candidate": "candidate_03"},
+                        "production_current_candidate": {"candidate": "candidate_03"},
+                        "production_current_selection": {
+                            "selection_mode": "accepted_candidate",
+                            "selection_rule": "optimization_gate_then_deployment_score",
+                            "selection_rule_version": 1,
+                            "selection_status": "accepted_and_production_same",
+                            "decision_summary": "production current matches accepted candidate",
+                            "override_priority_metrics": [],
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session_dir / "leaderboard.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "candidate": "candidate_03",
+                                "blocked_average_log_wealth_mean": 0.0008,
+                                "blocked_objective_log_wealth_minus_lambda_cvar_mean": 0.0004,
+                                "blocked_turnover_mean": 0.9,
+                                "blocked_directional_accuracy_mean": 0.6,
+                                "blocked_exact_smooth_position_mae_mean": 0.025,
+                                "user_value_score": 0.58,
+                                "user_value_chart_fidelity_score": 0.69,
+                                "user_value_sigma_band_score": 0.61,
+                                "user_value_execution_stability_score": 0.68,
+                                "optimization_gate_passed": True,
+                            }
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            metadata = build_current_alias_metadata(
+                artifact_root,
+                candidate_dir,
+                selection_timestamp_utc="2026-04-08T11:39:12+00:00",
+            )
+
+            governance = metadata["current_selection_governance"]
+            production_current = governance["production_current"]
+            accepted_candidate = governance["accepted_candidate"]
+            self.assertIsNotNone(production_current["selected_horizon_forecast_quality_score"])
+            self.assertIsNotNone(production_current["all_horizon_forecast_quality_score"])
+            self.assertIsNotNone(
+                production_current["forecast_quality_score_gap_all_minus_selected"]
+            )
+            self.assertEqual(
+                production_current["selected_horizon_forecast_quality_score"],
+                accepted_candidate["selected_horizon_forecast_quality_score"],
+            )
+            self.assertEqual(
+                production_current["all_horizon_forecast_quality_score"],
+                accepted_candidate["all_horizon_forecast_quality_score"],
+            )
+            self.assertEqual(
+                governance["paired_frontier"]["delta_production_minus_accepted"][
+                    "selected_horizon_forecast_quality_score"
+                ],
+                0.0,
+            )
+
     def test_promote_training_run_to_current_accepts_overlay_with_model(self) -> None:
         with TemporaryDirectory() as temp_dir:
             artifact_root = Path(temp_dir)
@@ -637,6 +768,26 @@ class ArtifactSchemaTests(unittest.TestCase):
                 "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
                 "generated_at_utc": "2026-04-06T04:40:00+00:00",
                 "validation": validation_metrics,
+                "blocked_walk_forward_evaluation": {
+                    "best_state_reset_mode_by_mean_log_wealth": "carry_on",
+                    "state_reset_modes": {
+                        "carry_on": {
+                            "average_log_wealth_mean": 0.01,
+                            "turnover_mean": 0.2,
+                            "directional_accuracy_mean": 0.6,
+                            "exact_smooth_position_mae_mean": 0.03,
+                            "folds": [{"cvar_tail_loss": 0.01}],
+                        }
+                    },
+                },
+                "policy_calibration_summary": {
+                    "selected_row": {
+                        "row_key": "carry_on|cost=1|gamma=1|min_sigma=0.0001|q=1|cvar=0.2",
+                    },
+                    "applied_runtime_policy": {
+                        "row_key": "carry_on|cost=1|gamma=1|min_sigma=0.0001|q=1|cvar=0.2",
+                    },
+                },
             }
 
             def fake_export_review_diagnostics(*, output_dir, **_kwargs):
@@ -812,6 +963,288 @@ class ArtifactSchemaTests(unittest.TestCase):
             self.assertEqual(
                 forecast_payload["generated_at"],
                 forecast_payload["generated_at_utc"],
+            )
+
+    def test_predict_cli_refreshes_current_artifact_contract_outputs(self) -> None:
+        bars = _build_csv_bars(
+            start=datetime(2026, 1, 5, 0, 0, tzinfo=timezone.utc),
+            count=512,
+        )
+
+        with TemporaryDirectory() as temp_dir:
+            artifact_root = Path(temp_dir) / "artifacts" / "gold_xauusd_m30"
+            current_dir = artifact_root / "current"
+            current_dir.mkdir(parents=True, exist_ok=True)
+            csv_path = Path(temp_dir) / "live_latest.csv"
+            top_level_report = Path(temp_dir) / "report_signalcascade_xauusd.md"
+            _write_csv_bars(csv_path, bars)
+
+            config = TrainingConfig(
+                output_dir=str(current_dir),
+                horizons=(1, 3),
+                main_windows={"4h": 8, "1d": 3, "1w": 2},
+                overlay_windows={"1h": 8, "30m": 16},
+                policy_cost_multiplier=0.5,
+                policy_gamma_multiplier=0.5,
+                min_policy_sigma=0.0002,
+                q_max=1.25,
+                cvar_weight=0.1,
+            )
+            examples = build_training_examples_from_bars(bars, config)
+            latest_example = build_latest_inference_example_from_bars(bars, config)
+            model = _build_model_from_example(examples[0], config)
+            save_checkpoint(current_dir / "model.pt", model, config)
+            (current_dir / "config.json").write_text(
+                json.dumps(config.to_dict()),
+                encoding="utf-8",
+            )
+            (current_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 4,
+                        "history": [],
+                        "validation_metrics": {"average_log_wealth": -0.01},
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            selected_row = {
+                "state_reset_mode": "reset_each_session_or_window",
+                "cost_multiplier": 6.0,
+                "gamma_multiplier": 2.0,
+                "min_policy_sigma": 0.0001,
+                "q_max": 1.0,
+                "cvar_weight": 0.2,
+            }
+            stale_validation_summary = {
+                "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+                "generated_at_utc": "2026-04-07T00:00:00+00:00",
+                "primary_state_reset_mode": "carry_on",
+                "validation": {"average_log_wealth": -0.02, "directional_accuracy": 0.5},
+                "stateful_evaluation": {
+                    "carry_on": {
+                        "average_log_wealth": -0.02,
+                        "directional_accuracy": 0.5,
+                    },
+                    "reset_each_session_or_window": {
+                        "average_log_wealth": 0.01,
+                        "directional_accuracy": 0.6,
+                    },
+                },
+                "dataset": {
+                    "source": {"kind": "csv", "path": "/tmp/stale.csv"},
+                    "source_rows_original": 500,
+                    "source_rows_used": 500,
+                    "base_bar_count": 500,
+                },
+                "policy_calibration_summary": {
+                    "selected_row": {
+                        "row_key": (
+                            "state_reset_mode=reset_each_session_or_window|cost_multiplier=6|"
+                            "gamma_multiplier=2|min_policy_sigma=0.0001|q_max=1|cvar_weight=0.2"
+                        ),
+                        **selected_row,
+                    }
+                },
+            }
+            (current_dir / "validation_summary.json").write_text(
+                json.dumps(stale_validation_summary),
+                encoding="utf-8",
+            )
+            (current_dir / "validation_rows.csv").write_text(
+                (
+                    "sample_id,timestamp,horizon,y_raw,mu_t,sigma_t,pit,normalized_abs_error,"
+                    "policy_horizon_selected,selected\n"
+                    "0,2026-04-07T00:00:00+00:00,1,0.01,0.012,0.02,0.53,0.10,1,1\n"
+                ),
+                encoding="utf-8",
+            )
+            (current_dir / "policy_summary.csv").write_text("horizon\n1\n", encoding="utf-8")
+            (current_dir / "horizon_diag.csv").write_text("horizon\n1\n", encoding="utf-8")
+            (current_dir / "source.json").write_text(
+                json.dumps(
+                    {
+                        "kind": "csv",
+                        "path": str((current_dir / "data_snapshot.csv").resolve()),
+                        "source_origin_path": str(csv_path.resolve()),
+                        "artifact_schema_version": 2,
+                        "artifact_kind": "training_run",
+                        "artifact_id": "current-artifact-123",
+                        "artifact_dir": str(current_dir),
+                        "generated_at_utc": "2026-04-07T00:00:00+00:00",
+                        "sub_artifacts": {
+                            "prediction.json": {"materialization": "copied"},
+                        },
+                        "current_alias_contract": {
+                            "alias_role": "production_current",
+                            "top_level_report_role": "mirror_of_current_research_report",
+                            "authoritative_paths": {
+                                "runtime_config": str(current_dir / "config.json"),
+                                "prediction": str(current_dir / "prediction.json"),
+                                "forecast_summary": str(current_dir / "forecast_summary.json"),
+                                "source": str(current_dir / "source.json"),
+                                "research_report": str(current_dir / "research_report.md"),
+                                "top_level_report": str(top_level_report),
+                            },
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            def fake_generate_research_report(output_dir, report_path=None):
+                output_dir = Path(output_dir)
+                prediction_payload = json.loads(
+                    (output_dir / "prediction.json").read_text(encoding="utf-8")
+                )
+                analysis = {"prediction_anchor_time": prediction_payload["anchor_time"]}
+                (output_dir / "analysis.json").write_text(
+                    json.dumps(analysis),
+                    encoding="utf-8",
+                )
+                report_text = f"# report\nanchor_time: {prediction_payload['anchor_time']}\n"
+                (output_dir / "research_report.md").write_text(report_text, encoding="utf-8")
+                if report_path is not None:
+                    report_path = Path(report_path)
+                    report_path.parent.mkdir(parents=True, exist_ok=True)
+                    report_path.write_text(report_text, encoding="utf-8")
+                return analysis
+
+            parser = build_parser()
+            args = parser.parse_args(
+                [
+                    "predict",
+                    "--output-dir",
+                    str(current_dir),
+                    "--csv",
+                    str(csv_path),
+                    "--apply-selected-policy-calibration",
+                ]
+            )
+            with patch(
+                "signal_cascade_pytorch.bootstrap.generate_research_report",
+                side_effect=fake_generate_research_report,
+            ):
+                self.assertEqual(args.handler(args), 0)
+
+            prediction_payload = json.loads(
+                (current_dir / "prediction.json").read_text(encoding="utf-8")
+            )
+            forecast_payload = json.loads(
+                (current_dir / "forecast_summary.json").read_text(encoding="utf-8")
+            )
+            config_payload = json.loads((current_dir / "config.json").read_text(encoding="utf-8"))
+            metrics_payload = json.loads((current_dir / "metrics.json").read_text(encoding="utf-8"))
+            validation_summary = json.loads(
+                (current_dir / "validation_summary.json").read_text(encoding="utf-8")
+            )
+            source_payload = json.loads((current_dir / "source.json").read_text(encoding="utf-8"))
+            manifest_payload = json.loads((current_dir / "manifest.json").read_text(encoding="utf-8"))
+            analysis_payload = json.loads((current_dir / "analysis.json").read_text(encoding="utf-8"))
+            report_text = (current_dir / "research_report.md").read_text(encoding="utf-8")
+
+            self.assertEqual(prediction_payload["anchor_time"], latest_example.anchor_time.isoformat())
+            self.assertEqual(forecast_payload["anchor_time"], prediction_payload["anchor_time"])
+            self.assertEqual(config_payload["policy_cost_multiplier"], 6.0)
+            self.assertEqual(config_payload["policy_gamma_multiplier"], 2.0)
+            self.assertEqual(config_payload["min_policy_sigma"], 0.0001)
+            self.assertEqual(config_payload["q_max"], 1.0)
+            self.assertEqual(config_payload["cvar_weight"], 0.2)
+            self.assertEqual(
+                config_payload["evaluation_state_reset_mode"],
+                "reset_each_session_or_window",
+            )
+            self.assertEqual(validation_summary["primary_state_reset_mode"], "reset_each_session_or_window")
+            self.assertEqual(
+                validation_summary["validation"],
+                validation_summary["stateful_evaluation"]["reset_each_session_or_window"],
+            )
+            self.assertEqual(
+                validation_summary["selection_diagnostics"]["validation"],
+                validation_summary["validation"],
+            )
+            self.assertEqual(
+                validation_summary["forecast_quality_scorecards"]["all_horizon"]["sample_count"],
+                1,
+            )
+            self.assertIsNotNone(
+                validation_summary["forecast_quality_scorecards"]["selected_horizon"][
+                    "quality_score"
+                ]
+            )
+            self.assertEqual(
+                validation_summary["runtime_current"]["operating_point"]["cost_multiplier"],
+                6.0,
+            )
+            self.assertEqual(
+                validation_summary["runtime_current"]["operating_point_role"],
+                "authoritative_runtime_config",
+            )
+            self.assertTrue(
+                validation_summary["runtime_current"]["selection_alignment"][
+                    "selected_row_matches_runtime"
+                ]
+            )
+            self.assertEqual(metrics_payload["validation_metrics"], validation_summary["validation"])
+            self.assertEqual(source_payload["generated_at_utc"], validation_summary["generated_at_utc"])
+            self.assertEqual(manifest_payload["generated_at_utc"], validation_summary["generated_at_utc"])
+            self.assertEqual(source_payload["path"], str((current_dir / "data_snapshot.csv").resolve()))
+            self.assertEqual(source_payload["source_origin_path"], str(csv_path.resolve()))
+            self.assertEqual(
+                validation_summary["policy_calibration_summary"]["applied_runtime_policy"]["row_key"],
+                validation_summary["policy_calibration_summary"]["selected_row"]["row_key"],
+            )
+            self.assertTrue(
+                validation_summary["policy_calibration_summary"]["selected_row_matches_applied_runtime"]
+            )
+            self.assertEqual(
+                source_payload["current_alias_contract"]["authoritative_paths"]["top_level_report"],
+                str(top_level_report),
+            )
+            self.assertTrue((current_dir / "data_snapshot.csv").exists())
+            self.assertEqual(
+                top_level_report.read_text(encoding="utf-8"),
+                report_text,
+            )
+            self.assertEqual(analysis_payload["prediction_anchor_time"], prediction_payload["anchor_time"])
+            self.assertIn(prediction_payload["anchor_time"], report_text)
+            self.assertEqual(
+                source_payload["sub_artifacts"]["validation_summary.json"]["materialization"],
+                "regenerated",
+            )
+            self.assertEqual(
+                source_payload["sub_artifacts"]["prediction.json"]["materialization"],
+                "regenerated",
+            )
+            self.assertEqual(
+                source_payload["sub_artifacts"]["policy_summary.csv"]["materialization"],
+                "copied",
+            )
+            self.assertEqual(
+                source_payload["sub_artifacts"]["data_snapshot.csv"]["materialization"],
+                "generated",
+            )
+            self.assertEqual(manifest_payload["entrypoints"]["validation_summary"], "validation_summary.json")
+            self.assertEqual(manifest_payload["entrypoints"]["data_snapshot"], "data_snapshot.csv")
+
+    def test_resolve_top_level_report_path_prefers_current_artifact_root_over_stale_authoritative_path(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            current_dir = Path(temp_dir) / "PyTorch" / "artifacts" / "gold_xauusd_m30" / "current"
+            current_dir.mkdir(parents=True, exist_ok=True)
+            source_payload = {
+                "current_alias_contract": {
+                    "authoritative_paths": {
+                        "top_level_report": "/tmp/original-repo/PyTorch/report_signalcascade_xauusd.md",
+                    }
+                }
+            }
+
+            resolved = _resolve_top_level_report_path(current_dir, source_payload)
+
+            self.assertEqual(
+                resolved,
+                current_dir.parent.parent.parent / "report_signalcascade_xauusd.md",
             )
 
     def test_prediction_serializer_adds_schema_and_median_semantics(self) -> None:
@@ -1124,6 +1557,603 @@ class ArtifactSchemaTests(unittest.TestCase):
         self.assertEqual(
             analysis["policy_calibration_summary"]["selected_row"]["state_reset_mode"],
             "reset_each_session_or_window",
+        )
+
+    def test_generate_research_report_backfills_forecast_quality_ranking_diagnostics_from_leaderboard(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "current"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            session_dir = Path(temp_dir) / "archive" / "session_20260408T075001Z"
+            previous_session_dir = Path(temp_dir) / "archive" / "session_20260407T041853Z"
+            candidate_01_dir = session_dir / "candidate_01"
+            candidate_02_dir = session_dir / "candidate_02"
+            candidate_03_dir = previous_session_dir / "candidate_03"
+            candidate_04_dir = previous_session_dir / "candidate_04"
+            candidate_01_dir.mkdir(parents=True, exist_ok=True)
+            candidate_02_dir.mkdir(parents=True, exist_ok=True)
+            candidate_03_dir.mkdir(parents=True, exist_ok=True)
+            candidate_04_dir.mkdir(parents=True, exist_ok=True)
+
+            config = TrainingConfig(horizons=(1, 3), output_dir=str(output_dir))
+            (output_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 4,
+                        "sample_count": 10,
+                        "effective_sample_count": 8,
+                        "train_samples": 6,
+                        "validation_samples": 2,
+                        "purged_samples": 2,
+                        "source_rows_original": 10,
+                        "source_rows_used": 10,
+                        "validation_metrics": {
+                            "average_log_wealth": 0.01,
+                            "realized_pnl_per_anchor": 0.01,
+                            "cvar_tail_loss": 0.02,
+                            "max_drawdown": 0.03,
+                            "no_trade_band_hit_rate": 0.1,
+                            "mu_calibration": 0.04,
+                            "sigma_calibration": 0.05,
+                            "directional_accuracy": 0.6,
+                            "project_value_score": 0.7,
+                            "utility_score": 0.65,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "prediction.json").write_text(
+                json.dumps(serialize_prediction_result(_prediction())),
+                encoding="utf-8",
+            )
+            (output_dir / "config.json").write_text(
+                json.dumps(config.to_dict()),
+                encoding="utf-8",
+            )
+            (output_dir / "validation_summary.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+                        "generated_at_utc": "2026-04-08T12:00:00+00:00",
+                        "stateful_evaluation": {"carry_on": {"average_log_wealth": 0.01}},
+                        "blocked_walk_forward_evaluation": {"fold_count": 2},
+                        "policy_calibration_summary": {
+                            "selected_row_matches_applied_runtime": True,
+                        },
+                        "forecast_quality_scorecards": {
+                            "selected_horizon": {"quality_score": 0.62},
+                            "all_horizon": {"quality_score": 0.41},
+                            "quality_score_gap_all_minus_selected": -0.21,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "policy_summary.csv").write_text("horizon\n1\n", encoding="utf-8")
+            (output_dir / "horizon_diag.csv").write_text("horizon\n1\n", encoding="utf-8")
+            (output_dir / "source.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_kind": "training_run",
+                        "artifact_id": "current-artifact",
+                        "artifact_dir": str(output_dir),
+                        "current_alias_contract": {
+                            "alias_role": "production_current",
+                            "top_level_report_role": "mirror_of_current_research_report",
+                        },
+                        "current_selection_governance": {
+                            "selection_mode": "accepted_candidate",
+                            "selection_rule": "optimization_gate_then_deployment_score",
+                            "selection_rule_version": 1,
+                            "selection_leaderboard_path": str(session_dir / "leaderboard.json"),
+                            "accepted_candidate": {"candidate": "candidate_02"},
+                            "best_candidate": {"candidate": "candidate_02"},
+                            "production_current": {"candidate": "candidate_02"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session_dir / "leaderboard.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "candidate": "candidate_02",
+                                "optimization_gate_passed": True,
+                            },
+                            {
+                                "candidate": "candidate_01",
+                                "optimization_gate_passed": True,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (session_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "session_20260408T075001Z",
+                        "generated_at_utc": "2026-04-08T07:50:01+00:00",
+                        "leaderboard_path": str(session_dir / "leaderboard.json"),
+                        "accepted_candidate": {"candidate": "candidate_02"},
+                        "production_current_candidate": {"candidate": "candidate_02"},
+                        "selection_status": "accepted_and_production_same",
+                        "production_current_selection": {
+                            "selection_mode": "accepted_candidate",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (candidate_01_dir / "validation_summary.json").write_text(
+                json.dumps(
+                    {
+                        "forecast_quality_scorecards": {
+                            "selected_horizon": {"quality_score": 0.81},
+                            "all_horizon": {"quality_score": 0.30},
+                            "quality_score_gap_all_minus_selected": -0.51,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (candidate_02_dir / "validation_summary.json").write_text(
+                json.dumps(
+                    {
+                        "forecast_quality_scorecards": {
+                            "selected_horizon": {"quality_score": 0.52},
+                            "all_horizon": {"quality_score": 0.91},
+                            "quality_score_gap_all_minus_selected": 0.39,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (previous_session_dir / "leaderboard.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "candidate": "candidate_03",
+                                "optimization_gate_passed": True,
+                            },
+                            {
+                                "candidate": "candidate_04",
+                                "optimization_gate_passed": True,
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (previous_session_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "session_20260407T041853Z",
+                        "generated_at_utc": "2026-04-07T04:18:53+00:00",
+                        "leaderboard_path": str(previous_session_dir / "leaderboard.json"),
+                        "accepted_candidate": {"candidate": "candidate_03"},
+                        "production_current_candidate": {"candidate": "candidate_04"},
+                        "selection_status": "accepted_and_production_diverged",
+                        "production_current_selection": {
+                            "selection_mode": "deployment_score_override",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (candidate_03_dir / "validation_summary.json").write_text(
+                json.dumps(
+                    {
+                        "forecast_quality_scorecards": {
+                            "selected_horizon": {"quality_score": 0.85},
+                            "all_horizon": {"quality_score": 0.40},
+                            "quality_score_gap_all_minus_selected": -0.45,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (candidate_04_dir / "validation_summary.json").write_text(
+                json.dumps(
+                    {
+                        "forecast_quality_scorecards": {
+                            "selected_horizon": {"quality_score": 0.22},
+                            "all_horizon": {"quality_score": 0.95},
+                            "quality_score_gap_all_minus_selected": 0.73,
+                        }
+                    }
+                ),
+                encoding="utf-8",
+            )
+
+            analysis = generate_research_report(output_dir)
+            report_markdown = (output_dir / "research_report.md").read_text(encoding="utf-8")
+
+        self.assertEqual(
+            analysis["forecast_quality_ranking_diagnostics"][
+                "selected_horizon_vs_current_spearman_rank_correlation"
+            ],
+            -1.0,
+        )
+        self.assertEqual(
+            analysis["forecast_quality_ranking_diagnostics"][
+                "all_horizon_vs_current_spearman_rank_correlation"
+            ],
+            1.0,
+        )
+        self.assertEqual(
+            analysis["forecast_quality_ranking_diagnostics"]["accepted_candidate_selected_horizon_rank"],
+            2,
+        )
+        self.assertEqual(analysis["selection_history_summary"]["session_count"], 2)
+        self.assertEqual(
+            analysis["selection_history_summary"]["accepted_vs_production_divergence_count"],
+            1,
+        )
+        self.assertEqual(
+            analysis["selection_history_summary"]["accepted_current_top_match_ratio"],
+            1.0,
+        )
+        self.assertEqual(
+            analysis["selection_history_summary"]["accepted_selected_horizon_top_match_ratio"],
+            0.5,
+        )
+        self.assertEqual(
+            analysis["selection_history_summary"]["accepted_all_horizon_top_match_ratio"],
+            0.5,
+        )
+        self.assertEqual(
+            analysis["selection_history_summary"]["production_current_top_match_ratio"],
+            0.5,
+        )
+        self.assertEqual(
+            analysis["selection_history_summary"]["production_selected_horizon_top_match_ratio"],
+            0.0,
+        )
+        self.assertEqual(
+            analysis["selection_history_summary"]["production_all_horizon_top_match_ratio"],
+            1.0,
+        )
+        self.assertIn(
+            "ranking split Spearman (selected/current / all/current / selected/all): `-1.000000` / `1.000000` / `-1.000000`",
+            report_markdown,
+        )
+        self.assertIn(
+            "history sessions / accepted / production / diverged: `2` / `2` / `2` / `1`",
+            report_markdown,
+        )
+
+    def test_generate_research_report_builds_selection_divergence_scorecard_clusters(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            output_dir = Path(temp_dir) / "current"
+            output_dir.mkdir(parents=True, exist_ok=True)
+            latest_session_dir = Path(temp_dir) / "archive" / "session_20260408T075001Z"
+            previous_session_dir = Path(temp_dir) / "archive" / "session_20260407T041853Z"
+            for session_dir in (latest_session_dir, previous_session_dir):
+                for candidate_name in ("candidate_01", "candidate_02", "candidate_03", "candidate_04"):
+                    (session_dir / candidate_name).mkdir(parents=True, exist_ok=True)
+
+            config = TrainingConfig(horizons=(1, 3), output_dir=str(output_dir))
+            (output_dir / "metrics.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": 4,
+                        "sample_count": 10,
+                        "effective_sample_count": 8,
+                        "train_samples": 6,
+                        "validation_samples": 2,
+                        "purged_samples": 2,
+                        "source_rows_original": 10,
+                        "source_rows_used": 10,
+                        "validation_metrics": {
+                            "average_log_wealth": 0.01,
+                            "realized_pnl_per_anchor": 0.01,
+                            "cvar_tail_loss": 0.02,
+                            "max_drawdown": 0.03,
+                            "no_trade_band_hit_rate": 0.1,
+                            "mu_calibration": 0.04,
+                            "sigma_calibration": 0.05,
+                            "directional_accuracy": 0.6,
+                            "project_value_score": 0.7,
+                            "utility_score": 0.65,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "prediction.json").write_text(
+                json.dumps(serialize_prediction_result(_prediction())),
+                encoding="utf-8",
+            )
+            (output_dir / "config.json").write_text(
+                json.dumps(config.to_dict()),
+                encoding="utf-8",
+            )
+            (output_dir / "validation_summary.json").write_text(
+                json.dumps(
+                    {
+                        "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
+                        "generated_at_utc": "2026-04-08T12:00:00+00:00",
+                        "stateful_evaluation": {"carry_on": {"average_log_wealth": 0.01}},
+                        "blocked_walk_forward_evaluation": {"fold_count": 2},
+                        "policy_calibration_summary": {
+                            "selected_row_matches_applied_runtime": True,
+                        },
+                        "forecast_quality_scorecards": {
+                            "selected_horizon": {"quality_score": 0.52},
+                            "all_horizon": {"quality_score": 0.10},
+                            "quality_score_gap_all_minus_selected": -0.42,
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (output_dir / "policy_summary.csv").write_text("horizon\n1\n", encoding="utf-8")
+            (output_dir / "horizon_diag.csv").write_text("horizon\n1\n", encoding="utf-8")
+            (output_dir / "source.json").write_text(
+                json.dumps(
+                    {
+                        "artifact_kind": "training_run",
+                        "artifact_id": "current-artifact",
+                        "artifact_dir": str(output_dir),
+                        "current_alias_contract": {
+                            "alias_role": "production_current",
+                            "top_level_report_role": "mirror_of_current_research_report",
+                        },
+                        "current_selection_governance": {
+                            "selection_mode": "accepted_candidate",
+                            "selection_rule": "optimization_gate_then_deployment_score",
+                            "selection_rule_version": 1,
+                            "selection_leaderboard_path": str(latest_session_dir / "leaderboard.json"),
+                            "accepted_candidate": {"candidate": "candidate_03"},
+                            "best_candidate": {"candidate": "candidate_03"},
+                            "production_current": {"candidate": "candidate_03"},
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (latest_session_dir / "leaderboard.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "candidate": "candidate_03",
+                                "optimization_gate_passed": True,
+                                "blocked_objective_log_wealth_minus_lambda_cvar_mean": -0.0003,
+                                "blocked_turnover_mean": 1.10,
+                                "blocked_exact_smooth_position_mae_mean": 0.011,
+                                "max_drawdown": 0.019,
+                                "deployment_score": 0.66,
+                                "user_value_score": 0.58,
+                                "policy_cost_multiplier": 6.0,
+                                "evaluation_state_reset_mode": "carry_on",
+                            },
+                            {
+                                "candidate": "candidate_01",
+                                "optimization_gate_passed": True,
+                                "blocked_objective_log_wealth_minus_lambda_cvar_mean": 0.0015,
+                                "blocked_turnover_mean": 0.70,
+                                "blocked_exact_smooth_position_mae_mean": 0.040,
+                                "max_drawdown": 0.041,
+                                "deployment_score": 0.63,
+                                "user_value_score": 0.54,
+                                "policy_cost_multiplier": 6.0,
+                                "evaluation_state_reset_mode": "carry_on",
+                            },
+                            {
+                                "candidate": "candidate_02",
+                                "optimization_gate_passed": True,
+                                "blocked_objective_log_wealth_minus_lambda_cvar_mean": 0.0020,
+                                "blocked_turnover_mean": 0.90,
+                                "blocked_exact_smooth_position_mae_mean": 0.055,
+                                "max_drawdown": 0.052,
+                                "deployment_score": 0.61,
+                                "user_value_score": 0.51,
+                                "policy_cost_multiplier": 6.0,
+                                "evaluation_state_reset_mode": "carry_on",
+                            },
+                            {
+                                "candidate": "candidate_04",
+                                "optimization_gate_passed": True,
+                                "blocked_objective_log_wealth_minus_lambda_cvar_mean": -0.0008,
+                                "blocked_turnover_mean": 1.30,
+                                "blocked_exact_smooth_position_mae_mean": 0.080,
+                                "max_drawdown": 0.060,
+                                "deployment_score": 0.55,
+                                "user_value_score": 0.49,
+                                "policy_cost_multiplier": 6.0,
+                                "evaluation_state_reset_mode": "carry_on",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (latest_session_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "session_20260408T075001Z",
+                        "generated_at_utc": "2026-04-08T07:50:01+00:00",
+                        "leaderboard_path": str(latest_session_dir / "leaderboard.json"),
+                        "accepted_candidate": {"candidate": "candidate_03"},
+                        "production_current_candidate": {"candidate": "candidate_03"},
+                        "selection_status": "accepted_and_production_same",
+                        "production_current_selection": {
+                            "selection_mode": "accepted_candidate",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            latest_scorecards = {
+                "candidate_01": (0.81, 0.70),
+                "candidate_02": (0.40, 0.91),
+                "candidate_03": (0.52, 0.10),
+                "candidate_04": (0.20, 0.60),
+            }
+            for candidate_name, (selected_score, all_score) in latest_scorecards.items():
+                (
+                    latest_session_dir / candidate_name / "validation_summary.json"
+                ).write_text(
+                    json.dumps(
+                        {
+                            "forecast_quality_scorecards": {
+                                "selected_horizon": {"quality_score": selected_score},
+                                "all_horizon": {"quality_score": all_score},
+                                "quality_score_gap_all_minus_selected": all_score - selected_score,
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            (previous_session_dir / "leaderboard.json").write_text(
+                json.dumps(
+                    {
+                        "results": [
+                            {
+                                "candidate": "candidate_03",
+                                "optimization_gate_passed": True,
+                                "blocked_objective_log_wealth_minus_lambda_cvar_mean": 0.0073,
+                                "blocked_turnover_mean": 1.4590,
+                                "blocked_exact_smooth_position_mae_mean": 0.1957,
+                                "max_drawdown": 0.0887,
+                                "deployment_score": 0.55,
+                                "user_value_score": 0.56,
+                                "policy_cost_multiplier": 6.0,
+                                "evaluation_state_reset_mode": "carry_on",
+                            },
+                            {
+                                "candidate": "candidate_04",
+                                "optimization_gate_passed": True,
+                                "blocked_objective_log_wealth_minus_lambda_cvar_mean": 0.0012,
+                                "blocked_turnover_mean": 0.2413,
+                                "blocked_exact_smooth_position_mae_mean": 0.0188,
+                                "max_drawdown": 0.0170,
+                                "deployment_score": 0.67,
+                                "user_value_score": 0.67,
+                                "policy_cost_multiplier": 6.0,
+                                "evaluation_state_reset_mode": "carry_on",
+                            },
+                            {
+                                "candidate": "candidate_01",
+                                "optimization_gate_passed": True,
+                                "blocked_objective_log_wealth_minus_lambda_cvar_mean": 0.0040,
+                                "blocked_turnover_mean": 0.90,
+                                "blocked_exact_smooth_position_mae_mean": 0.0400,
+                                "max_drawdown": 0.0300,
+                                "deployment_score": 0.62,
+                                "user_value_score": 0.60,
+                                "policy_cost_multiplier": 6.0,
+                                "evaluation_state_reset_mode": "carry_on",
+                            },
+                            {
+                                "candidate": "candidate_02",
+                                "optimization_gate_passed": True,
+                                "blocked_objective_log_wealth_minus_lambda_cvar_mean": 0.0030,
+                                "blocked_turnover_mean": 0.70,
+                                "blocked_exact_smooth_position_mae_mean": 0.0300,
+                                "max_drawdown": 0.0250,
+                                "deployment_score": 0.61,
+                                "user_value_score": 0.59,
+                                "policy_cost_multiplier": 6.0,
+                                "evaluation_state_reset_mode": "carry_on",
+                            },
+                        ]
+                    }
+                ),
+                encoding="utf-8",
+            )
+            (previous_session_dir / "manifest.json").write_text(
+                json.dumps(
+                    {
+                        "session_id": "session_20260407T041853Z",
+                        "generated_at_utc": "2026-04-07T04:18:53+00:00",
+                        "leaderboard_path": str(previous_session_dir / "leaderboard.json"),
+                        "accepted_candidate": {"candidate": "candidate_03"},
+                        "production_current_candidate": {"candidate": "candidate_04"},
+                        "selection_status": "accepted_and_production_diverged",
+                        "production_current_selection": {
+                            "selection_mode": "auto_user_value_selection",
+                        },
+                    }
+                ),
+                encoding="utf-8",
+            )
+            previous_scorecards = {
+                "candidate_01": (0.80, 0.60),
+                "candidate_02": (0.50, 0.55),
+                "candidate_03": (0.90, 0.95),
+                "candidate_04": (0.10, 0.20),
+            }
+            for candidate_name, (selected_score, all_score) in previous_scorecards.items():
+                (
+                    previous_session_dir / candidate_name / "validation_summary.json"
+                ).write_text(
+                    json.dumps(
+                        {
+                            "forecast_quality_scorecards": {
+                                "selected_horizon": {"quality_score": selected_score},
+                                "all_horizon": {"quality_score": all_score},
+                                "quality_score_gap_all_minus_selected": all_score - selected_score,
+                            }
+                        }
+                    ),
+                    encoding="utf-8",
+                )
+
+            analysis = generate_research_report(output_dir)
+            report_markdown = (output_dir / "research_report.md").read_text(encoding="utf-8")
+
+        current_ranking = analysis["forecast_quality_ranking_diagnostics"]
+        self.assertEqual(current_ranking["current_top_candidate"], "candidate_03")
+        self.assertEqual(current_ranking["selected_horizon_top_candidate"], "candidate_01")
+        self.assertEqual(current_ranking["all_horizon_top_candidate"], "candidate_02")
+        self.assertEqual(current_ranking["accepted_candidate_current_rank"], 1)
+        self.assertEqual(current_ranking["accepted_candidate_selected_horizon_rank"], 2)
+        self.assertEqual(current_ranking["accepted_candidate_all_horizon_rank"], 4)
+
+        divergence_scorecard = analysis["selection_divergence_scorecard"]
+        self.assertEqual(divergence_scorecard["session_count"], 2)
+        self.assertEqual(divergence_scorecard["full_coverage_session_count"], 2)
+        self.assertEqual(divergence_scorecard["partial_coverage_session_count"], 0)
+        self.assertEqual(
+            divergence_scorecard["cluster_counts"],
+            {
+                "objective_evaluation_mismatch": 1,
+                "stability_override": 1,
+            },
+        )
+        latest_record = next(
+            row
+            for row in divergence_scorecard["rows"]
+            if row["session_id"] == "session_20260408T075001Z"
+        )
+        previous_record = next(
+            row
+            for row in divergence_scorecard["rows"]
+            if row["session_id"] == "session_20260407T041853Z"
+        )
+        self.assertEqual(latest_record["failure_mode_cluster"], "objective_evaluation_mismatch")
+        self.assertEqual(latest_record["accepted_candidate_all_minus_current_rank"], 3)
+        self.assertEqual(previous_record["failure_mode_cluster"], "stability_override")
+        self.assertTrue(previous_record["override_flag"])
+        self.assertEqual(previous_record["production_current_all_minus_current_rank"], 2)
+        self.assertIn(
+            "divergence scorecard clusters (all sessions): `objective_evaluation_mismatch=1, stability_override=1`",
+            report_markdown,
+        )
+        self.assertIn(
+            "session_20260408T075001Z [full/objective_evaluation_mismatch]",
+            report_markdown,
+        )
+        self.assertIn(
+            "session_20260407T041853Z [full/stability_override]",
+            report_markdown,
         )
 
     def test_generate_research_report_requires_published_current_diagnostics(self) -> None:

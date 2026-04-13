@@ -7,11 +7,15 @@ const frontendRoot = path.resolve(scriptDir, '..')
 const artifactRoot = path.resolve(frontendRoot, '..', 'PyTorch', 'artifacts', 'gold_xauusd_m30')
 const currentRunDir = path.join(artifactRoot, 'current')
 const dashboardDataPath = path.join(frontendRoot, 'public', 'dashboard-data.json')
+const configPath = path.join(currentRunDir, 'config.json')
+const analysisPath = path.join(currentRunDir, 'analysis.json')
 const sourceMetaPath = path.join(currentRunDir, 'source.json')
 const manifestPath = path.join(currentRunDir, 'manifest.json')
 const validationSummaryPath = path.join(currentRunDir, 'validation_summary.json')
 
 const dashboardData = readJson(dashboardDataPath)
+const config = readJson(configPath)
+const analysis = readJson(analysisPath)
 const sourceMeta = readJson(sourceMetaPath)
 const manifest = readJson(manifestPath)
 const validationSummary = readJson(validationSummaryPath)
@@ -114,6 +118,105 @@ if (diagnosticsGeneratedAt !== expectedDiagnosticsGeneratedAt) {
   )
 }
 
+const selectionDiagnostics = validationSummary.selection_diagnostics
+if (!selectionDiagnostics || typeof selectionDiagnostics !== 'object') {
+  throw new Error(`current validation_summary.json is missing selection_diagnostics: ${validationSummaryPath}`)
+}
+
+const runtimeCurrent = validationSummary.runtime_current
+if (!runtimeCurrent || typeof runtimeCurrent !== 'object') {
+  throw new Error(`current validation_summary.json is missing runtime_current: ${validationSummaryPath}`)
+}
+
+const runtimeOperatingPoint = runtimeCurrent.operating_point
+if (!runtimeOperatingPoint || typeof runtimeOperatingPoint !== 'object') {
+  throw new Error(`current validation_summary.json is missing runtime_current.operating_point: ${validationSummaryPath}`)
+}
+
+const selectionValidation = selectionDiagnostics.validation
+if (!selectionValidation || typeof selectionValidation !== 'object') {
+  throw new Error(`current validation_summary.json is missing selection_diagnostics.validation: ${validationSummaryPath}`)
+}
+
+assertOptionalRunFieldMatchesRuntimeLane({
+  dashboardValue: dashboardData.run?.stateResetMode,
+  runtimeValue:
+    toNonEmptyString(runtimeOperatingPoint.state_reset_mode) ??
+    toNonEmptyString(runtimeCurrent.state_reset_mode) ??
+    toNonEmptyString(config.evaluation_state_reset_mode),
+  fieldName: 'run.stateResetMode',
+})
+assertOptionalRunFieldMatchesRuntimeLane({
+  dashboardValue: dashboardData.run?.costMultiplier,
+  runtimeValue: toFiniteNumber(runtimeOperatingPoint.cost_multiplier) ?? toFiniteNumber(config.policy_cost_multiplier),
+  fieldName: 'run.costMultiplier',
+})
+assertOptionalRunFieldMatchesRuntimeLane({
+  dashboardValue: dashboardData.run?.gammaMultiplier,
+  runtimeValue: toFiniteNumber(runtimeOperatingPoint.gamma_multiplier) ?? toFiniteNumber(config.policy_gamma_multiplier),
+  fieldName: 'run.gammaMultiplier',
+})
+assertOptionalRunFieldMatchesRuntimeLane({
+  dashboardValue: dashboardData.run?.minPolicySigma,
+  runtimeValue: toFiniteNumber(runtimeOperatingPoint.min_policy_sigma) ?? toFiniteNumber(config.min_policy_sigma),
+  fieldName: 'run.minPolicySigma',
+})
+assertOptionalRunFieldMatchesRuntimeLane({
+  dashboardValue: dashboardData.metrics?.validation?.stateResetMode,
+  runtimeValue: toNonEmptyString(selectionValidation.state_reset_mode),
+  fieldName: 'metrics.validation.stateResetMode',
+})
+assertOptionalRunFieldMatchesRuntimeLane({
+  dashboardValue: dashboardData.metrics?.validation?.costMultiplier,
+  runtimeValue: toFiniteNumber(selectionValidation.cost_multiplier),
+  fieldName: 'metrics.validation.costMultiplier',
+})
+assertOptionalRunFieldMatchesRuntimeLane({
+  dashboardValue: dashboardData.metrics?.validation?.gammaMultiplier,
+  runtimeValue: toFiniteNumber(selectionValidation.gamma_multiplier),
+  fieldName: 'metrics.validation.gammaMultiplier',
+})
+assertOptionalRunFieldMatchesRuntimeLane({
+  dashboardValue: dashboardData.metrics?.validation?.minPolicySigma,
+  runtimeValue: toFiniteNumber(selectionValidation.min_policy_sigma),
+  fieldName: 'metrics.validation.minPolicySigma',
+})
+
+const rankingDiagnostics = analysis.forecast_quality_ranking_diagnostics
+if (!rankingDiagnostics || typeof rankingDiagnostics !== 'object') {
+  throw new Error(`current analysis.json is missing forecast_quality_ranking_diagnostics: ${analysisPath}`)
+}
+
+const divergenceScorecard = analysis.selection_divergence_scorecard
+if (!divergenceScorecard || typeof divergenceScorecard !== 'object') {
+  throw new Error(`current analysis.json is missing selection_divergence_scorecard: ${analysisPath}`)
+}
+
+if (!dashboardData.metrics?.selection || typeof dashboardData.metrics.selection !== 'object') {
+  throw new Error('dashboard-data metrics.selection must be present')
+}
+
+assertOptionalRunFieldMatchesRuntimeLane({
+  dashboardValue: dashboardData.metrics?.selection?.currentTopCandidate,
+  runtimeValue: toNonEmptyString(rankingDiagnostics.current_top_candidate),
+  fieldName: 'metrics.selection.currentTopCandidate',
+})
+assertOptionalRunFieldMatchesRuntimeLane({
+  dashboardValue: dashboardData.metrics?.selection?.allHorizonVsCurrentSpearmanRankCorrelation,
+  runtimeValue: toFiniteNumber(rankingDiagnostics.all_horizon_vs_current_spearman_rank_correlation),
+  fieldName: 'metrics.selection.allHorizonVsCurrentSpearmanRankCorrelation',
+})
+assertOptionalRunFieldMatchesRuntimeLane({
+  dashboardValue: dashboardData.metrics?.selection?.divergenceScorecard?.sessionCount,
+  runtimeValue: toFiniteNumber(divergenceScorecard.session_count),
+  fieldName: 'metrics.selection.divergenceScorecard.sessionCount',
+})
+assertOptionalRunFieldMatchesRuntimeLane({
+  dashboardValue: dashboardData.metrics?.selection?.divergenceScorecard?.fullCoverageSessionCount,
+  runtimeValue: toFiniteNumber(divergenceScorecard.full_coverage_session_count),
+  fieldName: 'metrics.selection.divergenceScorecard.fullCoverageSessionCount',
+})
+
 const expectedProductionCurrentCandidate = toNonEmptyString(sourceMeta.current_selection_governance?.production_current?.candidate)
 if (
   expectedProductionCurrentCandidate !== null &&
@@ -166,6 +269,36 @@ function toPositiveNumber(value) {
   return Number.isFinite(numeric) && numeric > 0 ? numeric : null
 }
 
+function toFiniteNumber(value) {
+  const numeric = Number(value)
+  return Number.isFinite(numeric) ? numeric : null
+}
+
 function numbersMatch(left, right) {
   return Math.abs(left - right) <= 1e-9
+}
+
+function assertOptionalRunFieldMatchesRuntimeLane({ dashboardValue, runtimeValue, fieldName }) {
+  if (typeof runtimeValue === 'string') {
+    const dashboardString = toNonEmptyString(dashboardValue)
+    if (dashboardString === null) {
+      throw new Error(`dashboard-data ${fieldName} must be present`)
+    }
+    if (dashboardString !== runtimeValue) {
+      throw new Error(`dashboard-data ${fieldName} mismatch: dashboard=${dashboardString} current=${runtimeValue}`)
+    }
+    return
+  }
+
+  if (runtimeValue === null) {
+    return
+  }
+
+  const dashboardNumber = toFiniteNumber(dashboardValue)
+  if (dashboardNumber === null) {
+    throw new Error(`dashboard-data ${fieldName} must be a finite number`)
+  }
+  if (!numbersMatch(dashboardNumber, runtimeValue)) {
+    throw new Error(`dashboard-data ${fieldName} mismatch: dashboard=${dashboardNumber} current=${runtimeValue}`)
+  }
 }

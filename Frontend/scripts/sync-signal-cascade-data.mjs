@@ -16,6 +16,7 @@ const sourceMetaPath = path.join(currentRunDir, 'source.json')
 const forecastSummaryPath = path.join(currentRunDir, 'forecast_summary.json')
 const manifestPath = path.join(currentRunDir, 'manifest.json')
 const validationSummaryPath = path.join(currentRunDir, 'validation_summary.json')
+const analysisPath = path.join(currentRunDir, 'analysis.json')
 const policySummaryPath = path.join(currentRunDir, 'policy_summary.csv')
 const horizonDiagPath = path.join(currentRunDir, 'horizon_diag.csv')
 const validationRowsPath = path.join(currentRunDir, 'validation_rows.csv')
@@ -44,6 +45,9 @@ const sourceMeta = fs.existsSync(sourceMetaPath)
 const prediction = JSON.parse(fs.readFileSync(predictionPath, 'utf8'))
 const forecastSummary = fs.existsSync(forecastSummaryPath)
   ? JSON.parse(fs.readFileSync(forecastSummaryPath, 'utf8'))
+  : null
+const analysis = fs.existsSync(analysisPath)
+  ? JSON.parse(fs.readFileSync(analysisPath, 'utf8'))
   : null
 const manifest = fs.existsSync(manifestPath)
   ? JSON.parse(fs.readFileSync(manifestPath, 'utf8'))
@@ -146,10 +150,18 @@ const history = metrics.history.map((row) => ({
 const bestEpochRow = history.reduce((best, row) => (row.validationTotal < best.validationTotal ? row : best))
 const convergenceGain = history[0].validationTotal - bestEpochRow.validationTotal
 const generalizationGap = bestEpochRow.validationTotal - bestEpochRow.trainTotal
-const validationMetrics = metrics.validation_metrics ?? null
+const selectionDiagnostics = resolveSelectionDiagnostics(validationSummary)
+const runtimeCurrent = resolveRuntimeCurrent({ validationSummary, config })
+const validationMetrics =
+  selectionDiagnostics?.validation ??
+  metrics.validation_metrics ??
+  validationSummary?.validation ??
+  null
 const artifactProvenance = resolveArtifactProvenance(sourceMeta)
 const governance = resolveCurrentGovernance(sourceMeta)
 const primaryStateResetMode =
+  runtimeCurrent?.operating_point?.state_reset_mode ??
+  runtimeCurrent?.state_reset_mode ??
   validationMetrics?.state_reset_mode ??
   validationSummary?.primary_state_reset_mode ??
   null
@@ -159,14 +171,17 @@ const blockedMetrics = buildBlockedMetrics({
   cvarWeight: config.cvar_weight ?? validationSummary?.checkpoint_audit?.cvar_weight ?? 0.2,
 })
 const structureMetrics = buildStructureMetrics({
+  selectionDiagnostics,
+  runtimeCurrent,
   validationSummary,
   config,
 })
+const runtimeOperatingPoint = runtimeCurrent?.operating_point ?? buildRuntimePolicyPayload(config)
 const operatingPoint = {
-  stateResetMode: primaryStateResetMode,
-  costMultiplier: validationMetrics?.cost_multiplier ?? 1.0,
-  gammaMultiplier: validationMetrics?.gamma_multiplier ?? 1.0,
-  minPolicySigma: validationMetrics?.min_policy_sigma ?? config.min_policy_sigma ?? null,
+  stateResetMode: runtimeOperatingPoint?.state_reset_mode ?? primaryStateResetMode,
+  costMultiplier: runtimeOperatingPoint?.cost_multiplier ?? config.policy_cost_multiplier ?? 1.0,
+  gammaMultiplier: runtimeOperatingPoint?.gamma_multiplier ?? config.policy_gamma_multiplier ?? 1.0,
+  minPolicySigma: runtimeOperatingPoint?.min_policy_sigma ?? config.min_policy_sigma ?? null,
 }
 const freshness = buildFreshness({
   dashboardGeneratedAt: new Date().toISOString(),
@@ -184,6 +199,7 @@ const liveMetrics = buildLiveMetrics({
   horizonRows,
   selectedHorizon,
 })
+const selectionMetrics = buildSelectionMetrics(analysis)
 const overlayAction = prediction.no_trade_band_hit ? 'hold' : 'reduce'
 const payload = {
   schemaVersion: 6,
@@ -306,6 +322,7 @@ const payload = {
     live: liveMetrics,
     structure: structureMetrics,
     horizonDiagnostics,
+    selection: selectionMetrics,
   },
   narrative: buildNarrative({ prediction, horizonRows }),
 }
@@ -605,6 +622,82 @@ function resolveCurrentGovernance(sourceMeta) {
     productionCurrentCandidate:
       typeof productionCurrent?.candidate === 'string' ? productionCurrent.candidate : null,
     acceptedCandidate: typeof acceptedCandidate?.candidate === 'string' ? acceptedCandidate.candidate : null,
+  }
+}
+
+function buildSelectionMetrics(analysis) {
+  if (!analysis || typeof analysis !== 'object') {
+    return null
+  }
+
+  const ranking = analysis.forecast_quality_ranking_diagnostics
+  const history = analysis.selection_history_summary
+  const divergence = analysis.selection_divergence_scorecard
+
+  return {
+    currentTopCandidate: typeof ranking?.current_top_candidate === 'string' ? ranking.current_top_candidate : null,
+    selectedHorizonTopCandidate:
+      typeof ranking?.selected_horizon_top_candidate === 'string' ? ranking.selected_horizon_top_candidate : null,
+    allHorizonTopCandidate: typeof ranking?.all_horizon_top_candidate === 'string' ? ranking.all_horizon_top_candidate : null,
+    selectedHorizonVsCurrentSpearmanRankCorrelation:
+      resolveFiniteNumber(ranking?.selected_horizon_vs_current_spearman_rank_correlation),
+    allHorizonVsCurrentSpearmanRankCorrelation:
+      resolveFiniteNumber(ranking?.all_horizon_vs_current_spearman_rank_correlation),
+    acceptedCandidateCurrentRank: resolveFiniteNumber(ranking?.accepted_candidate_current_rank),
+    acceptedCandidateSelectedHorizonRank: resolveFiniteNumber(ranking?.accepted_candidate_selected_horizon_rank),
+    acceptedCandidateAllHorizonRank: resolveFiniteNumber(ranking?.accepted_candidate_all_horizon_rank),
+    topK: resolveFiniteNumber(ranking?.top_k),
+    history: history && typeof history === 'object'
+      ? {
+          sessionCount: resolveFiniteNumber(history.session_count),
+          acceptedCandidateCount: resolveFiniteNumber(history.accepted_candidate_count),
+          productionCurrentCandidateCount: resolveFiniteNumber(history.production_current_candidate_count),
+          acceptedVsProductionDivergenceCount: resolveFiniteNumber(history.accepted_vs_production_divergence_count),
+          acceptedCurrentTopMatchRatio: resolveFiniteNumber(history.accepted_current_top_match_ratio),
+          acceptedSelectedHorizonTopMatchRatio: resolveFiniteNumber(history.accepted_selected_horizon_top_match_ratio),
+          acceptedAllHorizonTopMatchRatio: resolveFiniteNumber(history.accepted_all_horizon_top_match_ratio),
+          productionCurrentTopMatchRatio: resolveFiniteNumber(history.production_current_top_match_ratio),
+          productionSelectedHorizonTopMatchRatio: resolveFiniteNumber(history.production_selected_horizon_top_match_ratio),
+          productionAllHorizonTopMatchRatio: resolveFiniteNumber(history.production_all_horizon_top_match_ratio),
+        }
+      : null,
+    divergenceScorecard: divergence && typeof divergence === 'object'
+      ? {
+          sessionCount: resolveFiniteNumber(divergence.session_count),
+          fullCoverageSessionCount: resolveFiniteNumber(divergence.full_coverage_session_count),
+          partialCoverageSessionCount: resolveFiniteNumber(divergence.partial_coverage_session_count),
+          clusterCounts: divergence.cluster_counts && typeof divergence.cluster_counts === 'object'
+            ? divergence.cluster_counts
+            : {},
+          recentRows: Array.isArray(divergence.recent_rows)
+            ? divergence.recent_rows.map((row) => ({
+                sessionId: typeof row?.session_id === 'string' ? row.session_id : null,
+                coverageStatus: typeof row?.coverage_status === 'string' ? row.coverage_status : null,
+                failureModeCluster: typeof row?.failure_mode_cluster === 'string' ? row.failure_mode_cluster : null,
+                selectionMode: typeof row?.selection_mode === 'string' ? row.selection_mode : null,
+                acceptedCandidate: typeof row?.accepted_candidate === 'string' ? row.accepted_candidate : null,
+                productionCurrentCandidate:
+                  typeof row?.production_current_candidate === 'string' ? row.production_current_candidate : null,
+                acceptedCandidateCurrentRank: resolveFiniteNumber(row?.accepted_candidate_current_rank),
+                acceptedCandidateSelectedHorizonRank:
+                  resolveFiniteNumber(row?.accepted_candidate_selected_horizon_rank),
+                acceptedCandidateAllHorizonRank: resolveFiniteNumber(row?.accepted_candidate_all_horizon_rank),
+                productionCurrentCurrentRank: resolveFiniteNumber(row?.production_current_current_rank),
+                productionCurrentSelectedHorizonRank:
+                  resolveFiniteNumber(row?.production_current_selected_horizon_rank),
+                productionCurrentAllHorizonRank: resolveFiniteNumber(row?.production_current_all_horizon_rank),
+                acceptedBlockedTurnoverMean: resolveFiniteNumber(row?.accepted_candidate_blocked_turnover_mean),
+                acceptedBlockedExactSmoothPositionMaeMean:
+                  resolveFiniteNumber(row?.accepted_candidate_blocked_exact_smooth_position_mae_mean),
+                acceptedMaxDrawdown: resolveFiniteNumber(row?.accepted_candidate_max_drawdown),
+                productionBlockedTurnoverMean: resolveFiniteNumber(row?.production_current_blocked_turnover_mean),
+                productionBlockedExactSmoothPositionMaeMean:
+                  resolveFiniteNumber(row?.production_current_blocked_exact_smooth_position_mae_mean),
+                productionMaxDrawdown: resolveFiniteNumber(row?.production_current_max_drawdown),
+              }))
+            : [],
+        }
+      : null,
   }
 }
 
@@ -1092,19 +1185,32 @@ function buildBlockedMetrics({ validationSummary, primaryStateResetMode, cvarWei
   }
 }
 
-function buildStructureMetrics({ validationSummary, config }) {
-  const policyCalibration = validationSummary?.policy_calibration_summary ?? {}
+function buildStructureMetrics({ selectionDiagnostics, runtimeCurrent, validationSummary, config }) {
+  const selectionPayload = selectionDiagnostics ?? {}
+  const policyCalibration =
+    selectionPayload.policy_calibration_summary ??
+    validationSummary?.policy_calibration_summary ??
+    {}
   const selectedRow = policyCalibration.selected_row ?? null
   const appliedRuntimePolicy =
-    policyCalibration.applied_runtime_policy ??
+    runtimeCurrent?.operating_point ??
+    validationSummary?.policy_calibration_summary?.applied_runtime_policy ??
     buildRuntimePolicyPayload(config)
-  const shapeTopClassShare = validationSummary?.state_vector_summary?.shape_posterior_top_class_share ?? {}
-  const shapePosteriorMean = validationSummary?.state_vector_summary?.shape_posterior_mean ?? {}
+  const stateVectorSummary =
+    selectionPayload.state_vector_summary ??
+    validationSummary?.state_vector_summary ??
+    {}
+  const validationLane =
+    selectionPayload.validation ??
+    validationSummary?.validation ??
+    {}
+  const shapeTopClassShare = stateVectorSummary?.shape_posterior_top_class_share ?? {}
+  const shapePosteriorMean = stateVectorSummary?.shape_posterior_mean ?? {}
   const dominantShapeEntry = Object.entries(shapeTopClassShare)
     .map(([shapeId, share]) => [shapeId, resolveFiniteNumber(share)]).filter(([, share]) => share !== null)
     .sort((left, right) => right[1] - left[1])[0] ?? [null, null]
   const policyHorizonDistribution = Object.entries(
-    validationSummary?.validation?.policy_horizon_distribution ?? {},
+    validationLane?.policy_horizon_distribution ?? {},
   )
     .map(([horizon, share]) => ({
       horizon: Number(horizon),
@@ -1121,8 +1227,10 @@ function buildStructureMetrics({ validationSummary, config }) {
 
   return {
     selectedRowMatchesRuntime:
-      typeof policyCalibration.selected_row_matches_applied_runtime === 'boolean'
-        ? policyCalibration.selected_row_matches_applied_runtime
+      typeof runtimeCurrent?.selection_alignment?.selected_row_matches_runtime === 'boolean'
+        ? runtimeCurrent.selection_alignment.selected_row_matches_runtime
+        : typeof validationSummary?.policy_calibration_summary?.selected_row_matches_applied_runtime === 'boolean'
+          ? validationSummary.policy_calibration_summary.selected_row_matches_applied_runtime
         : runtimePolicyAlignmentScore >= 0.999,
     runtimePolicyAlignmentScore,
     selectedRowRole: toNonEmptyString(policyCalibration.selected_row_role),
@@ -1250,6 +1358,40 @@ function buildRuntimePolicyPayload(config) {
     min_policy_sigma: config.min_policy_sigma,
     q_max: config.q_max,
     cvar_weight: config.cvar_weight,
+  }
+}
+
+function resolveSelectionDiagnostics(validationSummary) {
+  const payload = validationSummary?.selection_diagnostics
+  return payload && typeof payload === 'object' ? payload : null
+}
+
+function resolveRuntimeCurrent({ validationSummary, config }) {
+  const payload = validationSummary?.runtime_current
+  if (payload && typeof payload === 'object') {
+    return payload
+  }
+
+  const policyCalibration = validationSummary?.policy_calibration_summary ?? {}
+  return {
+    operating_point:
+      policyCalibration.applied_runtime_policy ??
+      buildRuntimePolicyPayload(config),
+    operating_point_role:
+      policyCalibration.applied_runtime_policy_role ??
+      'authoritative_runtime_config',
+    state_reset_mode:
+      config.evaluation_state_reset_mode ??
+      validationSummary?.primary_state_reset_mode ??
+      null,
+    selection_alignment: {
+      selected_row_key: policyCalibration.selected_row_key ?? null,
+      runtime_row_key: policyCalibration.applied_runtime_row_key ?? null,
+      selected_row_matches_runtime:
+        typeof policyCalibration.selected_row_matches_applied_runtime === 'boolean'
+          ? policyCalibration.selected_row_matches_applied_runtime
+          : null,
+    },
   }
 }
 

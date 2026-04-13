@@ -392,7 +392,18 @@ class PolicyAndTrainingTests(unittest.TestCase):
         example = _example(returns_target=(0.01,))
         summary_payload = {
             "validation_rows": [
-                {"sample_id": 0, "timestamp": example.anchor_time.isoformat(), "horizon": 1}
+                {
+                    "sample_id": 0,
+                    "timestamp": example.anchor_time.isoformat(),
+                    "horizon": 1,
+                    "y_raw": 0.01,
+                    "mu_t": 0.012,
+                    "sigma_t": 0.02,
+                    "pit": 0.53,
+                    "normalized_abs_error": 0.10,
+                    "policy_horizon_selected": 1,
+                    "selected": 1,
+                }
             ],
             "policy_summary": [
                 {"sample_id": 0, "policy_horizon": 1, "executed_horizon": 1}
@@ -441,6 +452,28 @@ class PolicyAndTrainingTests(unittest.TestCase):
             self.assertEqual(summary["diagnostics_schema_version"], DIAGNOSTICS_SCHEMA_VERSION)
             self.assertEqual(summary["policy_mode"], "shape_aware_profit_maximization")
             self.assertEqual(summary["checkpoint_audit"]["best_epoch_by_exact_log_wealth"], 13.0)
+            self.assertEqual(
+                summary["selection_diagnostics"]["validation"]["executed_trade_count"],
+                1,
+            )
+            self.assertEqual(
+                summary["forecast_quality_scorecards"]["selected_horizon"]["sample_count"],
+                1,
+            )
+            self.assertEqual(
+                summary["forecast_quality_scorecards"]["all_horizon"]["sample_count"],
+                1,
+            )
+            self.assertIsNotNone(
+                summary["forecast_quality_scorecards"]["selected_horizon"]["quality_score"]
+            )
+            self.assertIsNotNone(
+                summary["forecast_quality_scorecards"]["all_horizon"]["quality_score"]
+            )
+            self.assertEqual(
+                summary["runtime_current"]["operating_point"]["cost_multiplier"],
+                config.policy_cost_multiplier,
+            )
             self.assertTrue((output_dir / "policy_summary.csv").exists())
             saved_summary = json.loads((output_dir / "validation_summary.json").read_text(encoding="utf-8"))
             self.assertEqual(saved_summary["validation"]["executed_trade_count"], 1)
@@ -703,6 +736,7 @@ class PolicyAndTrainingTests(unittest.TestCase):
             artifact_root.mkdir()
             csv_path = artifact_root / "latest.csv"
             csv_path.write_text("timestamp,open,high,low,close,volume\n", encoding="utf-8")
+            leaderboard_row = None
 
             def fake_export_review_diagnostics(*, output_dir, **_kwargs):
                 (output_dir / "validation_rows.csv").write_text("sample_id\n0\n", encoding="utf-8")
@@ -1209,6 +1243,11 @@ class PolicyAndTrainingTests(unittest.TestCase):
                             }
                         },
                     },
+                    "forecast_quality_scorecards": {
+                        "selected_horizon": {"quality_score": 0.81},
+                        "all_horizon": {"quality_score": 0.30},
+                        "quality_score_gap_all_minus_selected": -0.51,
+                    },
                 },
                 {
                     "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
@@ -1240,6 +1279,11 @@ class PolicyAndTrainingTests(unittest.TestCase):
                                 ],
                             }
                         },
+                    },
+                    "forecast_quality_scorecards": {
+                        "selected_horizon": {"quality_score": 0.52},
+                        "all_horizon": {"quality_score": 0.91},
+                        "quality_score_gap_all_minus_selected": 0.39,
                     },
                 },
             ]
@@ -1353,6 +1397,42 @@ class PolicyAndTrainingTests(unittest.TestCase):
             self.assertEqual(
                 current_source["current_selection_governance"]["production_current"]["candidate"],
                 "candidate_01",
+            )
+            ranking_diagnostics = manifest["forecast_quality_ranking_diagnostics"]
+            self.assertEqual(ranking_diagnostics["current_top_candidate"], "candidate_02")
+            self.assertEqual(ranking_diagnostics["selected_horizon_top_candidate"], "candidate_01")
+            self.assertEqual(ranking_diagnostics["all_horizon_top_candidate"], "candidate_02")
+            self.assertEqual(
+                ranking_diagnostics["accepted_candidate_current_rank"],
+                1,
+            )
+            self.assertEqual(
+                ranking_diagnostics["accepted_candidate_selected_horizon_rank"],
+                2,
+            )
+            self.assertEqual(
+                ranking_diagnostics["accepted_candidate_all_horizon_rank"],
+                1,
+            )
+            self.assertEqual(
+                ranking_diagnostics["selected_horizon_vs_current_spearman_rank_correlation"],
+                -1.0,
+            )
+            self.assertEqual(
+                ranking_diagnostics["all_horizon_vs_current_spearman_rank_correlation"],
+                1.0,
+            )
+            self.assertEqual(
+                ranking_diagnostics["production_current_current_rank"],
+                2,
+            )
+            self.assertEqual(
+                ranking_diagnostics["production_current_selected_horizon_rank"],
+                1,
+            )
+            self.assertEqual(
+                ranking_diagnostics["production_current_all_horizon_rank"],
+                2,
             )
 
     def test_tune_latest_dataset_keeps_current_when_optimization_gate_fails(self) -> None:
@@ -2173,6 +2253,21 @@ class PolicyAndTrainingTests(unittest.TestCase):
                     "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
                     "generated_at_utc": "2026-04-06T04:40:00+00:00",
                     "validation": {"average_log_wealth": 0.022},
+                    "forecast_quality_scorecards": {
+                        "selected_horizon": {
+                            "quality_score": 0.66,
+                            "directional_accuracy": 0.64,
+                            "probabilistic_calibration_score": 0.71,
+                            "mu_calibration": 0.013,
+                        },
+                        "all_horizon": {
+                            "quality_score": 0.58,
+                            "directional_accuracy": 0.57,
+                            "probabilistic_calibration_score": 0.63,
+                            "mu_calibration": 0.019,
+                        },
+                        "quality_score_gap_all_minus_selected": -0.08,
+                    },
                     "blocked_walk_forward_evaluation": {
                         "best_state_reset_mode_by_mean_log_wealth": "carry_on",
                         "state_reset_modes": {
@@ -2274,6 +2369,10 @@ class PolicyAndTrainingTests(unittest.TestCase):
                     config_overrides={"horizons": (1,)},
                     quick_mode=True,
                 )
+                leaderboard_payload = json.loads(
+                    Path(manifest["leaderboard_path"]).read_text(encoding="utf-8")
+                )
+                leaderboard_row = leaderboard_payload["results"][0]
 
         self.assertTrue(manifest["quick_mode"])
         self.assertEqual(manifest["selection_status"], "quick_mode_non_promotable")
@@ -2286,6 +2385,19 @@ class PolicyAndTrainingTests(unittest.TestCase):
         self.assertEqual(
             manifest["production_current_selection"]["selection_status"],
             "quick_mode_non_promotable",
+        )
+        self.assertIsNotNone(leaderboard_row)
+        self.assertEqual(
+            leaderboard_row["selected_horizon_forecast_quality_score"],  # type: ignore[index]
+            0.66,
+        )
+        self.assertEqual(
+            leaderboard_row["all_horizon_forecast_quality_score"],  # type: ignore[index]
+            0.58,
+        )
+        self.assertEqual(
+            leaderboard_row["forecast_quality_score_gap_all_minus_selected"],  # type: ignore[index]
+            -0.08,
         )
 
     def test_materialize_replay_artifact_copies_model_into_overlay(self) -> None:

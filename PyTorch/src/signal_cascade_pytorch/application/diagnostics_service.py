@@ -26,7 +26,7 @@ from ..domain.entities import OHLCVBar, TrainingExample
 from ..infrastructure.ml.model import SignalCascadeModel
 from ..infrastructure.persistence import save_json
 
-DIAGNOSTICS_SCHEMA_VERSION = 10
+DIAGNOSTICS_SCHEMA_VERSION = 12
 POLICY_SELECTION_RULE_VERSION = 4
 POLICY_SELECTION_OBJECTIVE_FLOOR_RATIO = 0.7
 POLICY_SELECTION_BASIS = (
@@ -95,35 +95,64 @@ def export_review_diagnostics(
     _write_csv(policy_summary_path, diagnostics["policy_summary"])
     _write_csv(horizon_diag_path, diagnostics["horizon_diag"])
 
+    generated_at_utc = datetime.now(timezone.utc).isoformat()
+    dataset_payload = {
+        "sample_count": len(examples),
+        "validation_sample_count": len(validation_examples),
+        "source": source_payload,
+        "source_rows_original": source_rows_original,
+        "source_rows_used": source_rows_used,
+        "base_bar_count": None if base_bars is None else len(base_bars),
+    }
+    validation_payload = diagnostics["summary"]
+    state_vector_summary = diagnostics.get("state_vector_summary", {})
+    shape_usage_summary = _build_shape_usage_summary(state_vector_summary)
+    policy_horizon_summary = _build_policy_horizon_summary(validation_payload)
+    policy_calibration_summary = _summarize_policy_calibration_sweep(
+        policy_calibration_sweep,
+        config=config,
+    )
+    forecast_quality_scorecards = _build_forecast_quality_scorecards(
+        validation=validation_payload,
+        validation_rows=diagnostics["validation_rows"],
+        validation_sample_count=len(validation_examples),
+    )
+
     summary = {
         "schema_version": DIAGNOSTICS_SCHEMA_VERSION,
         "diagnostics_schema_version": DIAGNOSTICS_SCHEMA_VERSION,
-        "generated_at_utc": datetime.now(timezone.utc).isoformat(),
+        "generated_at_utc": generated_at_utc,
         "policy_mode": "shape_aware_profit_maximization",
         "primary_state_reset_mode": config.evaluation_state_reset_mode,
         "checkpoint_audit": dict(checkpoint_audit or {}),
-        "dataset": {
-            "sample_count": len(examples),
-            "validation_sample_count": len(validation_examples),
-            "source": source_payload,
-            "source_rows_original": source_rows_original,
-            "source_rows_used": source_rows_used,
-            "base_bar_count": None if base_bars is None else len(base_bars),
-        },
-        "validation": diagnostics["summary"],
-        "state_vector_summary": diagnostics.get("state_vector_summary", {}),
-        "shape_usage_summary": _build_shape_usage_summary(
-            diagnostics.get("state_vector_summary", {})
-        ),
-        "policy_horizon_summary": _build_policy_horizon_summary(
-            diagnostics.get("summary", {})
-        ),
+        "dataset": dataset_payload,
+        "validation": validation_payload,
+        "state_vector_summary": state_vector_summary,
+        "shape_usage_summary": shape_usage_summary,
+        "policy_horizon_summary": policy_horizon_summary,
         "stateful_evaluation": stateful_evaluation,
         "blocked_walk_forward_evaluation": blocked_walk_forward_evaluation,
         "policy_calibration_sweep": policy_calibration_sweep,
-        "policy_calibration_summary": _summarize_policy_calibration_sweep(
-            policy_calibration_sweep,
+        "policy_calibration_summary": policy_calibration_summary,
+        "forecast_quality_scorecards": forecast_quality_scorecards,
+        "selection_diagnostics": _build_selection_diagnostics_payload(
+            generated_at_utc=generated_at_utc,
+            checkpoint_audit=dict(checkpoint_audit or {}),
+            dataset=dataset_payload,
+            validation=validation_payload,
+            state_vector_summary=state_vector_summary,
+            shape_usage_summary=shape_usage_summary,
+            policy_horizon_summary=policy_horizon_summary,
+            stateful_evaluation=stateful_evaluation,
+            blocked_walk_forward_evaluation=blocked_walk_forward_evaluation,
+            policy_calibration_summary=policy_calibration_summary,
+            forecast_quality_scorecards=forecast_quality_scorecards,
+        ),
+        "runtime_current": _build_runtime_current_payload(
+            generated_at_utc=generated_at_utc,
             config=config,
+            dataset=dataset_payload,
+            policy_calibration_summary=policy_calibration_summary,
         ),
         "paths": {
             "validation_rows_csv": str(validation_rows_path),
@@ -133,6 +162,336 @@ def export_review_diagnostics(
     }
     save_json(summary_path, summary)
     return summary
+
+
+def _build_selection_policy_calibration_summary(
+    policy_calibration_summary: dict[str, object],
+) -> dict[str, object]:
+    selection_policy_summary = dict(policy_calibration_summary)
+    selection_policy_summary.pop("applied_runtime_policy", None)
+    selection_policy_summary.pop("applied_runtime_row_key", None)
+    selection_policy_summary.pop("applied_runtime_policy_role", None)
+    return selection_policy_summary
+
+
+def _build_selection_diagnostics_payload(
+    *,
+    generated_at_utc: str,
+    checkpoint_audit: dict[str, object],
+    dataset: dict[str, object],
+    validation: dict[str, object],
+    state_vector_summary: dict[str, object],
+    shape_usage_summary: dict[str, object],
+    policy_horizon_summary: dict[str, object],
+    stateful_evaluation: dict[str, object],
+    blocked_walk_forward_evaluation: dict[str, object],
+    policy_calibration_summary: dict[str, object],
+    forecast_quality_scorecards: dict[str, object],
+) -> dict[str, object]:
+    return {
+        "generated_at_utc": generated_at_utc,
+        "checkpoint_audit": checkpoint_audit,
+        "dataset": dict(dataset),
+        "validation": dict(validation),
+        "state_vector_summary": dict(state_vector_summary),
+        "shape_usage_summary": dict(shape_usage_summary),
+        "policy_horizon_summary": dict(policy_horizon_summary),
+        "stateful_evaluation": dict(stateful_evaluation),
+        "blocked_walk_forward_evaluation": dict(blocked_walk_forward_evaluation),
+        "policy_calibration_summary": _build_selection_policy_calibration_summary(
+            policy_calibration_summary
+        ),
+        "forecast_quality_scorecards": dict(forecast_quality_scorecards),
+    }
+
+
+def _build_runtime_current_payload(
+    *,
+    generated_at_utc: str,
+    config: TrainingConfig,
+    dataset: dict[str, object],
+    policy_calibration_summary: dict[str, object],
+) -> dict[str, object]:
+    applied_runtime_policy_payload = policy_calibration_summary.get("applied_runtime_policy")
+    applied_runtime_policy = (
+        dict(applied_runtime_policy_payload)
+        if isinstance(applied_runtime_policy_payload, dict)
+        else _build_applied_runtime_policy(config)
+    )
+    dataset_summary = {
+        "sample_count": dataset.get("sample_count"),
+        "validation_sample_count": dataset.get("validation_sample_count"),
+        "source_rows_original": dataset.get("source_rows_original"),
+        "source_rows_used": dataset.get("source_rows_used"),
+        "base_bar_count": dataset.get("base_bar_count"),
+    }
+    return {
+        "generated_at_utc": generated_at_utc,
+        "operating_point": applied_runtime_policy,
+        "operating_point_role": str(
+            policy_calibration_summary.get("applied_runtime_policy_role")
+            or "authoritative_runtime_config"
+        ),
+        "state_reset_mode": str(config.evaluation_state_reset_mode),
+        "dataset": dataset_summary,
+        "selection_alignment": {
+            "selected_row_key": policy_calibration_summary.get("selected_row_key"),
+            "runtime_row_key": applied_runtime_policy.get("row_key"),
+            "selected_row_matches_runtime": policy_calibration_summary.get(
+                "selected_row_matches_applied_runtime"
+            ),
+        },
+    }
+
+
+def _build_forecast_quality_scorecards(
+    *,
+    validation: dict[str, object],
+    validation_rows: Sequence[dict[str, object]],
+    validation_sample_count: int | None,
+) -> dict[str, object]:
+    selected_sample_count = (
+        int(validation_sample_count)
+        if validation_sample_count is not None
+        else _resolve_selected_horizon_sample_count(validation, validation_rows)
+    )
+    selected_horizon = _build_forecast_quality_scorecard(
+        scope="selected_horizon",
+        sample_count=selected_sample_count,
+        directional_accuracy=_finite_float_or_none(validation.get("directional_accuracy")),
+        mu_calibration=_finite_float_or_none(validation.get("mu_calibration")),
+        sigma_calibration=_finite_float_or_none(validation.get("sigma_calibration")),
+        interval_1sigma_coverage=_finite_float_or_none(validation.get("interval_1sigma_coverage")),
+        interval_2sigma_coverage=_finite_float_or_none(validation.get("interval_2sigma_coverage")),
+        pit_mean=_finite_float_or_none(validation.get("pit_mean")),
+        pit_variance=_finite_float_or_none(validation.get("pit_variance")),
+        normalized_abs_error=_finite_float_or_none(validation.get("normalized_abs_error")),
+        gaussian_nll=_finite_float_or_none(validation.get("gaussian_nll")),
+        probabilistic_calibration_score=_finite_float_or_none(
+            validation.get("probabilistic_calibration_score")
+        ),
+    )
+    all_horizon = _build_all_horizon_forecast_quality_scorecard(validation_rows)
+    selected_quality_score = _finite_float_or_none(selected_horizon.get("quality_score"))
+    all_quality_score = _finite_float_or_none(all_horizon.get("quality_score"))
+    return {
+        "selected_horizon": selected_horizon,
+        "all_horizon": all_horizon,
+        "quality_score_gap_all_minus_selected": (
+            None
+            if selected_quality_score is None or all_quality_score is None
+            else all_quality_score - selected_quality_score
+        ),
+    }
+
+
+def _resolve_selected_horizon_sample_count(
+    validation: dict[str, object],
+    validation_rows: Sequence[dict[str, object]],
+) -> int | None:
+    anchor_sample_count = _finite_float_or_none(validation.get("anchor_sample_count"))
+    if anchor_sample_count is not None:
+        return int(anchor_sample_count)
+    selected_sample_ids = {
+        int(sample_id)
+        for row in validation_rows
+        if _is_selected_horizon_row(row)
+        for sample_id in [_finite_float_or_none(row.get("sample_id"))]
+        if sample_id is not None
+    }
+    if selected_sample_ids:
+        return len(selected_sample_ids)
+    return None
+
+
+def _build_all_horizon_forecast_quality_scorecard(
+    validation_rows: Sequence[dict[str, object]],
+) -> dict[str, object]:
+    directional_correct = 0
+    interval_1sigma_hits = 0
+    interval_2sigma_hits = 0
+    sample_count = 0
+    mu_errors: list[float] = []
+    sigma_errors: list[float] = []
+    pit_values: list[float] = []
+    normalized_abs_errors: list[float] = []
+    gaussian_nll_values: list[float] = []
+
+    for row in validation_rows:
+        actual_return = _finite_float_or_none(row.get("y_raw"))
+        forecast_mean = _finite_float_or_none(row.get("mu_t", row.get("mu_raw")))
+        forecast_sigma = _finite_float_or_none(row.get("sigma_t", row.get("sigma_raw")))
+        if actual_return is None or forecast_mean is None or forecast_sigma is None:
+            continue
+        sigma_safe = max(forecast_sigma, 1e-6)
+        forecast_error = actual_return - forecast_mean
+        z_score = forecast_error / sigma_safe
+        pit_value = _finite_float_or_none(row.get("pit"))
+        if pit_value is None:
+            pit_value = _gaussian_pit(z_score)
+        normalized_abs_error = _finite_float_or_none(row.get("normalized_abs_error"))
+        if normalized_abs_error is None:
+            normalized_abs_error = abs(z_score)
+
+        sample_count += 1
+        directional_correct += int(
+            _sign_from_value(forecast_mean) == _sign_from_value(actual_return)
+        )
+        interval_1sigma_hits += int(abs(forecast_error) <= sigma_safe)
+        interval_2sigma_hits += int(abs(forecast_error) <= 2.0 * sigma_safe)
+        mu_errors.append(abs(forecast_error))
+        sigma_errors.append(abs(abs(forecast_error) - forecast_sigma))
+        pit_values.append(pit_value)
+        normalized_abs_errors.append(normalized_abs_error)
+        gaussian_nll_values.append(
+            0.5 * math.log(2.0 * math.pi * (sigma_safe**2)) + (0.5 * (z_score**2))
+        )
+
+    if sample_count == 0:
+        return _build_forecast_quality_scorecard(
+            scope="all_horizon",
+            sample_count=0,
+            directional_accuracy=None,
+            mu_calibration=None,
+            sigma_calibration=None,
+            interval_1sigma_coverage=None,
+            interval_2sigma_coverage=None,
+            pit_mean=None,
+            pit_variance=None,
+            normalized_abs_error=None,
+            gaussian_nll=None,
+            probabilistic_calibration_score=None,
+        )
+
+    pit_mean = sum(pit_values) / sample_count
+    pit_variance = sum((value - pit_mean) ** 2 for value in pit_values) / sample_count
+    interval_1sigma_coverage = interval_1sigma_hits / sample_count
+    interval_2sigma_coverage = interval_2sigma_hits / sample_count
+    return _build_forecast_quality_scorecard(
+        scope="all_horizon",
+        sample_count=sample_count,
+        directional_accuracy=directional_correct / sample_count,
+        mu_calibration=sum(mu_errors) / sample_count,
+        sigma_calibration=sum(sigma_errors) / sample_count,
+        interval_1sigma_coverage=interval_1sigma_coverage,
+        interval_2sigma_coverage=interval_2sigma_coverage,
+        pit_mean=pit_mean,
+        pit_variance=pit_variance,
+        normalized_abs_error=sum(normalized_abs_errors) / sample_count,
+        gaussian_nll=sum(gaussian_nll_values) / sample_count,
+        probabilistic_calibration_score=_probabilistic_calibration_score(
+            interval_1sigma_coverage=interval_1sigma_coverage,
+            interval_2sigma_coverage=interval_2sigma_coverage,
+            pit_mean=pit_mean,
+            pit_variance=pit_variance,
+        ),
+    )
+
+
+def _build_forecast_quality_scorecard(
+    *,
+    scope: str,
+    sample_count: int | None,
+    directional_accuracy: float | None,
+    mu_calibration: float | None,
+    sigma_calibration: float | None,
+    interval_1sigma_coverage: float | None,
+    interval_2sigma_coverage: float | None,
+    pit_mean: float | None,
+    pit_variance: float | None,
+    normalized_abs_error: float | None,
+    gaussian_nll: float | None,
+    probabilistic_calibration_score: float | None,
+) -> dict[str, object]:
+    return {
+        "scope": scope,
+        "sample_count": sample_count,
+        "directional_accuracy": directional_accuracy,
+        "mu_calibration": mu_calibration,
+        "sigma_calibration": sigma_calibration,
+        "interval_1sigma_coverage": interval_1sigma_coverage,
+        "interval_2sigma_coverage": interval_2sigma_coverage,
+        "pit_mean": pit_mean,
+        "pit_variance": pit_variance,
+        "normalized_abs_error": normalized_abs_error,
+        "gaussian_nll": gaussian_nll,
+        "probabilistic_calibration_score": probabilistic_calibration_score,
+        "quality_score": _forecast_quality_score(
+            directional_accuracy=directional_accuracy,
+            mu_calibration=mu_calibration,
+            sigma_calibration=sigma_calibration,
+            normalized_abs_error=normalized_abs_error,
+            probabilistic_calibration_score=probabilistic_calibration_score,
+        ),
+    }
+
+
+def _forecast_quality_score(
+    *,
+    directional_accuracy: float | None,
+    mu_calibration: float | None,
+    sigma_calibration: float | None,
+    normalized_abs_error: float | None,
+    probabilistic_calibration_score: float | None,
+) -> float | None:
+    components = [
+        (
+            0.30,
+            _clamp01(directional_accuracy) if directional_accuracy is not None else None,
+        ),
+        (0.25, _inverse_linear_score(mu_calibration, upper_bound=0.20)),
+        (0.15, _inverse_linear_score(sigma_calibration, upper_bound=0.20)),
+        (0.15, _inverse_linear_score(normalized_abs_error, upper_bound=2.0)),
+        (
+            0.15,
+            _clamp01(probabilistic_calibration_score)
+            if probabilistic_calibration_score is not None
+            else None,
+        ),
+    ]
+    weighted_components = [
+        (weight, component)
+        for weight, component in components
+        if component is not None
+    ]
+    if not weighted_components:
+        return None
+    total_weight = sum(weight for weight, _ in weighted_components)
+    if total_weight <= 0.0:
+        return None
+    return sum(weight * component for weight, component in weighted_components) / total_weight
+
+
+def _inverse_linear_score(value: float | None, *, upper_bound: float) -> float | None:
+    if value is None or upper_bound <= 0.0:
+        return None
+    return _clamp01(1.0 - (float(value) / float(upper_bound)))
+
+
+def _clamp01(value: float | None) -> float | None:
+    if value is None:
+        return None
+    return max(0.0, min(float(value), 1.0))
+
+
+def _is_selected_horizon_row(row: dict[str, object]) -> bool:
+    for key in ("policy_horizon_selected", "selected"):
+        value = _finite_float_or_none(row.get(key))
+        if value is not None:
+            return int(value) == 1
+    return False
+
+
+def _finite_float_or_none(value: object) -> float | None:
+    if value is None:
+        return None
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(numeric):
+        return None
+    return numeric
 
 
 def build_validation_diagnostics(

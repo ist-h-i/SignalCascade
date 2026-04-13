@@ -4,12 +4,18 @@ import math
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 
+from .selection_rank_diagnostics import (
+    backfill_forecast_quality_metrics_from_session,
+    build_forecast_quality_ranking_diagnostics,
+    build_selection_divergence_scorecard,
+    build_selection_history_summary,
+)
 from ..infrastructure.persistence import load_json, save_json
 
 JST = timezone(timedelta(hours=9))
 UTC = timezone.utc
 METRICS_SCHEMA_VERSION = 4
-ANALYSIS_SCHEMA_VERSION = 10
+ANALYSIS_SCHEMA_VERSION = 14
 REQUIRED_LIVE_DIAGNOSTICS_FILES = (
     "validation_summary.json",
     "policy_summary.csv",
@@ -34,6 +40,53 @@ def _display_int_or_missing(value: object) -> str:
         return str(int(value))
     except (TypeError, ValueError):
         return "missing"
+
+
+def _display_divergence_cluster_counts(payload: object) -> str:
+    if not isinstance(payload, dict) or not payload:
+        return "-"
+    return ", ".join(
+        f"{key}={int(value)}"
+        for key, value in sorted(payload.items())
+        if key is not None and value is not None
+    ) or "-"
+
+
+def _render_divergence_row(record: object) -> str:
+    if not isinstance(record, dict):
+        return "-"
+    accepted_candidate = record.get("accepted_candidate") or "-"
+    production_candidate = record.get("production_current_candidate") or "-"
+    accepted_ranks = "/".join(
+        _display_int_or_missing(record.get(key))
+        for key in (
+            "accepted_candidate_current_rank",
+            "accepted_candidate_selected_horizon_rank",
+            "accepted_candidate_all_horizon_rank",
+        )
+    )
+    production_ranks = "/".join(
+        _display_int_or_missing(record.get(key))
+        for key in (
+            "production_current_current_rank",
+            "production_current_selected_horizon_rank",
+            "production_current_all_horizon_rank",
+        )
+    )
+    return (
+        f"{record.get('session_id', '-')}"
+        f" [{record.get('coverage_status', '-')}/{record.get('failure_mode_cluster', '-')}]"
+        f" acc=`{accepted_candidate}`"
+        f" ranks=`{accepted_ranks}`"
+        f" turn=`{_display_or_missing(record.get('accepted_candidate_blocked_turnover_mean'))}`"
+        f" mae=`{_display_or_missing(record.get('accepted_candidate_blocked_exact_smooth_position_mae_mean'))}`"
+        f" mdd=`{_display_or_missing(record.get('accepted_candidate_max_drawdown'))}`"
+        f" prod=`{production_candidate}`"
+        f" ranks=`{production_ranks}`"
+        f" turn=`{_display_or_missing(record.get('production_current_blocked_turnover_mean'))}`"
+        f" mae=`{_display_or_missing(record.get('production_current_blocked_exact_smooth_position_mae_mean'))}`"
+        f" mdd=`{_display_or_missing(record.get('production_current_max_drawdown'))}`"
+    )
 
 
 def load_required_diagnostics_summary(output_dir: Path) -> dict[str, object]:
@@ -136,9 +189,27 @@ def _build_analysis(
         diagnostics_summary.get("policy_calibration_summary", {}),
         config,
     )
+    forecast_quality_scorecards = (
+        dict(diagnostics_summary.get("forecast_quality_scorecards", {}))
+        if isinstance(diagnostics_summary.get("forecast_quality_scorecards"), dict)
+        else {}
+    )
     state_vector_summary = dict(diagnostics_summary.get("state_vector_summary", {}))
     current_alias_contract = dict(source_payload.get("current_alias_contract", {}))
     current_selection_governance = dict(source_payload.get("current_selection_governance", {}))
+    forecast_quality_ranking_diagnostics = _load_forecast_quality_ranking_diagnostics(
+        current_selection_governance
+    )
+    archive_root = _resolve_archive_root(output_dir, current_selection_governance)
+    selection_divergence_scorecard = build_selection_divergence_scorecard(
+        archive_root
+    )
+    selection_history_summary = build_selection_history_summary(
+        archive_root,
+        session_records=selection_divergence_scorecard.get("rows")
+        if isinstance(selection_divergence_scorecard.get("rows"), list)
+        else None,
+    )
     checkpoint_audit = _resolve_checkpoint_audit(metrics, config)
     rows = []
     anchor_time = datetime.fromisoformat(str(prediction["anchor_time"]))
@@ -213,6 +284,10 @@ def _build_analysis(
         "blocked_walk_forward_evaluation": blocked_walk_forward_evaluation,
         "policy_calibration_sweep": policy_calibration_sweep,
         "policy_calibration_summary": policy_calibration_summary,
+        "forecast_quality_scorecards": forecast_quality_scorecards,
+        "forecast_quality_ranking_diagnostics": forecast_quality_ranking_diagnostics,
+        "selection_divergence_scorecard": selection_divergence_scorecard,
+        "selection_history_summary": selection_history_summary,
         "artifact_contract": current_alias_contract,
         "governance": current_selection_governance,
         "claim_hardening": _build_claim_hardening(state_vector_summary),
@@ -258,6 +333,60 @@ def _build_analysis(
             "summary": _build_summary(validation, prediction),
         },
     }
+
+
+def _load_forecast_quality_ranking_diagnostics(
+    governance: dict[str, object],
+) -> dict[str, object]:
+    manifest_path = governance.get("selection_session_manifest_path")
+    if isinstance(manifest_path, str) and manifest_path.strip():
+        resolved_manifest_path = Path(manifest_path).expanduser().resolve()
+        if resolved_manifest_path.exists():
+            manifest_payload = load_json(resolved_manifest_path)
+            diagnostics = manifest_payload.get("forecast_quality_ranking_diagnostics")
+            if isinstance(diagnostics, dict):
+                return diagnostics
+
+    leaderboard_path = governance.get("selection_leaderboard_path")
+    if isinstance(leaderboard_path, str) and leaderboard_path.strip():
+        resolved_leaderboard_path = Path(leaderboard_path).expanduser().resolve()
+        if resolved_leaderboard_path.exists():
+            leaderboard_payload = load_json(resolved_leaderboard_path)
+            diagnostics = leaderboard_payload.get("forecast_quality_ranking_diagnostics")
+            if isinstance(diagnostics, dict):
+                return diagnostics
+            leaderboard_rows_payload = leaderboard_payload.get("results")
+            if isinstance(leaderboard_rows_payload, list):
+                accepted_candidate = governance.get("accepted_candidate")
+                production_current = governance.get("production_current")
+                return build_forecast_quality_ranking_diagnostics(
+                    backfill_forecast_quality_metrics_from_session(
+                        leaderboard_rows_payload,
+                        resolved_leaderboard_path.parent,
+                    ),
+                    accepted_candidate=(
+                        str(accepted_candidate.get("candidate"))
+                        if isinstance(accepted_candidate, dict)
+                        and accepted_candidate.get("candidate") is not None
+                        else None
+                    ),
+                    production_current_candidate=(
+                        str(production_current.get("candidate"))
+                        if isinstance(production_current, dict)
+                        and production_current.get("candidate") is not None
+                        else None
+                    ),
+                )
+    return {}
+
+
+def _resolve_archive_root(output_dir: Path, governance: dict[str, object]) -> Path:
+    manifest_path = governance.get("selection_session_manifest_path")
+    if isinstance(manifest_path, str) and manifest_path.strip():
+        resolved_manifest_path = Path(manifest_path).expanduser().resolve()
+        if resolved_manifest_path.exists():
+            return resolved_manifest_path.parent.parent
+    return output_dir.parent / "archive"
 
 
 def _build_summary(
@@ -515,6 +644,13 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
     blocked_walk_forward_evaluation = analysis.get("blocked_walk_forward_evaluation", {})
     policy_calibration_sweep = analysis["policy_calibration_sweep"]
     policy_calibration_summary = analysis["policy_calibration_summary"]
+    forecast_quality_scorecards = analysis.get("forecast_quality_scorecards", {})
+    forecast_quality_ranking_diagnostics = analysis.get(
+        "forecast_quality_ranking_diagnostics",
+        {},
+    )
+    selection_divergence_scorecard = analysis.get("selection_divergence_scorecard", {})
+    selection_history_summary = analysis.get("selection_history_summary", {})
     forecast = analysis["forecast"]
     rows = forecast["rows"]
     blocked_modes = (
@@ -528,6 +664,16 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
         dict(policy_calibration_summary.get("selected_row", {}))
         if policy_calibration_summary.get("selected_row") is not None
         else None
+    )
+    selected_horizon_scorecard = (
+        dict(forecast_quality_scorecards.get("selected_horizon", {}))
+        if isinstance(forecast_quality_scorecards.get("selected_horizon"), dict)
+        else {}
+    )
+    all_horizon_scorecard = (
+        dict(forecast_quality_scorecards.get("all_horizon", {}))
+        if isinstance(forecast_quality_scorecards.get("all_horizon"), dict)
+        else {}
     )
     applied_runtime_policy = (
         dict(policy_calibration_summary.get("applied_runtime_policy", {}))
@@ -760,6 +906,18 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
                 if policy_calibration_summary.get("policy_calibration_rows_sha256") is not None
                 else "- policy sweep rows sha256: `-`"
             ),
+            f"- forecast quality score (selected_horizon / all_horizon / gap): "
+            f"`{_display_or_missing(selected_horizon_scorecard.get('quality_score'))}` / "
+            f"`{_display_or_missing(all_horizon_scorecard.get('quality_score'))}` / "
+            f"`{_display_or_missing(forecast_quality_scorecards.get('quality_score_gap_all_minus_selected'))}`",
+            f"- forecast quality directional_accuracy (selected_horizon / all_horizon): "
+            f"`{_display_or_missing(selected_horizon_scorecard.get('directional_accuracy'))}` / "
+            f"`{_display_or_missing(all_horizon_scorecard.get('directional_accuracy'))}`",
+            f"- forecast quality mu_calibration / probabilistic_score (selected_horizon / all_horizon): "
+            f"`{_display_or_missing(selected_horizon_scorecard.get('mu_calibration'))}` / "
+            f"`{_display_or_missing(selected_horizon_scorecard.get('probabilistic_calibration_score'))}` / "
+            f"`{_display_or_missing(all_horizon_scorecard.get('mu_calibration'))}` / "
+            f"`{_display_or_missing(all_horizon_scorecard.get('probabilistic_calibration_score'))}`",
             "",
             "## Forecast",
             f"- anchor_time_utc / jst: `{forecast['anchor_time_utc']}` / `{forecast['anchor_time_jst']}`",
@@ -794,6 +952,80 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             f"`{_display_or_missing(governance_current.get('user_value_chart_fidelity_score'))}` / "
             f"`{_display_or_missing(governance_current.get('user_value_sigma_band_score'))}` / "
             f"`{_display_or_missing(governance_current.get('user_value_execution_stability_score'))}`",
+            f"- production current selected_horizon / all_horizon forecast quality: "
+            f"`{_display_or_missing(governance_current.get('selected_horizon_forecast_quality_score'))}` / "
+            f"`{_display_or_missing(governance_current.get('all_horizon_forecast_quality_score'))}`",
+            f"- ranking split top candidate (current / selected / all): "
+            f"`{forecast_quality_ranking_diagnostics.get('current_top_candidate', '-')}` / "
+            f"`{forecast_quality_ranking_diagnostics.get('selected_horizon_top_candidate', '-')}` / "
+            f"`{forecast_quality_ranking_diagnostics.get('all_horizon_top_candidate', '-')}`",
+            f"- ranking split Spearman (selected/current / all/current / selected/all): "
+            f"`{_display_or_missing(forecast_quality_ranking_diagnostics.get('selected_horizon_vs_current_spearman_rank_correlation'))}` / "
+            f"`{_display_or_missing(forecast_quality_ranking_diagnostics.get('all_horizon_vs_current_spearman_rank_correlation'))}` / "
+            f"`{_display_or_missing(forecast_quality_ranking_diagnostics.get('selected_horizon_vs_all_horizon_spearman_rank_correlation'))}`",
+            f"- accepted candidate rank (current / selected / all): "
+            f"`{_display_int_or_missing(forecast_quality_ranking_diagnostics.get('accepted_candidate_current_rank'))}` / "
+            f"`{_display_int_or_missing(forecast_quality_ranking_diagnostics.get('accepted_candidate_selected_horizon_rank'))}` / "
+            f"`{_display_int_or_missing(forecast_quality_ranking_diagnostics.get('accepted_candidate_all_horizon_rank'))}`",
+            f"- top-{forecast_quality_ranking_diagnostics.get('top_k', 0)} overlap with current "
+            f"(selected / all): "
+            f"`{_display_int_or_missing(forecast_quality_ranking_diagnostics.get('selected_horizon_top_k_overlap_with_current_count'))}` / "
+            f"`{_display_int_or_missing(forecast_quality_ranking_diagnostics.get('all_horizon_top_k_overlap_with_current_count'))}`",
+            f"- history sessions / accepted / production / diverged: "
+            f"`{_display_int_or_missing(selection_history_summary.get('session_count'))}` / "
+            f"`{_display_int_or_missing(selection_history_summary.get('accepted_candidate_count'))}` / "
+            f"`{_display_int_or_missing(selection_history_summary.get('production_current_candidate_count'))}` / "
+            f"`{_display_int_or_missing(selection_history_summary.get('accepted_vs_production_divergence_count'))}`",
+            f"- history accepted top-match rate (current / selected / all): "
+            f"`{_display_or_missing(selection_history_summary.get('accepted_current_top_match_ratio'))}` / "
+            f"`{_display_or_missing(selection_history_summary.get('accepted_selected_horizon_top_match_ratio'))}` / "
+            f"`{_display_or_missing(selection_history_summary.get('accepted_all_horizon_top_match_ratio'))}`",
+            f"- history accepted median rank (current / selected / all): "
+            f"`{_display_or_missing(selection_history_summary.get('accepted_candidate_current_rank_median'))}` / "
+            f"`{_display_or_missing(selection_history_summary.get('accepted_candidate_selected_horizon_rank_median'))}` / "
+            f"`{_display_or_missing(selection_history_summary.get('accepted_candidate_all_horizon_rank_median'))}`",
+            f"- history production top-match rate (current / selected / all): "
+            f"`{_display_or_missing(selection_history_summary.get('production_current_top_match_ratio'))}` / "
+            f"`{_display_or_missing(selection_history_summary.get('production_selected_horizon_top_match_ratio'))}` / "
+            f"`{_display_or_missing(selection_history_summary.get('production_all_horizon_top_match_ratio'))}`",
+            f"- history production median rank (current / selected / all): "
+            f"`{_display_or_missing(selection_history_summary.get('production_current_current_rank_median'))}` / "
+            f"`{_display_or_missing(selection_history_summary.get('production_current_selected_horizon_rank_median'))}` / "
+            f"`{_display_or_missing(selection_history_summary.get('production_current_all_horizon_rank_median'))}`",
+            f"- divergence scorecard coverage (full / partial): "
+            f"`{_display_int_or_missing(selection_divergence_scorecard.get('full_coverage_session_count'))}` / "
+            f"`{_display_int_or_missing(selection_divergence_scorecard.get('partial_coverage_session_count'))}`",
+            f"- divergence scorecard clusters (all sessions): "
+            f"`{_display_divergence_cluster_counts(selection_divergence_scorecard.get('cluster_counts'))}`",
+            f"- divergence scorecard clusters (full coverage): "
+            f"`{_display_divergence_cluster_counts(selection_divergence_scorecard.get('full_coverage_cluster_counts'))}`",
+            (
+                "- recent history snapshots: "
+                + " | ".join(
+                    (
+                        f"{session.get('session_id', '-')}:"
+                        f"acc={session.get('accepted_candidate', '-')},"
+                        f"prod={session.get('production_current_candidate', '-')},"
+                        f"ranks={_display_int_or_missing(session.get('accepted_candidate_current_rank'))}/"
+                        f"{_display_int_or_missing(session.get('accepted_candidate_selected_horizon_rank'))}/"
+                        f"{_display_int_or_missing(session.get('accepted_candidate_all_horizon_rank'))}"
+                    )
+                    for session in selection_history_summary.get("recent_sessions", [])
+                    if isinstance(session, dict)
+                )
+                if selection_history_summary.get("recent_sessions")
+                else "- recent history snapshots: `-`"
+            ),
+            (
+                "- divergence scorecard recent rows: "
+                + " | ".join(
+                    _render_divergence_row(session)
+                    for session in selection_divergence_scorecard.get("recent_rows", [])
+                    if isinstance(session, dict)
+                )
+                if selection_divergence_scorecard.get("recent_rows")
+                else "- divergence scorecard recent rows: `-`"
+            ),
             (
                 f"- accepted snapshot user_value_score / chart_fidelity / sigma_band / execution_stability: "
                 f"`{_display_or_missing(governance_accepted.get('user_value_score'))}` / "
@@ -802,6 +1034,13 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
                 f"`{_display_or_missing(governance_accepted.get('user_value_execution_stability_score'))}`"
                 if governance_accepted
                 else "- accepted snapshot user_value_score / chart_fidelity / sigma_band / execution_stability: `-`"
+            ),
+            (
+                f"- accepted snapshot selected_horizon / all_horizon forecast quality: "
+                f"`{_display_or_missing(governance_accepted.get('selected_horizon_forecast_quality_score'))}` / "
+                f"`{_display_or_missing(governance_accepted.get('all_horizon_forecast_quality_score'))}`"
+                if governance_accepted
+                else "- accepted snapshot selected_horizon / all_horizon forecast quality: `-`"
             ),
             f"- production current blocked objective / blocked turnover / max_drawdown / "
             f"exact_smooth_position_mae / trade_delta / policy_horizon: "
@@ -825,16 +1064,19 @@ def _render_markdown_report(analysis: dict[str, object]) -> str:
             ),
             (
                 f"- production minus accepted delta (avg_log_wealth / blocked_objective / "
-                f"blocked_turnover / max_drawdown / exact_smooth_position_mae / trade_delta / policy_horizon): "
+                f"blocked_turnover / max_drawdown / exact_smooth_position_mae / "
+                f"selected_horizon_quality / all_horizon_quality / trade_delta / policy_horizon): "
                 f"`{_display_or_missing(frontier_delta.get('average_log_wealth'))}` / "
                 f"`{_display_or_missing(frontier_delta.get('blocked_objective_log_wealth_minus_lambda_cvar_mean'))}` / "
                 f"`{_display_or_missing(frontier_delta.get('blocked_turnover_mean'))}` / "
                 f"`{_display_or_missing(frontier_delta.get('max_drawdown'))}` / "
                 f"`{_display_or_missing(frontier_delta.get('exact_smooth_position_mae'))}` / "
+                f"`{_display_or_missing(frontier_delta.get('selected_horizon_forecast_quality_score'))}` / "
+                f"`{_display_or_missing(frontier_delta.get('all_horizon_forecast_quality_score'))}` / "
                 f"`{_display_or_missing(frontier_delta.get('trade_delta'))}` / "
                 f"`{_display_or_missing(frontier_delta.get('policy_horizon'))}`"
                 if frontier_delta
-                else "- production minus accepted delta (avg_log_wealth / blocked_objective / blocked_turnover / max_drawdown / exact_smooth_position_mae / trade_delta / policy_horizon): `-`"
+                else "- production minus accepted delta (avg_log_wealth / blocked_objective / blocked_turnover / max_drawdown / exact_smooth_position_mae / selected_horizon_quality / all_horizon_quality / trade_delta / policy_horizon): `-`"
             ),
             f"- override priority metrics: `{governance.get('override_priority_metrics', [])}`",
             "",

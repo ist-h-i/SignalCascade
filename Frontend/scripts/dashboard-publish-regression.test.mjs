@@ -88,6 +88,8 @@ test(
     assert.equal(contract.status, 0, formatFailure('check:data:contract', contract))
 
     const dashboardData = readJson(tempDashboardPath)
+    const analysis = readJson(path.join(tempCurrentRunDir, 'analysis.json'))
+    const config = readJson(path.join(tempCurrentRunDir, 'config.json'))
     const manifest = readJson(path.join(tempCurrentRunDir, 'manifest.json'))
     const sourceMeta = readJson(path.join(tempCurrentRunDir, 'source.json'))
     const validationSummary = readJson(path.join(tempCurrentRunDir, 'validation_summary.json'))
@@ -112,12 +114,41 @@ test(
       dashboardData.governance?.selectionStatus,
       sourceMeta.current_selection_governance?.selection_status ?? null,
     )
+    assert.equal(
+      dashboardData.run.stateResetMode,
+      validationSummary.runtime_current?.operating_point?.state_reset_mode ?? config.evaluation_state_reset_mode,
+    )
+    assert.equal(
+      dashboardData.run.costMultiplier,
+      validationSummary.runtime_current?.operating_point?.cost_multiplier ?? config.policy_cost_multiplier,
+    )
+    assert.equal(
+      dashboardData.run.gammaMultiplier,
+      validationSummary.runtime_current?.operating_point?.gamma_multiplier ?? config.policy_gamma_multiplier,
+    )
+    assert.equal(
+      dashboardData.run.minPolicySigma,
+      validationSummary.runtime_current?.operating_point?.min_policy_sigma ?? config.min_policy_sigma,
+    )
+    assert.equal(
+      dashboardData.metrics.validation?.costMultiplier,
+      validationSummary.selection_diagnostics?.validation?.cost_multiplier ?? validationSummary.validation?.cost_multiplier ?? null,
+    )
+    assert.equal(
+      dashboardData.metrics.selection?.currentTopCandidate,
+      analysis.forecast_quality_ranking_diagnostics?.current_top_candidate ?? null,
+    )
+    assert.equal(
+      dashboardData.metrics.selection?.divergenceScorecard?.sessionCount,
+      analysis.selection_divergence_scorecard?.session_count ?? null,
+    )
     assert.equal(dashboardData.run.selectedHorizon, prediction.policy_horizon)
     assert.equal(dashboardData.run.position, prediction.position)
     assert.ok(dashboardData.metrics?.live)
     assert.ok(dashboardData.metrics?.structure)
     assert.ok(Array.isArray(dashboardData.metrics?.horizonDiagnostics))
     assert.ok(dashboardData.metrics.horizonDiagnostics.length > 0)
+    assert.ok(dashboardData.metrics?.selection)
   },
 )
 
